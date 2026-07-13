@@ -16,7 +16,7 @@ import { spawn as ptySpawn } from 'node-pty';
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3007;
 const DEFAULT_SESSION = 'web-main';
 
 const MIME = {
