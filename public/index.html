@@ -7,28 +7,94 @@
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <style>
       html, body { margin: 0; height: 100%; background: #1e1e1e; }
-      #app { display: flex; flex-direction: column; height: 100vh; }
+      #app { display: flex; height: 100vh; font: 13px system-ui, sans-serif; }
+
+      /* ---- Sidebar ---- */
+      #sidebar {
+        width: 240px; flex: 0 0 240px; display: flex; flex-direction: column;
+        background: #252526; border-right: 1px solid #333; color: #ddd;
+      }
+      #sidebar-head {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 10px 12px; border-bottom: 1px solid #333;
+      }
+      #sidebar-head strong { font-size: 13px; }
+      #new-session {
+        cursor: pointer; border: 1px solid #3c3c3c; background: #0e639c; color: #fff;
+        border-radius: 4px; padding: 3px 8px; font-size: 12px;
+      }
+      #new-session:hover { background: #1177bb; }
+      #session-list { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 0; }
+      .session {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #2a2a2a;
+      }
+      .session:hover { background: #2d2d2e; }
+      .session.active { background: #37373d; }
+      .session .run-dot {
+        width: 8px; height: 8px; border-radius: 50%; background: #555; flex: 0 0 auto;
+      }
+      .session .run-dot.running { background: #3fb950; }
+      .session .run-dot.attached { box-shadow: 0 0 0 2px rgba(63,185,80,0.25); }
+      .session .meta { flex: 1; min-width: 0; }
+      .session .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .session .cmd { display: block; color: #888; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .session .del {
+        cursor: pointer; border: none; background: transparent; color: #888;
+        font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 3px;
+      }
+      .session .del:hover { background: #5a1d1d; color: #f85149; }
+
+      #empty-state {
+        flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; color: #ddd; text-align: center;
+      }
+      #empty-state p { margin: 0; color: #999; }
+      #create-first {
+        cursor: pointer; border: 1px solid #3c3c3c; background: #0e639c; color: #fff;
+        border-radius: 4px; padding: 8px 16px; font-size: 13px;
+      }
+      #create-first:hover { background: #1177bb; }
+
+      /* ---- Main pane ---- */
+      #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
       #bar {
         display: flex; align-items: center; gap: 10px;
-        padding: 6px 12px; font: 13px system-ui, sans-serif;
-        color: #ddd; background: #252526; border-bottom: 1px solid #333;
+        padding: 6px 12px; color: #ddd; background: #252526; border-bottom: 1px solid #333;
       }
-      #status { display: flex; align-items: center; gap: 6px; }
+      #bar #title { font-weight: 600; }
+      #status { display: flex; align-items: center; gap: 6px; margin-left: auto; }
       #dot { width: 9px; height: 9px; border-radius: 50%; background: #888; }
       #dot.connected { background: #3fb950; }
       #dot.reconnecting { background: #d29922; }
       #dot.disconnected { background: #f85149; }
-      #term { flex: 1; min-height: 0; padding: 4px; }
+      #term-wrap { flex: 1; min-height: 0; position: relative; }
+      #term { position: absolute; inset: 0; padding: 4px; }
       .xterm { height: 100%; }
+      #term-wrap.hidden { display: none; }
     </style>
   </head>
   <body>
     <div id="app">
-      <div id="bar">
-        <strong>web-main</strong>
-        <span id="status"><span id="dot"></span><span id="statusText">connecting…</span></span>
+      <div id="sidebar">
+        <div id="sidebar-head">
+          <strong>Sessions</strong>
+          <button id="new-session" title="Create a new session">+ New</button>
+        </div>
+        <ul id="session-list"></ul>
       </div>
-      <div id="term"></div>
+
+      <div id="main">
+        <div id="bar">
+          <span id="title">no session</span>
+          <span id="status"><span id="dot"></span><span id="statusText">idle</span></span>
+        </div>
+        <div id="empty-state">
+          <p>No sessions yet.</p>
+          <button id="create-first">Create your first session</button>
+        </div>
+        <div id="term-wrap" class="hidden"><div id="term"></div></div>
+      </div>
     </div>
 
     <!-- Vendored locally: no CDN, CSP/offline safe. -->

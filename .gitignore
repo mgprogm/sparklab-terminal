@@ -1,5 +1,6 @@
 node_modules/
 public/vendor/
+data/
 *.log
 .DS_Store
 .env

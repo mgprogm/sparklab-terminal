@@ -6,6 +6,7 @@
   "scripts": {
     "smoke": "node test/smoke-pty-tmux.js",
     "acceptance": "node test/acceptance-survive-disconnect.js",
+    "acceptance:multi": "node test/acceptance-multi-session.js",
     "vendor": "node scripts/vendor-xterm.js",
     "postinstall": "node scripts/vendor-xterm.js",
     "dev": "node --watch src/server.js",

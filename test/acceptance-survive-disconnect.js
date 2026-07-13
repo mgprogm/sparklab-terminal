@@ -14,8 +14,13 @@ import WebSocket from 'ws';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const PORT = 3998;
-const SESSION = 'web-main';
-const URL = `ws://localhost:${PORT}/attach?session=${SESSION}`;
+// Phase 2 removed auto-create-on-attach, so the setup now creates the session
+// via the REST API first, then attaches (create-then-attach). SESSION/URL are
+// assigned once the POST returns the generated web-<uuid> id. Every assertion
+// below (delta/timing/live-advance) is unchanged from Phase 1.
+let SESSION = null;
+let URL = null;
+const BASE = `http://localhost:${PORT}`;
 const GAP_MS = 13000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -61,7 +66,9 @@ function maxTick(text) {
 }
 
 function cleanup() {
-  try { execFileSync('tmux', ['kill-session', '-t', SESSION], { stdio: 'ignore' }); } catch {}
+  if (SESSION) {
+    try { execFileSync('tmux', ['kill-session', '-t', SESSION], { stdio: 'ignore' }); } catch {}
+  }
   if (server && !server.killed) server.kill('SIGTERM');
 }
 
@@ -72,11 +79,19 @@ function fail(msg) {
 }
 
 async function main() {
-  // Fresh session.
-  try { execFileSync('tmux', ['kill-session', '-t', SESSION], { stdio: 'ignore' }); } catch {}
-
   await startServer();
   console.log(`gateway up on :${PORT}`);
+
+  // Phase 2: create the session via REST first (no more auto-create-on-attach).
+  const res = await fetch(`${BASE}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'phase1-acceptance' }),
+  });
+  if (res.status !== 201) fail(`POST /api/sessions returned ${res.status}, expected 201`);
+  SESSION = (await res.json()).id;
+  URL = `ws://localhost:${PORT}/attach?session=${SESSION}`;
+  console.log(`created session ${SESSION} via REST`);
 
   // --- Connection #1: start the job and observe ticks ---
   const ws1 = new WebSocket(URL);
