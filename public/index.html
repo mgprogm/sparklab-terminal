@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web Terminal</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #1e1e1e; }
+      #app { display: flex; flex-direction: column; height: 100vh; }
+      #bar {
+        display: flex; align-items: center; gap: 10px;
+        padding: 6px 12px; font: 13px system-ui, sans-serif;
+        color: #ddd; background: #252526; border-bottom: 1px solid #333;
+      }
+      #status { display: flex; align-items: center; gap: 6px; }
+      #dot { width: 9px; height: 9px; border-radius: 50%; background: #888; }
+      #dot.connected { background: #3fb950; }
+      #dot.reconnecting { background: #d29922; }
+      #dot.disconnected { background: #f85149; }
+      #term { flex: 1; min-height: 0; padding: 4px; }
+      .xterm { height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="bar">
+        <strong>web-main</strong>
+        <span id="status"><span id="dot"></span><span id="statusText">connecting…</span></span>
+      </div>
+      <div id="term"></div>
+    </div>
+
+    <!-- Vendored locally: no CDN, CSP/offline safe. -->
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/vendor/addon-webgl.js"></script>
+    <script src="/vendor/addon-web-links.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
