@@ -8,9 +8,15 @@
  * classes also guard the pre-hydration frame on small screens.
  */
 
+import { Button } from "@sparklab/ui/components/ui/button";
 import { Separator } from "@sparklab/ui/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
-import { ChevronsLeft, ChevronsRight, LogOut } from "lucide-react";
+import { ChevronsLeft, ChevronsRight, CircleUser, LogOut } from "lucide-react";
 
 import { SessionList } from "./session-list";
 
@@ -77,26 +83,46 @@ export function SessionSidebar({
         onDialogClose={onDialogClose}
       />
 
-      <Separator />
-
-      {username && !collapsed && (
-        <div
-          className="text-muted-foreground truncate px-3 py-2 text-xs"
-          title={username}
-        >
-          Signed in as <span className="text-foreground">{username}</span>
-        </div>
-      )}
+      {/* Account row — one footer line mirroring the 42px header line:
+          identity (glyph + username) on the left, compact icon-only sign-out
+          on the right. Collapsed rail centers the sign-out icon alone. */}
       {onLogout && (
-        <button
-          type="button"
-          onClick={onLogout}
-          aria-label="Sign out"
-          className="border-border text-muted-foreground hover:bg-accent hover:text-secondary-foreground flex h-[38px] w-full items-center justify-center gap-2 border-t bg-transparent text-xs font-medium tracking-wider transition-colors"
-        >
-          <LogOut className="size-3.5" />
-          {!collapsed && <span>Sign out</span>}
-        </button>
+        <>
+          <Separator />
+          <div
+            className={cn(
+              "flex h-[42px] shrink-0 items-center",
+              collapsed
+                ? "justify-center px-0"
+                : "justify-between gap-2 px-2.5",
+            )}
+          >
+            {!collapsed && (
+              <div className="flex min-w-0 items-center gap-2" title={username}>
+                <CircleUser className="text-muted-foreground size-4 shrink-0" />
+                <span className="text-foreground truncate text-xs font-medium">
+                  {username ?? "Signed in"}
+                </span>
+              </div>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="Sign out"
+                  onClick={onLogout}
+                  className="text-muted-foreground hover:text-secondary-foreground shrink-0"
+                >
+                  <LogOut className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                {username ? `Sign out (${username})` : "Sign out"}
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        </>
       )}
     </aside>
   );
