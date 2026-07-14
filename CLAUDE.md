@@ -53,6 +53,12 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 - **Reconnect resets the terminal before the redraw.** The client (`apps/terminal/src/features/terminal/connection.ts`) sets `freshConnect = true` on each (re)connect and calls `term.reset()` on the first binary frame after, so tmux's attach redraw doesn't stack on stale content.
 - **Multi-viewer sizing:** sessions are configured with `window-size latest` + `aggressive-resize on` so tmux follows the most recently active client instead of shrinking to the smallest.
 
+## Frontend UI conventions
+
+- **`DESIGN.md` (repo root) is the visual source of truth.** When creating or editing any frontend UI, base colors, typography, spacing, and component geometry on it (Warp-inspired language: warm near-charcoal canvas `#2b2622`, ink `#f7f5f0`, Inter type, understated CTAs, tight shape geometry). Prefer the existing Tailwind theme tokens (`bg-background`, `text-muted-foreground`, `border-border`, `bg-accent`, `text-chart-1`, …) which encode that palette — do not hardcode hex values that bypass them.
+- **Icons: `lucide-react` is the default icon library.** Use it for all new icons (typical inline size here is `size-3.5`/`size-4`); don't introduce another icon set or inline ad-hoc SVGs.
+- Reusable primitives live in `@sparklab/ui` (shadcn-style: `Button`, `Tooltip`, `Dialog`, `Separator`, …) — reach for those before writing bespoke markup.
+
 ## Layout
 
 - `apps/terminal-gateway/` — Node gateway (plain JS). `src/server.js` is the entire gateway: REST session CRUD + auth endpoints, `/attach` WS endpoint, tmux session management, origin allowlist, rate limiting. Sessions are `web-<uuid>`, created via `POST /api/sessions`.
