@@ -224,6 +224,38 @@ const PREFIX = "web-";
 // rejects hostile/typo path params before they ever reach tmux.
 const ID_RE = /^web-[A-Za-z0-9-]+$/;
 
+// Named keys accepted by POST /api/sessions/:id/keys. Whitelist-only: every
+// item is passed to `tmux send-keys` WITHOUT -l, so anything not listed here
+// is rejected with 400 before it can reach tmux. Mirrors AgentNamedKeySchema
+// in @sparklab/shared-types (packages/shared-types/src/agent.ts) — keep the
+// two in sync. Duplicated as a plain Set so the gateway stays dependency-free.
+const AGENT_NAMED_KEYS = new Set([
+  "Enter",
+  "Escape",
+  "Tab",
+  "Space",
+  "BSpace",
+  "Up",
+  "Down",
+  "Left",
+  "Right",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "DC",
+  "C-c",
+  "C-d",
+  "C-z",
+  "C-l",
+  "C-u",
+  "C-r",
+]);
+// text ≤ this length AND single-line goes through `send-keys -l`; anything
+// longer or multiline goes through load-buffer/paste-buffer (bracketed paste).
+const SEND_KEYS_LITERAL_MAX = 200;
+const SEND_TEXT_MAX = 10_000;
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -237,6 +269,14 @@ const MIME = {
 
 async function tmux(args) {
   return execFileAsync("tmux", args);
+}
+
+// Run tmux with `input` piped to stdin (used by `load-buffer -`). promisified
+// execFile exposes the underlying ChildProcess as `.child`.
+async function tmuxStdin(args, input) {
+  const promise = execFileAsync("tmux", args);
+  promise.child.stdin.end(input);
+  return promise;
 }
 
 async function sessionExists(name) {
@@ -565,6 +605,168 @@ async function handleApi(req, res, url) {
       console.error(`[api] scrollback failed: ${err.message}`);
       return sendJson(res, 500, { error: "failed to capture scrollback" });
     }
+  }
+
+  // GET /api/sessions/:id/screen
+  // Agent Chat: read-only PLAIN-TEXT screen capture (no ANSI — this feeds an
+  // LLM, not a terminal) plus cursor/size/mode metadata in one response.
+  // Auth required (handled above). GET is exempt from Origin check.
+  if (
+    req.method === "GET" &&
+    parts.length === 4 &&
+    parts[1] === "sessions" &&
+    parts[3] === "screen"
+  ) {
+    const id = decodeURIComponent(parts[2]);
+    if (!ID_RE.test(id)) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    if (!(await sessionExists(id))) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    // Parse history param: integer 0..2000, default 0 (visible screen only).
+    const rawHistory = url.searchParams.get("history");
+    let history = 0;
+    if (rawHistory !== null) {
+      const parsed = parseInt(rawHistory, 10);
+      if (Number.isFinite(parsed)) {
+        history = Math.min(2000, Math.max(0, parsed));
+      }
+      // If not a valid integer, fall back to default 0.
+    }
+    try {
+      // -p: stdout  -J: join wrapped lines  (deliberately NO -e: plain text)
+      // -S -<N>: include N lines of history above the visible screen
+      const captureArgs = ["capture-pane", "-p", "-J"];
+      if (history > 0) captureArgs.push("-S", `-${history}`);
+      captureArgs.push("-t", id);
+      const [capture, meta] = await Promise.all([
+        tmux(captureArgs),
+        tmux([
+          "display-message",
+          "-p",
+          "-t",
+          id,
+          "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on} #{pane_current_command}",
+        ]),
+      ]);
+      // First five fields are numeric/flag; the command name comes last so a
+      // (rare) space in it can't shift the numeric fields.
+      const fields = meta.stdout.trimEnd().split(" ");
+      return sendJson(res, 200, {
+        screen: capture.stdout,
+        cursor: { x: Number(fields[0]) || 0, y: Number(fields[1]) || 0 },
+        size: { cols: Number(fields[2]) || 0, rows: Number(fields[3]) || 0 },
+        altScreen: fields[4] === "1",
+        currentCommand: fields.slice(5).join(" "),
+      });
+    } catch (err) {
+      console.error(`[api] screen failed: ${err.message}`);
+      return sendJson(res, 500, { error: "failed to capture screen" });
+    }
+  }
+
+  // POST /api/sessions/:id/keys
+  // Agent Chat: inject input into a session. Two body shapes (mirrors
+  // SendKeysRequestSchema in @sparklab/shared-types):
+  //   { text: string }   — typed LITERALLY, never executes (no implicit Enter)
+  //   { keys: string[] } — whitelisted named keys (AGENT_NAMED_KEYS)
+  // Origin check for POST already ran above. Never kills anything.
+  if (
+    req.method === "POST" &&
+    parts.length === 4 &&
+    parts[1] === "sessions" &&
+    parts[3] === "keys"
+  ) {
+    const id = decodeURIComponent(parts[2]);
+    if (!ID_RE.test(id)) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    if (!(await sessionExists(id))) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+
+    const hasText = body.text !== undefined;
+    const hasKeys = body.keys !== undefined;
+    if (hasText === hasKeys) {
+      return sendJson(res, 400, {
+        error: "body must have exactly one of: text, keys",
+      });
+    }
+
+    if (hasText) {
+      if (typeof body.text !== "string") {
+        return sendJson(res, 400, { error: "text must be a string" });
+      }
+      if (body.text.length < 1 || body.text.length > SEND_TEXT_MAX) {
+        return sendJson(res, 400, {
+          error: `text must be 1..${SEND_TEXT_MAX} characters`,
+        });
+      }
+      const text = body.text;
+      const singleLine = !text.includes("\n") && !text.includes("\r");
+      try {
+        if (singleLine && text.length <= SEND_KEYS_LITERAL_MAX) {
+          // -l: literal (no key-name lookup); -- guards a leading "-" in text.
+          await tmux(["send-keys", "-t", id, "-l", "--", text]);
+        } else {
+          // Long/multiline text: stage in a tmux buffer and bracketed-paste it
+          // (-p), so a shell/editor receives it as a paste, not as typed
+          // commands — newlines inside the paste never execute.
+          const buf = `gw-agent-${crypto.randomUUID()}`;
+          await tmuxStdin(["load-buffer", "-b", buf, "-"], text);
+          // -d deletes the buffer after pasting.
+          await tmux(["paste-buffer", "-d", "-p", "-b", buf, "-t", id]);
+        }
+      } catch (err) {
+        console.error(`[api] keys(text) failed: ${err.message}`);
+        return sendJson(res, 500, { error: "failed to send text" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // keys variant
+    if (
+      !Array.isArray(body.keys) ||
+      body.keys.length < 1 ||
+      body.keys.length > 32
+    ) {
+      return sendJson(res, 400, { error: "keys must be an array of 1..32" });
+    }
+    for (const key of body.keys) {
+      if (typeof key !== "string" || !AGENT_NAMED_KEYS.has(key)) {
+        return sendJson(res, 400, { error: `unsupported key: ${String(key)}` });
+      }
+    }
+    try {
+      // No -l: these are tmux key names. Every item passed the whitelist.
+      await tmux(["send-keys", "-t", id, ...body.keys]);
+    } catch (err) {
+      console.error(`[api] keys(keys) failed: ${err.message}`);
+      return sendJson(res, 500, { error: "failed to send keys" });
+    }
+    res.writeHead(204);
+    res.end();
+    return true;
   }
 
   // DELETE /api/sessions/:id

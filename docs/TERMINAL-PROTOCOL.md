@@ -45,6 +45,33 @@ Response: `{ "lines": "<ANSI-colored text>" }` (`ScrollbackResponseSchema`). Unk
 
 **Client sequencing contract** (`connection.ts`): the fetch starts before the WS opens. On the first binary frame after (re)connect the client calls `term.reset()`, writes the fetched history (trimmed by the last `term.rows` lines to reduce duplication with the redraw), **then** writes the frame — tmux's attach redraw stays the single painter of the visible screen and pushes the injected history into xterm's scrollback buffer. If the first frame beats the fetch, attach proceeds without history (accepted race).
 
+### `GET /api/sessions/:id/screen?history=N` → 200
+
+Agent-facing, read-only **plain-text** capture of the visible screen (deliberately no `-e` — this feeds an LLM, not a terminal) via `tmux capture-pane -p -J`, plus cursor/size/mode metadata from one `tmux display-message` call. `history` clamps to 0–2000, default 0 (visible screen only; non-numeric values fall back to the default); when > 0 the capture also includes up to N lines of scrollback above the visible screen (`-S -N`). Auth-guarded like all `/api/*`.
+
+Response (`ScreenResponseSchema`):
+
+```json
+{
+  "screen": "plain text, wrapped lines joined",
+  "cursor": { "x": 0, "y": 3 }, // 0-based col/row in the visible pane
+  "size": { "cols": 80, "rows": 24 },
+  "altScreen": false, // true inside vim/htop/less (alternate screen)
+  "currentCommand": "bash" // command in the active pane
+}
+```
+
+Unknown or malformed id → 404.
+
+### `POST /api/sessions/:id/keys` → 204
+
+Agent-facing input injection (`SendKeysRequestSchema`). The body is exactly **one** of two shapes:
+
+- `{ "text": "echo hi" }` (1–10000 chars) — typed **literally** and guaranteed to never execute: no implicit Enter. Single-line text ≤ 200 chars goes through `tmux send-keys -l --`; longer or multiline text is staged with `tmux load-buffer` and delivered via `tmux paste-buffer -d -p` (**bracketed paste**), so embedded newlines arrive as a paste, not as typed commands.
+- `{ "keys": ["Enter"] }` (1–32 items) — named keys sent via `tmux send-keys` (no `-l`). Every item must be in the whitelist (`AgentNamedKeySchema`, duplicated as a plain Set in the gateway): `Enter Escape Tab Space BSpace Up Down Left Right Home End PageUp PageDown DC C-c C-d C-z C-l C-u C-r`. Anything else → 400 before tmux is touched.
+
+Executing a command is therefore always two explicit calls: `{text}` then `{keys:["Enter"]}`. Success: `204` (no body). Unknown session → 404; both-or-neither shape, out-of-range lengths, or a non-whitelisted key → 400. Origin-checked like all mutating REST. This endpoint only ever sends input — it can never kill a session.
+
 ### `DELETE /api/sessions/:id` → 204
 
 Kills the tmux session (the **only** place `tmux kill-session` is ever run). No body either way.

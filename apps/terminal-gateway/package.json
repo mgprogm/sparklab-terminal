@@ -7,6 +7,7 @@
     "smoke": "node test/smoke-pty-tmux.js",
     "acceptance": "node test/acceptance-survive-disconnect.js",
     "acceptance:multi": "node test/acceptance-multi-session.js",
+    "test:agent-endpoints": "node test/agent-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
     "dev": "node --env-file-if-exists=.env --watch src/server.js",
     "start": "node --env-file-if-exists=.env src/server.js"
