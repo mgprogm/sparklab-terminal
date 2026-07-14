@@ -1,0 +1,27 @@
+{
+  "name": "claude-web-terminal",
+  "version": "0.1.0",
+  "description": "Web terminal where jobs survive browser and gateway restarts, backed by tmux",
+  "type": "module",
+  "scripts": {
+    "smoke": "node test/smoke-pty-tmux.js",
+    "acceptance": "node test/acceptance-survive-disconnect.js",
+    "acceptance:multi": "node test/acceptance-multi-session.js",
+    "vendor": "node scripts/vendor-xterm.js",
+    "postinstall": "node scripts/vendor-xterm.js",
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource/dm-mono": "^5.2.7",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0"
+  }
+}
