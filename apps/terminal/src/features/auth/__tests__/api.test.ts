@@ -15,7 +15,13 @@ describe("auth api", () => {
       status: 204,
       headers: { get: () => null },
     });
-    await expect(login("tok")).resolves.toBeUndefined();
+    await expect(login("admin", "pw")).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/auth/login",
+      expect.objectContaining({
+        body: JSON.stringify({ username: "admin", password: "pw" }),
+      }),
+    );
   });
 
   it("login() throws UnauthorizedError on 401", async () => {
@@ -24,7 +30,9 @@ describe("auth api", () => {
       status: 401,
       headers: { get: () => null },
     });
-    await expect(login("bad")).rejects.toBeInstanceOf(UnauthorizedError);
+    await expect(login("admin", "bad")).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    );
   });
 
   it("login() throws RateLimitError on 429", async () => {
@@ -35,16 +43,28 @@ describe("auth api", () => {
         get: (header: string) => (header === "retry-after" ? "30" : null),
       },
     });
-    await expect(login("tok")).rejects.toBeInstanceOf(RateLimitError);
+    await expect(login("admin", "pw")).rejects.toBeInstanceOf(RateLimitError);
   });
 
-  it("me() returns data on 200", async () => {
+  it("me() returns data on 200 (open mode: no username)", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
       json: () => Promise.resolve({ authenticated: true }),
     });
     await expect(me()).resolves.toEqual({ authenticated: true });
+  });
+
+  it("me() returns username when authenticated in auth mode", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ authenticated: true, username: "admin" }),
+    });
+    await expect(me()).resolves.toEqual({
+      authenticated: true,
+      username: "admin",
+    });
   });
 
   it("me() returns null on 401", async () => {

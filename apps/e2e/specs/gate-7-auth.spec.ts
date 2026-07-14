@@ -1,21 +1,24 @@
 /**
  * Gate 7: Auth enforcement — "unauthenticated is rejected".
  *
- * The harness's global gateway runs in open mode (no GATEWAY_AUTH_TOKEN), so
+ * The harness's global gateway runs in open mode (no auth credentials), so
  * this spec swaps it for an AUTHED gateway on the same port (3907) using the
  * shared orphan-safe spawn helpers in helpers.ts. Same port matters: the
  * Next.js app's /api rewrite destination and its baked NEXT_PUBLIC_GATEWAY_URL
- * both point at 3907.
+ * both point at 3907. Auth mode is GATEWAY_AUTH_USER + GATEWAY_AUTH_PASSWORD
+ * (the plaintext dev var — this spec doubles as its coverage; the hashed
+ * production var goes through the identical verify path).
  *
  * Asserts, against the authed gateway:
  *   a. REST /api/sessions without a cookie -> 401.
- *   b. Login with wrong token -> 401 x5, then 429 with Retry-After on the 6th.
+ *   b. Wrong-password login -> 401 x5, then 429 with Retry-After on the 6th.
  *   c. /attach upgrade with a disallowed Origin -> refused pre-handshake (403).
  *   d. /attach with allowed Origin but no cookie -> handshake completes, JSON
  *      error frame, close code 4001 (the contractual no-reconnect code).
- *   e. UI journey: login screen shows, wrong token shows inline error, right
- *      token lands in the terminal shell, a browser keystroke echoes into the
- *      tmux pane, and a reload stays logged in (cookie persists).
+ *   e. UI journey: login screen shows, wrong password shows inline error,
+ *      right credentials land in the terminal shell (sidebar shows the
+ *      username), a browser keystroke echoes into the tmux pane, and a reload
+ *      stays logged in (cookie persists).
  *
  * afterAll restores an open-mode gateway on 3907 — the alphabetically-later
  * strictmode-check.spec.ts depends on it.
@@ -34,7 +37,8 @@ import {
   waitForTmuxContent,
 } from "../helpers";
 
-const AUTH_TOKEN = "gate7-secret-token";
+const AUTH_USER = "gate7-user";
+const AUTH_PASSWORD = "gate7-secret-password";
 // The browser origin the Next.js app serves from — must be allowlisted so the
 // UI journey's direct WS (ws://localhost:3907/attach) passes the origin check.
 const NEXT_ORIGIN = "http://localhost:3902";
@@ -46,7 +50,8 @@ const NEXT_ORIGIN = "http://localhost:3902";
 async function restartAuthedGateway(): Promise<void> {
   await killGatewayListener();
   await spawnOrphanGateway({
-    GATEWAY_AUTH_TOKEN: AUTH_TOKEN,
+    GATEWAY_AUTH_USER: AUTH_USER,
+    GATEWAY_AUTH_PASSWORD: AUTH_PASSWORD,
     ALLOWED_ORIGINS: NEXT_ORIGIN,
   });
 }
@@ -137,12 +142,15 @@ test.describe("Gate 7: Auth enforcement", () => {
     expect(createRes.status).toBe(401);
   });
 
-  test("b. wrong-token login is 401, 6th attempt in a minute is 429 with Retry-After", async () => {
+  test("b. wrong-password login is 401, 6th attempt in a minute is 429 with Retry-After", async () => {
     const attempt = () =>
       fetch(`${GATEWAY_URL}/api/auth/login`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: "wrong-token" }),
+        body: JSON.stringify({
+          username: AUTH_USER,
+          password: "wrong-password",
+        }),
       });
 
     for (let i = 1; i <= 5; i++) {
@@ -177,7 +185,7 @@ test.describe("Gate 7: Auth enforcement", () => {
     });
   });
 
-  test("e. UI journey: login screen, wrong token error, real login, echo, reload persists", async ({
+  test("e. UI journey: login screen, wrong password error, real login, echo, reload persists", async ({
     page,
   }) => {
     test.setTimeout(90_000);
@@ -187,7 +195,7 @@ test.describe("Gate 7: Auth enforcement", () => {
     const loginRes = await fetch(`${GATEWAY_URL}/api/auth/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: AUTH_TOKEN }),
+      body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASSWORD }),
     });
     expect(loginRes.status).toBe(204);
     const setCookie = loginRes.headers.get("set-cookie") ?? "";
@@ -207,18 +215,21 @@ test.describe("Gate 7: Auth enforcement", () => {
     // Unauthenticated browser -> login screen.
     await page.goto("/");
     await page.waitForLoadState("networkidle");
-    await expect(page.getByText("Access Token")).toBeVisible();
+    await expect(page.getByLabel("Username")).toBeVisible();
 
-    // Wrong token -> inline error, still on the login screen.
-    await page.locator("#access-token").fill("wrong-ui-token");
+    // Wrong password -> inline error, still on the login screen.
+    await page.locator("#username").fill(AUTH_USER);
+    await page.locator("#password").fill("wrong-ui-password");
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByText("Invalid token.")).toBeVisible();
+    await expect(page.getByText("Invalid username or password.")).toBeVisible();
 
-    // Correct token -> terminal shell with the seeded session listed.
-    await page.locator("#access-token").fill(AUTH_TOKEN);
+    // Correct credentials -> terminal shell with the seeded session listed
+    // and the signed-in username in the sidebar.
+    await page.locator("#password").fill(AUTH_PASSWORD);
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByText("Access Token")).toHaveCount(0);
+    await expect(page.getByLabel("Username")).toHaveCount(0);
     await expect(page.locator(`text="gate7-auth-test"`).first()).toBeVisible();
+    await expect(page.getByText(`Signed in as ${AUTH_USER}`)).toBeVisible();
 
     // Attach and prove a browser keystroke reaches the tmux session.
     await page.locator(`text="gate7-auth-test"`).first().click();
@@ -237,6 +248,6 @@ test.describe("Gate 7: Auth enforcement", () => {
     await page.reload();
     await page.waitForLoadState("networkidle");
     await expect(page.locator(`text="gate7-auth-test"`).first()).toBeVisible();
-    await expect(page.getByText("Access Token")).toHaveCount(0);
+    await expect(page.getByLabel("Username")).toHaveCount(0);
   });
 });

@@ -29,7 +29,7 @@ pnpm build / lint / typecheck / test  # turbo across all workspaces
 pnpm --filter @sparklab/terminal-gateway smoke             # node-pty attaches tmux; session outlives pty.kill()
 pnpm --filter @sparklab/terminal-gateway acceptance        # job keeps counting while disconnected, resumes live
 pnpm --filter @sparklab/terminal-gateway acceptance:multi  # multi-session isolation; DELETE is the only kill
-pnpm --filter @sparklab/e2e e2e       # Playwright gates (needs a production build with NEXT_PUBLIC_GATEWAY_URL=http://localhost:3907)
+pnpm --filter @sparklab/e2e e2e       # Playwright gates (needs a production build with NEXT_DIST_DIR=.next-e2e NEXT_PUBLIC_GATEWAY_URL=http://localhost:3907)
 ```
 
 The gateway "tests" are standalone node scripts under `apps/terminal-gateway/test/` that spawn real tmux sessions and a real gateway, assert with plain `throw`, and print `PASS`/`FAIL`. They clean up their tmux sessions; if one is interrupted, check for orphans with `tmux ls` and `tmux kill-session -t <name>`.
@@ -65,4 +65,4 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 
 ## Status & what's deliberately absent
 
-Phase 1 (attach/detach, reconnect), Phase 2 (multi-session REST + UI), and Phase 3 (Workstream A: token auth, origin allowlist, rate limiting, loopback bind, deploy docs; Workstream B: scrollback restore, session status badges) are done (2026-07-14). Expose the gateway only via the reverse-proxy topology in `docs/DEPLOYMENT.md` with `GATEWAY_AUTH_TOKEN` set. **Not yet implemented (Phase 4):** multi-user isolation, session sharing / read-only viewers, mobile phase-2 extras (PWA, pinch-zoom).
+Phase 1 (attach/detach, reconnect), Phase 2 (multi-session REST + UI), and Phase 3 (Workstream A: auth, origin allowlist, rate limiting, loopback bind, deploy docs; Workstream B: scrollback restore, session status badges) are done (2026-07-14). Auth is single-user username/password (`GATEWAY_AUTH_USER` + `GATEWAY_AUTH_PASSWORD_HASH`, scrypt via `pnpm --filter @sparklab/terminal-gateway hash-password`; plaintext `GATEWAY_AUTH_PASSWORD` for dev/tests) — it replaced the original `GATEWAY_AUTH_TOKEN`, which the gateway now hard-rejects at startup. Expose the gateway only via the reverse-proxy topology in `docs/DEPLOYMENT.md` with auth credentials set. **Not yet implemented (Phase 4):** multi-user isolation, session sharing / read-only viewers, mobile phase-2 extras (PWA, pinch-zoom).

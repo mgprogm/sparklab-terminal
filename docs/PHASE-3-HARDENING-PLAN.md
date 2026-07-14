@@ -32,6 +32,8 @@ Today `server.on('upgrade')` (`apps/terminal-gateway/src/server.js:273`) accepts
 
 ### A2. Token auth (single-user) on REST + WS
 
+> **Superseded (2026-07-14):** the shared token shipped as planned, then was replaced by single-user username/password auth (`GATEWAY_AUTH_USER` + scrypt `GATEWAY_AUTH_PASSWORD_HASH`). The session/cookie/enforcement design below is unchanged; only the credential check differs. See `docs/DEPLOYMENT.md`.
+
 Single shared secret, browser session via cookie. No user accounts, no password storage.
 
 - **Secret**: `GATEWAY_AUTH_TOKEN` env. If unset, gateway runs in today's open mode **only when bound to loopback** (see A3); refuses to start unbound+tokenless.

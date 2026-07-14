@@ -26,7 +26,7 @@ import { cn } from "@sparklab/ui/lib/utils";
 import { Menu } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { authKeys, useLogout } from "@/features/auth";
+import { authKeys, useAuthStatus, useLogout } from "@/features/auth";
 
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
@@ -48,6 +48,9 @@ import type { ModifierSnapshot } from "../keys";
 export function TerminalShell() {
   const queryClient = useQueryClient();
   const logoutMutation = useLogout();
+  // `username` is only present in auth mode; in open mode (dev, no
+  // credentials) Sign out would be a silent no-op, so it isn't offered.
+  const { data: me } = useAuthStatus();
   const {
     activeSessionId,
     setActiveSessionId,
@@ -213,7 +216,8 @@ export function TerminalShell() {
           onDeleteSession={handleDeleteSession}
           onToggleCollapse={toggleSidebar}
           onDialogClose={handleDialogClose}
-          onLogout={() => logoutMutation.mutate()}
+          username={me?.username}
+          onLogout={me?.username ? () => logoutMutation.mutate() : undefined}
         />
       )}
 

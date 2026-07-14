@@ -20,7 +20,7 @@ function wrap() {
 describe("useAuthStatus", () => {
   beforeEach(() => mockFetch.mockReset());
 
-  it("returns authenticated:true on success", async () => {
+  it("returns authenticated:true on success (open mode: no username)", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -29,6 +29,20 @@ describe("useAuthStatus", () => {
     const { result } = renderHook(() => useAuthStatus(), { wrapper: wrap() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual({ authenticated: true });
+  });
+
+  it("passes through username in auth mode", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ authenticated: true, username: "admin" }),
+    });
+    const { result } = renderHook(() => useAuthStatus(), { wrapper: wrap() });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({
+      authenticated: true,
+      username: "admin",
+    });
   });
 
   it("returns null when me() returns null (401)", async () => {

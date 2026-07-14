@@ -16,35 +16,56 @@ export function LoginScreen() {
   const error = loginMutation.error;
   const isRateLimited = error instanceof RateLimitError;
 
-  const onSubmit = ({ token }: LoginBody) => {
-    loginMutation.mutate({ token });
+  const onSubmit = ({ username, password }: LoginBody) => {
+    loginMutation.mutate({ username, password });
   };
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center bg-[#2b2622] px-4 text-[#f7f5f0]">
       <h1 className="mb-6 text-3xl font-semibold tracking-tight">
-        Web Terminal
+        Sparklab Terminal
       </h1>
       <section className="bg-background w-full max-w-sm rounded-lg border border-[#4a443f] p-6 shadow-xl">
         <form className="space-y-5" onSubmit={form.handleSubmit(onSubmit)}>
           <div className="space-y-2">
-            <Label htmlFor="access-token">Access Token</Label>
+            <Label htmlFor="username">Username</Label>
             <Input
-              id="access-token"
+              id="username"
+              type="text"
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className="text-base"
+              aria-invalid={Boolean(form.formState.errors.username)}
+              {...form.register("username")}
+            />
+            {form.formState.errors.username && (
+              <p className="text-destructive text-sm">
+                {form.formState.errors.username.message}
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
               type="password"
               autoComplete="current-password"
               className="text-base"
-              aria-invalid={Boolean(form.formState.errors.token)}
-              {...form.register("token")}
+              aria-invalid={Boolean(form.formState.errors.password)}
+              {...form.register("password")}
             />
-            {form.formState.errors.token && (
+            {form.formState.errors.password && (
               <p className="text-destructive text-sm">
-                {form.formState.errors.token.message}
+                {form.formState.errors.password.message}
               </p>
             )}
           </div>
           {error instanceof UnauthorizedError && (
-            <p className="text-destructive text-sm">Invalid token.</p>
+            <p className="text-destructive text-sm">
+              Invalid username or password.
+            </p>
           )}
           {isRateLimited && (
             <p className="text-destructive text-sm">

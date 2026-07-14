@@ -17,11 +17,11 @@ export class RateLimitError extends Error {
   }
 }
 
-export async function login(token: string): Promise<void> {
+export async function login(username: string, password: string): Promise<void> {
   const res = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ username, password }),
   });
 
   if (res.status === 429) {

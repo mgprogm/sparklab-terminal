@@ -25,6 +25,8 @@ interface SessionSidebarProps {
   onToggleCollapse: () => void;
   /** Called after any dialog closes so the terminal can reclaim focus. */
   onDialogClose?: () => void;
+  /** Signed-in username; absent in open mode (dev, auth disabled). */
+  username?: string;
   onLogout?: () => void;
 }
 
@@ -37,6 +39,7 @@ export function SessionSidebar({
   onDeleteSession,
   onToggleCollapse,
   onDialogClose,
+  username,
   onLogout,
 }: SessionSidebarProps) {
   return (
@@ -58,6 +61,14 @@ export function SessionSidebar({
 
       <Separator />
 
+      {username && !collapsed && (
+        <div
+          className="text-muted-foreground truncate px-3 py-2 text-xs"
+          title={username}
+        >
+          Signed in as <span className="text-foreground">{username}</span>
+        </div>
+      )}
       {onLogout && (
         <button
           type="button"

@@ -7,8 +7,9 @@
     "smoke": "node test/smoke-pty-tmux.js",
     "acceptance": "node test/acceptance-survive-disconnect.js",
     "acceptance:multi": "node test/acceptance-multi-session.js",
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "hash-password": "node scripts/hash-password.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "start": "node --env-file-if-exists=.env src/server.js"
   },
   "dependencies": {
     "node-pty": "^1.0.0",

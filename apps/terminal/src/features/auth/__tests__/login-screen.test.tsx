@@ -27,27 +27,32 @@ describe("LoginScreen", () => {
     } as unknown as ReturnType<typeof useLogin>);
   });
 
-  it("renders token field and submit button", () => {
+  it("renders username, password fields and submit button", () => {
     render(<LoginScreen />, { wrapper: wrap() });
-    expect(screen.getByLabelText(/access token/i)).toBeTruthy();
+    expect(screen.getByLabelText(/username/i)).toBeTruthy();
+    expect(screen.getByLabelText(/password/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: /sign in/i })).toBeTruthy();
   });
 
-  it("submits form with entered token", async () => {
+  it("submits form with entered credentials", async () => {
     const user = userEvent.setup();
 
     render(<LoginScreen />, { wrapper: wrap() });
 
-    await user.type(screen.getByLabelText(/access token/i), "secret-token");
+    await user.type(screen.getByLabelText(/username/i), "admin");
+    await user.type(screen.getByLabelText(/password/i), "secret-password");
     await user.click(screen.getByRole("button", { name: /sign in/i }));
 
     const mutate = vi.mocked(useLogin).mock.results[0]!.value.mutate;
     await waitFor(() =>
-      expect(mutate).toHaveBeenCalledWith({ token: "secret-token" }),
+      expect(mutate).toHaveBeenCalledWith({
+        username: "admin",
+        password: "secret-password",
+      }),
     );
   });
 
-  it("shows invalid token error on 401", () => {
+  it("shows invalid credentials error on 401", () => {
     vi.mocked(useLogin).mockReturnValue({
       mutate: vi.fn(),
       isPending: false,
@@ -56,6 +61,6 @@ describe("LoginScreen", () => {
 
     render(<LoginScreen />, { wrapper: wrap() });
 
-    expect(screen.getByText(/invalid token/i)).toBeTruthy();
+    expect(screen.getByText(/invalid username or password/i)).toBeTruthy();
   });
 });

@@ -57,7 +57,7 @@ Always `{ "error": "<message>" }`.
 
 Token auth, cookie sessions, origin allowlist, rate limiting. Schemas live in `packages/shared-types/src/auth.ts` (including `WS_CLOSE_UNAUTHORIZED = 4001`).
 
-**Open mode:** when `GATEWAY_AUTH_TOKEN` is unset, auth and origin checks are fully disabled. The gateway refuses to start tokenless on a non-loopback `HOST` (`process.exit(1)`).
+**Open mode:** when no auth credentials (`GATEWAY_AUTH_USER` + `GATEWAY_AUTH_PASSWORD_HASH`/`GATEWAY_AUTH_PASSWORD`) are set, auth and origin checks are fully disabled. The gateway refuses to start credential-less on a non-loopback `HOST` (`process.exit(1)`).
 
 ### Auth endpoints (no session cookie required)
 
