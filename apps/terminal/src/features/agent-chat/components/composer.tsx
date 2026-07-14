@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * Composer: a target-picker chip row + an auto-growing textarea + send/stop.
- * The target defaults to "Auto" (the focused terminal); picking a session pins
- * it. Enter sends, Shift+Enter inserts a newline. While the agent is working
- * the send button becomes a Stop that interrupts the turn.
+ * Composer: a single unified input box — an auto-growing textarea over a slim
+ * footer holding the target-picker chip (left) and send/stop (right). The
+ * target defaults to "Auto" (the focused terminal); picking a session pins it.
+ * Enter sends, Shift+Enter inserts a newline. While the agent is working the
+ * send button becomes a Stop that interrupts the turn.
  */
 import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowUp, ChevronDown, Pin, Square } from "lucide-react";
@@ -40,12 +41,16 @@ export function Composer({
   const targetName =
     sessions.find((s) => s.id === effectiveTarget)?.name ?? "no session";
 
-  // Auto-grow: reset then clamp to ~6 rows.
+  // Auto-grow: reset then clamp to ~6 rows. Only show the scrollbar once the
+  // content actually exceeds the clamp, otherwise a sub-pixel scrollHeight
+  // rounding leaves an unwanted scrollbar on a single empty line.
   useLayoutEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 132)}px`;
+    const next = Math.min(ta.scrollHeight, 132);
+    ta.style.height = `${next}px`;
+    ta.style.overflowY = ta.scrollHeight > 132 ? "auto" : "hidden";
   }, [text]);
 
   const submit = () => {
@@ -56,43 +61,8 @@ export function Composer({
   };
 
   return (
-    <div className="border-border flex flex-col gap-2 border-t px-3 py-2.5">
-      <div className="flex items-center">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="border-border bg-secondary/50 text-foreground flex h-6 items-center gap-1.5 rounded-sm border px-2 text-xs"
-            >
-              {pinnedTargetId ? (
-                <Pin className="text-chart-2 size-3" />
-              ) : (
-                <span className="text-muted-foreground">Auto ·</span>
-              )}
-              <span className="max-w-32 truncate">{targetName}</span>
-              <ChevronDown className="text-muted-foreground size-3" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-48">
-            <DropdownMenuItem onClick={() => setPinnedTargetId(null)}>
-              <span className="text-muted-foreground">
-                Auto (follow focused terminal)
-              </span>
-            </DropdownMenuItem>
-            {sessions.map((s) => (
-              <DropdownMenuItem
-                key={s.id}
-                onClick={() => setPinnedTargetId(s.id)}
-              >
-                <span className="bg-chart-1 size-[6px] rounded-full" />
-                <span className="truncate">{s.name}</span>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      <div className="flex items-end gap-2">
+    <div className="border-border border-t px-3 py-2.5">
+      <div className="bg-secondary border-border focus-within:border-ring/60 flex flex-col rounded-md border transition-colors">
         <textarea
           ref={taRef}
           rows={1}
@@ -105,31 +75,67 @@ export function Composer({
             }
           }}
           placeholder="Ask the agent…"
-          className="bg-secondary border-border text-foreground placeholder:text-muted-foreground max-h-[132px] min-h-9 flex-1 resize-none rounded-sm border px-3 py-2 text-base leading-relaxed outline-none sm:text-sm"
+          className="text-foreground placeholder:text-muted-foreground max-h-[132px] min-h-8 resize-none bg-transparent px-3 pb-1 pt-2 text-base leading-relaxed outline-none sm:text-sm"
         />
-        {working ? (
-          <button
-            type="button"
-            onClick={onStop}
-            aria-label="Stop the agent"
-            className="border-chart-2/50 text-chart-2 hover:bg-chart-2/10 flex size-7 shrink-0 items-center justify-center rounded-sm border transition-colors"
-          >
-            <Square className="size-3 fill-current" />
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!text.trim()}
-            aria-label="Send"
-            className={cn(
-              "bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-sm transition-opacity",
-              !text.trim() && "opacity-40",
-            )}
-          >
-            <ArrowUp className="size-4" />
-          </button>
-        )}
+
+        <div className="flex items-center justify-between gap-2 px-2 pb-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 min-w-0 items-center gap-1.5 rounded-sm px-1.5 text-xs transition-colors"
+              >
+                {pinnedTargetId ? (
+                  <Pin className="text-chart-2 size-3 shrink-0" />
+                ) : (
+                  <span>Auto ·</span>
+                )}
+                <span className="max-w-32 truncate">{targetName}</span>
+                <ChevronDown className="size-3 shrink-0" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-48">
+              <DropdownMenuItem onClick={() => setPinnedTargetId(null)}>
+                <span className="text-muted-foreground">
+                  Auto (follow focused terminal)
+                </span>
+              </DropdownMenuItem>
+              {sessions.map((s) => (
+                <DropdownMenuItem
+                  key={s.id}
+                  onClick={() => setPinnedTargetId(s.id)}
+                >
+                  <span className="bg-chart-1 size-[6px] rounded-full" />
+                  <span className="truncate">{s.name}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {working ? (
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop the agent"
+              className="border-chart-2/50 text-chart-2 hover:bg-chart-2/10 flex size-7 shrink-0 items-center justify-center rounded-sm border transition-colors"
+            >
+              <Square className="size-3 fill-current" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!text.trim()}
+              aria-label="Send"
+              className={cn(
+                "bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-sm transition-opacity",
+                !text.trim() && "opacity-40",
+              )}
+            >
+              <ArrowUp className="size-4" />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

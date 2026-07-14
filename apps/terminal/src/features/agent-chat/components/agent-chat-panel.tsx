@@ -238,7 +238,7 @@ function MessageStream({
     <div
       ref={scrollRef}
       onScroll={onScroll}
-      className="flex-1 space-y-3 overflow-y-auto px-3.5 py-3"
+      className="[&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/40 flex-1 space-y-3 overflow-y-auto px-3.5 py-3 [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-1.5"
     >
       {entries.map((e) => {
         switch (e.kind) {
