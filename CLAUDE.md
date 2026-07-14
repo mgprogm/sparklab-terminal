@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Explore via the knowledge graph first (graphify)
+
+This repo has a graphify knowledge graph in `graphify-out/` (gitignored, regenerable). Use it **before** grep/find sweeps — one read of the report answers most structural questions in far fewer tokens:
+
+- **Start here for any exploration or planning:** read `graphify-out/GRAPH_REPORT.md` (structure, hubs, communities, cross-links).
+- **Structural questions** ("what calls X?", "how does X connect to Y?"): query `graphify-out/graph.json` or invoke the `/graphify` skill.
+- **If `graphify-out/` is missing** (fresh clone) or stale after significant changes, regenerate it off-session (no Claude tokens; ~$0.07 on Azure):
+
+  ```bash
+  set -a; . ~/workspaces/sparklab/graphify/.env; set +a
+  /home/sparklab/miniconda3/bin/python3.13 \
+    ~/workspaces/sparklab/graphify/scripts/graphify_azure.py "$(pwd)" --no-viz
+  ```
+
 ## What this is
 
 A web terminal whose defining property is that **jobs survive the browser and the gateway**. Closing the tab, losing the network, or restarting the Node gateway must never kill a running process. `docs/DESIGN-SYSTEM.md` is the authoritative design and rationale — read it before making architectural changes.
