@@ -4,7 +4,10 @@
  * All terminal-content assertions go through tmux (capture-pane, display,
  * list-clients, etc.) — never through xterm's canvas/DOM rendering.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Page } from "@playwright/test";
 
@@ -14,6 +17,81 @@ export const GATEWAY_PORT = 3907;
 export const NEXT_PORT = 3902;
 export const BASE_URL = `http://localhost:${NEXT_PORT}`;
 export const GATEWAY_URL = `http://localhost:${GATEWAY_PORT}`;
+
+const HELPERS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const GATEWAY_DIR = path.resolve(HELPERS_DIR, "../..", "apps/terminal-gateway");
+
+// ---------- gateway lifecycle helpers (gate-7 / gate-8) ----------
+//
+// Specs that swap the gateway must spawn replacements that are fully
+// decoupled from the Playwright worker that spawned them:
+// - stdio: "ignore" — piped stdio ties the child to the worker and readiness
+//   parsing of stdout is then impossible after the worker rotates; readiness
+//   is a TCP probe instead.
+// - detached + unref — own process group, no handle keeping the worker alive.
+// Even so, a worker's delayed teardown has been observed to reap gateways it
+// spawned (~5s after worker rotation). Specs running in a DIFFERENT worker
+// must therefore take ownership: kill the inherited listener and spawn their
+// own (see gate-8), rather than probe-and-reuse.
+
+/** True when something is accepting TCP connections on the port. */
+export function isPortAccepting(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.connect({ port, host: "127.0.0.1" });
+    const done = (ok: boolean) => {
+      sock.destroy();
+      resolve(ok);
+    };
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+    sock.setTimeout(1000, () => done(false));
+  });
+}
+
+/**
+ * Kill whatever LISTENS on GATEWAY_PORT. -sTCP:LISTEN is load-bearing: a bare
+ * `lsof -ti:PORT` also matches CLIENT sockets — including the Playwright
+ * worker's own undici keep-alive connections — and kill -9 would take the
+ * worker itself down.
+ */
+export async function killGatewayListener(): Promise<void> {
+  await execFileAsync("bash", [
+    "-c",
+    `lsof -ti tcp:${GATEWAY_PORT} -sTCP:LISTEN | xargs -r kill -9`,
+  ]).catch(() => {});
+}
+
+/**
+ * Spawn a gateway on GATEWAY_PORT and wait until it accepts connections.
+ * `extraEnv` supplies auth mode (GATEWAY_AUTH_TOKEN, ALLOWED_ORIGINS);
+ * open mode otherwise (GATEWAY_AUTH_TOKEN/ALLOWED_ORIGINS stripped).
+ */
+export async function spawnOrphanGateway(
+  extraEnv: Record<string, string> = {},
+): Promise<number> {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PORT: String(GATEWAY_PORT),
+  };
+  delete env.GATEWAY_AUTH_TOKEN;
+  delete env.ALLOWED_ORIGINS;
+  Object.assign(env, extraEnv);
+  const child = spawn("node", ["src/server.js"], {
+    env,
+    stdio: "ignore",
+    detached: true,
+    cwd: GATEWAY_DIR,
+  });
+  child.unref();
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (await isPortAccepting(GATEWAY_PORT)) return child.pid ?? -1;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(
+    `gateway on port ${GATEWAY_PORT} did not accept connections within 15s`,
+  );
+}
 
 // ---------- tmux helpers ----------
 

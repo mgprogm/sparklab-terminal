@@ -1,8 +1,9 @@
 /**
  * Gate 8: Scrollback restore on reconnect (Phase 3 B1).
  *
- * Runs against the harness's open-mode gateway (restored by gate-7's
- * afterAll), like gates 2-6.
+ * Runs against an open-mode gateway like gates 2-6 — but spawns its OWN in
+ * beforeAll (see there): this file runs in a separate worker, and gateways
+ * spawned by a previous worker die with that worker's delayed teardown.
  *
  * Asserts:
  *   a. REST: GET /api/sessions/:id/scrollback returns history (early `seq`
@@ -34,6 +35,8 @@ import {
   createSession,
   deleteSession,
   captureTmuxPane,
+  killGatewayListener,
+  spawnOrphanGateway,
   tmuxSendKeys,
   waitForConnected,
   waitForShellReady,
@@ -75,6 +78,16 @@ test.describe("Gate 8: Scrollback restore", () => {
   let sessionId: string;
 
   test.beforeAll(async () => {
+    // Take OWNERSHIP of the gateway. This file's test.use(launchOptions)
+    // forces a separate worker; the open-mode gateway inherited from gate-7's
+    // afterAll belongs to the PREVIOUS worker, whose delayed teardown reaps
+    // it a few seconds into this file (observed as: 8a green, then the
+    // gateway vanishing mid-8b). A conditional "spawn only if the port is
+    // down" probe races that delayed reap, so unconditionally replace the
+    // listener with a gateway owned by THIS worker.
+    await killGatewayListener();
+    await spawnOrphanGateway();
+
     const session = await createSession("scrollback-test");
     sessionId = session.id;
     await waitForShellReady(sessionId);
@@ -91,6 +104,8 @@ test.describe("Gate 8: Scrollback restore", () => {
     await tmuxSendKeys(sessionId, ":q!").catch(() => {});
     await new Promise((r) => setTimeout(r, 500));
     await deleteSession(sessionId).catch(() => {});
+    // Our open-mode gateway on 3907 IS the state every other spec expects —
+    // leave it listening (suite-level hygiene reaps it after the run).
   });
 
   test("a. REST scrollback returns history, clamps lines, 404s bogus ids", async () => {

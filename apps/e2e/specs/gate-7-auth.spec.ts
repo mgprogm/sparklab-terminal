@@ -3,7 +3,7 @@
  *
  * The harness's global gateway runs in open mode (no GATEWAY_AUTH_TOKEN), so
  * this spec swaps it for an AUTHED gateway on the same port (3907) using the
- * same kill/respawn mechanism gate-3 already uses. Same port matters: the
+ * shared orphan-safe spawn helpers in helpers.ts. Same port matters: the
  * Next.js app's /api rewrite destination and its baked NEXT_PUBLIC_GATEWAY_URL
  * both point at 3907.
  *
@@ -20,82 +20,35 @@
  * afterAll restores an open-mode gateway on 3907 — the alphabetically-later
  * strictmode-check.spec.ts depends on it.
  */
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { test, expect } from "@playwright/test";
 import WebSocket from "ws";
 
 import {
   GATEWAY_PORT,
   GATEWAY_URL,
+  killGatewayListener,
+  spawnOrphanGateway,
   tmux,
   waitForConnected,
   waitForShellReady,
   waitForTmuxContent,
 } from "../helpers";
 
-const execFileAsync = promisify(execFile);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, "../../..");
-const GATEWAY_DIR = path.resolve(REPO_ROOT, "apps/terminal-gateway");
-
 const AUTH_TOKEN = "gate7-secret-token";
 // The browser origin the Next.js app serves from — must be allowlisted so the
 // UI journey's direct WS (ws://localhost:3907/attach) passes the origin check.
 const NEXT_ORIGIN = "http://localhost:3902";
 
-// ---------- gateway lifecycle helpers (same mechanism as gate-3) ----------
+// Gateway swaps use the shared orphan-safe helpers (stdio:"ignore" +
+// detached + unref + TCP readiness probe) so replacements are never tied to
+// this Playwright worker's stdio or teardown.
 
-async function killGatewayOnPort(): Promise<void> {
-  // -sTCP:LISTEN is load-bearing: a bare `lsof -ti:PORT` also matches CLIENT
-  // sockets — including this Playwright worker's own undici keep-alive
-  // connections to the gateway — and kill -9 would take the worker down.
-  await execFileAsync("bash", [
-    "-c",
-    `lsof -ti tcp:${GATEWAY_PORT} -sTCP:LISTEN | xargs -r kill -9`,
-  ]).catch(() => {});
-}
-
-/**
- * Spawn a gateway on GATEWAY_PORT and wait for its "listening" line.
- * Pass `authed: true` for GATEWAY_AUTH_TOKEN mode; open mode otherwise.
- */
-async function spawnGateway(authed: boolean): Promise<ChildProcess> {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    PORT: String(GATEWAY_PORT),
-  };
-  // Open mode requires the token to be truly absent, not empty-string-set.
-  delete env.GATEWAY_AUTH_TOKEN;
-  delete env.ALLOWED_ORIGINS;
-  if (authed) {
-    env.GATEWAY_AUTH_TOKEN = AUTH_TOKEN;
-    env.ALLOWED_ORIGINS = NEXT_ORIGIN;
-  }
-  const child = spawn("node", ["src/server.js"], {
-    env,
-    stdio: "pipe",
-    detached: true,
-    cwd: GATEWAY_DIR,
+async function restartAuthedGateway(): Promise<void> {
+  await killGatewayListener();
+  await spawnOrphanGateway({
+    GATEWAY_AUTH_TOKEN: AUTH_TOKEN,
+    ALLOWED_ORIGINS: NEXT_ORIGIN,
   });
-  const ready = await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), 15_000);
-    child.stdout?.on("data", (data: Buffer) => {
-      if (data.toString().includes("listening")) {
-        clearTimeout(timer);
-        resolve(true);
-      }
-    });
-  });
-  expect(ready).toBe(true);
-  return child;
-}
-
-async function restartAuthedGateway(): Promise<ChildProcess> {
-  await killGatewayOnPort();
-  return spawnGateway(true);
 }
 
 // ---------- ws helpers ----------
@@ -142,13 +95,12 @@ function attemptAttach(origin: string): Promise<{
 // ---------- spec ----------
 
 test.describe("Gate 7: Auth enforcement", () => {
-  let authedGateway: ChildProcess | undefined;
   let sessionId: string | undefined;
   let nodeCookie: string | undefined;
 
   test.beforeAll(async () => {
     // Swap the open-mode webServer gateway for an authed one on the same port.
-    authedGateway = await restartAuthedGateway();
+    await restartAuthedGateway();
   });
 
   test.afterAll(async () => {
@@ -166,10 +118,11 @@ test.describe("Gate 7: Auth enforcement", () => {
       await tmux(["kill-session", "-t", sessionId]).catch(() => {});
     }
     // Restore an OPEN-MODE gateway for the specs that run after this one.
-    await killGatewayOnPort();
-    const openGateway = await spawnGateway(false);
-    openGateway.unref();
-    authedGateway = undefined;
+    // NOTE: this replacement is owned by THIS worker; specs running in a
+    // different worker (gate-8) must take ownership rather than reuse it,
+    // because a worker's delayed teardown reaps gateways it spawned.
+    await killGatewayListener();
+    await spawnOrphanGateway();
   });
 
   test("a. REST /api/sessions without cookie is 401", async () => {
@@ -213,7 +166,7 @@ test.describe("Gate 7: Auth enforcement", () => {
   test("d. /attach without cookie completes handshake, sends error frame, closes 4001", async () => {
     // Restart the authed gateway to reset the in-memory login rate-limit
     // window burned by test b (and prove auth state is process-local).
-    authedGateway = await restartAuthedGateway();
+    await restartAuthedGateway();
 
     const result = await attemptAttach(NEXT_ORIGIN);
     expect(result.kind).toBe("closed");
