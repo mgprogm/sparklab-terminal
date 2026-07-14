@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 
 import { Providers } from "@/components/providers";
 
@@ -9,6 +9,20 @@ export const metadata: Metadata = {
   description: "Web terminal with persistent tmux sessions",
 };
 
+// Mobile UX spec §2.1/§5: viewport-fit=cover makes env(safe-area-inset-*)
+// non-zero on notched devices; interactive-widget=resizes-content makes
+// Android Chrome shrink the layout viewport when the keyboard opens (iOS is
+// handled by the visualViewport fallback). No maximumScale/userScalable —
+// pinch-zoom stays available for accessibility; iOS input auto-zoom is fixed
+// via 16px mobile input font in globals.css instead.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  interactiveWidget: "resizes-content",
+  themeColor: "#2b2622",
+};
+
 export default function RootLayout({
   children,
 }: {
@@ -16,7 +30,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      <body className="h-screen overflow-hidden antialiased">
+      <body className="h-dvh overflow-hidden antialiased">
         <Providers>{children}</Providers>
       </body>
     </html>

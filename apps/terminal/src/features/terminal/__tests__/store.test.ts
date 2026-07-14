@@ -13,6 +13,7 @@ describe("useTerminalStore", () => {
     useTerminalStore.setState({
       activeSessionId: null,
       sidebarCollapsed: false,
+      mobileSidebarOpen: false,
     });
   });
 
@@ -20,6 +21,7 @@ describe("useTerminalStore", () => {
     useTerminalStore.setState({
       activeSessionId: null,
       sidebarCollapsed: false,
+      mobileSidebarOpen: false,
     });
   });
 
@@ -56,6 +58,27 @@ describe("useTerminalStore", () => {
       useTerminalStore.getState().toggleSidebar();
       expect(useTerminalStore.getState().sidebarCollapsed).toBe(false);
     });
+  });
+
+  describe("mobileSidebarOpen", () => {
+    it("defaults to false", () => {
+      expect(useTerminalStore.getState().mobileSidebarOpen).toBe(false);
+    });
+
+    it("setMobileSidebarOpen(true) opens the drawer", () => {
+      useTerminalStore.getState().setMobileSidebarOpen(true);
+      expect(useTerminalStore.getState().mobileSidebarOpen).toBe(true);
+    });
+
+    it("toggleMobileSidebar flips the state", () => {
+      useTerminalStore.getState().toggleMobileSidebar();
+      expect(useTerminalStore.getState().mobileSidebarOpen).toBe(true);
+      useTerminalStore.getState().toggleMobileSidebar();
+      expect(useTerminalStore.getState().mobileSidebarOpen).toBe(false);
+    });
+
+    // Persistence exclusion is covered in store-persist.test.ts (jsdom —
+    // the persist API needs localStorage, which node env lacks).
   });
 
   describe("fallback behavior when active session vanishes", () => {

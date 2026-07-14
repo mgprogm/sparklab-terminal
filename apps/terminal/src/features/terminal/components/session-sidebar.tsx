@@ -1,57 +1,19 @@
 "use client";
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@sparklab/ui/components/ui/alert-dialog";
-import { Button } from "@sparklab/ui/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@sparklab/ui/components/ui/dialog";
-import { Input } from "@sparklab/ui/components/ui/input";
-import { ScrollArea } from "@sparklab/ui/components/ui/scroll-area";
+/**
+ * SessionSidebar — the desktop (≥ md) inline sidebar: an <aside> wrapping
+ * SessionList plus the collapse toggle. On mobile the sidebar is replaced by
+ * a Sheet drawer in TerminalShell (mobile UX spec §1.2); the `hidden md:flex`
+ * classes also guard the pre-hydration frame on small screens.
+ */
+
 import { Separator } from "@sparklab/ui/components/ui/separator";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
-import {
-  ChevronsLeft,
-  ChevronsRight,
-  Plus,
-  Trash2,
-  Terminal,
-} from "lucide-react";
-import { useState } from "react";
+import { ChevronsLeft, ChevronsRight } from "lucide-react";
+
+import { SessionList } from "./session-list";
 
 import type { SessionInfo } from "@sparklab/shared-types";
-
-// Shell processes that don't count as "running a job".
-const SHELLS = new Set([
-  "bash",
-  "sh",
-  "zsh",
-  "fish",
-  "dash",
-  "-bash",
-  "-sh",
-  "-zsh",
-]);
-function isRunning(cmd: string): boolean {
-  return !!cmd && !SHELLS.has(cmd);
-}
 
 interface SessionSidebarProps {
   sessions: SessionInfo[];
@@ -75,259 +37,43 @@ export function SessionSidebar({
   onToggleCollapse,
   onDialogClose,
 }: SessionSidebarProps) {
-  // ---- Create dialog state ----
-  const [createOpen, setCreateOpen] = useState(false);
-  const [newName, setNewName] = useState("");
-
-  // ---- Delete dialog state ----
-  const [deleteTarget, setDeleteTarget] = useState<SessionInfo | null>(null);
-
-  const handleCreate = () => {
-    onCreateSession(newName.trim() || undefined);
-    setNewName("");
-    setCreateOpen(false);
-    onDialogClose?.();
-  };
-
-  const handleCreateCancel = () => {
-    setNewName("");
-    setCreateOpen(false);
-    onDialogClose?.();
-  };
-
-  const handleDelete = () => {
-    if (deleteTarget) {
-      onDeleteSession(deleteTarget.id);
-    }
-    setDeleteTarget(null);
-    onDialogClose?.();
-  };
-
-  const handleDeleteCancel = () => {
-    setDeleteTarget(null);
-    onDialogClose?.();
-  };
-
   return (
-    <>
-      <aside
-        className={cn(
-          "border-border bg-background flex h-full flex-col border-r transition-[width,flex-basis] duration-0",
-          collapsed ? "w-[52px] flex-[0_0_52px]" : "w-[248px] flex-[0_0_248px]",
+    <aside
+      className={cn(
+        "border-border bg-background hidden h-full flex-col border-r transition-[width,flex-basis] duration-0 md:flex",
+        collapsed ? "w-[52px] flex-[0_0_52px]" : "w-[248px] flex-[0_0_248px]",
+      )}
+    >
+      <SessionList
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        collapsed={collapsed}
+        onSelectSession={onSelectSession}
+        onCreateSession={onCreateSession}
+        onDeleteSession={onDeleteSession}
+        onDialogClose={onDialogClose}
+      />
+
+      <Separator />
+
+      {/* Collapse toggle (desktop-only affordance) */}
+      <button
+        type="button"
+        className="border-border text-muted-foreground hover:bg-accent hover:text-secondary-foreground flex h-[38px] items-center justify-center gap-2 border-t bg-transparent text-xs font-medium tracking-wider transition-colors"
+        onClick={onToggleCollapse}
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {collapsed ? (
+          <ChevronsRight className="size-3.5" />
+        ) : (
+          <>
+            <ChevronsLeft className="size-3.5" />
+            <span>Collapse</span>
+          </>
         )}
-      >
-        {/* Header */}
-        <div
-          className={cn(
-            "border-border flex h-[42px] items-center border-b",
-            collapsed ? "justify-center px-0" : "justify-between px-3.5",
-          )}
-        >
-          {!collapsed && (
-            <span className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
-              Sessions
-            </span>
-          )}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="default"
-                size={collapsed ? "icon-xs" : "xs"}
-                onClick={() => setCreateOpen(true)}
-              >
-                <Plus className="size-3.5" />
-                {!collapsed && <span>New</span>}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="right">Create a new session</TooltipContent>
-          </Tooltip>
-        </div>
-
-        {/* Session list */}
-        <ScrollArea className="flex-1">
-          <div className={cn("space-y-0.5", collapsed ? "p-1" : "p-1.5")}>
-            {sessions.map((s) => (
-              <Tooltip key={s.id}>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (s.id !== activeSessionId) onSelectSession(s.id);
-                    }}
-                    className={cn(
-                      "group flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left transition-colors",
-                      collapsed && "justify-center px-0 py-2",
-                      s.id === activeSessionId
-                        ? "border-l-primary bg-secondary border-l-2"
-                        : "hover:bg-accent border-l-2 border-l-transparent",
-                    )}
-                  >
-                    {/* Status dot */}
-                    <span
-                      className={cn(
-                        "size-[7px] shrink-0 rounded-full",
-                        isRunning(s.currentCommand)
-                          ? "bg-chart-1"
-                          : "bg-muted-foreground",
-                        s.attached && "ring-chart-1/30 ring-2",
-                      )}
-                      title={
-                        (isRunning(s.currentCommand)
-                          ? `running: ${s.currentCommand}`
-                          : "idle shell") + (s.attached ? " (attached)" : "")
-                      }
-                    />
-
-                    {/* Name + command */}
-                    {!collapsed && (
-                      <div className="min-w-0 flex-1">
-                        <span
-                          className={cn(
-                            "block truncate text-sm",
-                            s.id === activeSessionId
-                              ? "text-foreground"
-                              : "text-secondary-foreground",
-                          )}
-                        >
-                          {s.name}
-                        </span>
-                        {s.currentCommand && (
-                          <span className="text-muted-foreground block truncate font-mono text-xs">
-                            {s.currentCommand}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Delete button */}
-                    {!collapsed && (
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:bg-destructive/20 hover:text-destructive shrink-0 rounded-sm p-1 opacity-0 transition-all group-hover:opacity-100"
-                        title="Delete session (kills the running job)"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDeleteTarget(s);
-                        }}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </button>
-                    )}
-                  </button>
-                </TooltipTrigger>
-                {collapsed && (
-                  <TooltipContent side="right">{s.name}</TooltipContent>
-                )}
-              </Tooltip>
-            ))}
-
-            {sessions.length === 0 && !collapsed && (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <Terminal className="text-muted-foreground size-8" />
-                <p className="text-muted-foreground text-sm">
-                  No sessions yet.
-                </p>
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={() => setCreateOpen(true)}
-                >
-                  Create your first session
-                </Button>
-              </div>
-            )}
-          </div>
-        </ScrollArea>
-
-        <Separator />
-
-        {/* Collapse toggle */}
-        <button
-          type="button"
-          className="border-border text-muted-foreground hover:bg-accent hover:text-secondary-foreground flex h-[38px] items-center justify-center gap-2 border-t bg-transparent text-xs font-medium tracking-wider transition-colors"
-          onClick={onToggleCollapse}
-          aria-expanded={!collapsed}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          {collapsed ? (
-            <ChevronsRight className="size-3.5" />
-          ) : (
-            <>
-              <ChevronsLeft className="size-3.5" />
-              <span>Collapse</span>
-            </>
-          )}
-        </button>
-      </aside>
-
-      {/* ---- Create session dialog ---- */}
-      <Dialog
-        open={createOpen}
-        onOpenChange={(open) => {
-          if (!open) handleCreateCancel();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>New session</DialogTitle>
-          </DialogHeader>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleCreate();
-            }}
-          >
-            <Input
-              placeholder="Session name (optional)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              autoFocus
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <DialogFooter className="mt-4">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={handleCreateCancel}
-              >
-                Cancel
-              </Button>
-              <Button type="submit">Create</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* ---- Delete session alert dialog ---- */}
-      <AlertDialog
-        open={!!deleteTarget}
-        onOpenChange={(open) => {
-          if (!open) handleDeleteCancel();
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete session</AlertDialogTitle>
-            <AlertDialogDescription>
-              Delete &quot;{deleteTarget?.name ?? deleteTarget?.id}&quot;? This
-              kills the running job.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={handleDeleteCancel}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleDelete}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
+      </button>
+    </aside>
   );
 }

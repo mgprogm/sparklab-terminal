@@ -19,7 +19,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type RefObject } from "react";
 
 import "@xterm/xterm/css/xterm.css";
 
@@ -28,6 +28,18 @@ import {
   type ConnectionCallbacks,
   type ConnectionStatus,
 } from "../connection";
+import { applyModifiers, type ModifierSnapshot } from "../keys";
+
+/**
+ * Imperative handle exposed to the shell (mobile UX spec §3.4): focus
+ * restoration, raw input injection for the extra-keys bar (binary WS frame
+ * path, same as keystrokes), and DECCKM state for arrow-key sequences.
+ */
+export interface TerminalHandle {
+  focus: () => void;
+  sendInput: (data: string) => void;
+  getApplicationCursorKeysMode: () => boolean;
+}
 
 export interface XTermProps {
   /** The session id to connect to, or null for "no session". */
@@ -36,15 +48,25 @@ export interface XTermProps {
   onStatusChange?: (status: ConnectionStatus, text: string) => void;
   /** Called when a server error frame fires (deleted/invalid session). */
   onSessionError?: () => void;
+  /** Populated with the imperative TerminalHandle (stable ref from useRef). */
+  handleRef?: RefObject<TerminalHandle | null>;
+  /** Sticky-modifier state owned by the extra-keys bar (stable ref). */
+  modifiersRef?: RefObject<ModifierSnapshot | null>;
 }
 
 // Stable encoder reused across all keystroke sends.
 const encoder = new TextEncoder();
 
+// Mobile font sizing (mobile UX spec §4.3): 13px below 430px, else 14px.
+const SMALL_SCREEN_QUERY = "(max-width: 429px)";
+const fontSizeFor = (small: boolean) => (small ? 13 : 14);
+
 export function XTermComponent({
   sessionId,
   onStatusChange,
   onSessionError,
+  handleRef,
+  modifiersRef,
 }: XTermProps) {
   // ---- Refs for the one-shot lifecycle ----
   const containerRef = useRef<HTMLDivElement>(null);
@@ -65,11 +87,13 @@ export function XTermComponent({
     const container = containerRef.current;
     if (!container) return;
 
+    const smallScreen = window.matchMedia(SMALL_SCREEN_QUERY);
+
     const term = new Terminal({
       cursorBlink: true,
       fontFamily:
         "'DM Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
-      fontSize: 14,
+      fontSize: fontSizeFor(smallScreen.matches),
       scrollback: 10_000,
       // Warp-inspired warm-dark theme matching the gateway's public/index.html.
       theme: {
@@ -106,8 +130,11 @@ export function XTermComponent({
     fitRef.current = fitAddon;
 
     // Keystrokes: xterm gives a string → encode to raw UTF-8 bytes → binary.
+    // Sticky Ctrl/Alt from the extra-keys bar are applied (and consumed)
+    // first — a plain string transform, still one binary frame (spec §3.5).
     const dataDisposable = term.onData((data) => {
-      connectionRef.current?.send(encoder.encode(data));
+      const payload = applyModifiers(data, modifiersRef?.current);
+      connectionRef.current?.send(encoder.encode(payload));
     });
 
     // Resize: notify the gateway so tmux can adjust.
@@ -115,16 +142,33 @@ export function XTermComponent({
       connectionRef.current?.sendResize();
     });
 
-    // ResizeObserver: refit terminal when container size changes.
+    // ResizeObserver: refit terminal when container size changes. If the
+    // viewport was scrolled to the bottom before the fit, keep it pinned
+    // there so the prompt row stays visible above the mobile keyboard /
+    // extra-keys bar (spec §2.4).
     const ro = new ResizeObserver(() => {
       try {
+        const buffer = term.buffer.active;
+        const atBottom = buffer.viewportY === buffer.baseY;
         fitAddon.fit();
+        if (atBottom) term.scrollToBottom();
       } catch {
         /* container might be detached */
       }
     });
     ro.observe(container);
     roRef.current = ro;
+
+    // Breakpoint-aware font size (spec §4.3): update + refit on crossing.
+    const onFontBreakpointChange = (e: MediaQueryListEvent) => {
+      term.options.fontSize = fontSizeFor(e.matches);
+      try {
+        fitAddon.fit();
+      } catch {
+        /* noop */
+      }
+    };
+    smallScreen.addEventListener("change", onFontBreakpointChange);
 
     // Initial fit.
     try {
@@ -142,6 +186,7 @@ export function XTermComponent({
       }
       dataDisposable.dispose();
       resizeDisposable.dispose();
+      smallScreen.removeEventListener("change", onFontBreakpointChange);
       ro.disconnect();
       roRef.current = null;
       fitRef.current = null;
@@ -209,11 +254,29 @@ export function XTermComponent({
     }
   }, [focus]);
 
+  // Imperative handle for the shell / extra-keys bar (spec §3.4). sendInput
+  // uses the exact same binary-frame path as keystrokes.
+  useEffect(() => {
+    if (!handleRef) return;
+    handleRef.current = {
+      focus,
+      sendInput: (data: string) => {
+        connectionRef.current?.send(encoder.encode(data));
+      },
+      getApplicationCursorKeysMode: () =>
+        termRef.current?.modes.applicationCursorKeysMode ?? false,
+    };
+    return () => {
+      handleRef.current = null;
+    };
+  }, [handleRef, focus]);
+
   return (
     <div
       ref={containerRef}
       className="absolute inset-0 p-[10px_8px]"
-      style={{ background: "#2b2622" }}
+      // Tap-highlight reset (spec §4.2) — no flash on touch-to-focus.
+      style={{ background: "#2b2622", WebkitTapHighlightColor: "transparent" }}
     />
   );
 }

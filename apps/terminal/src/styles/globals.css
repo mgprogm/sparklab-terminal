@@ -3,3 +3,29 @@
 
 /* Scan the ui package for Tailwind classes used in components. */
 @source "../../../../packages/ui/src";
+
+/*
+ * Mobile hardening (mobile UX spec §4.2/§2.5/§5).
+ */
+
+/* Kill pull-to-refresh / overscroll chaining — a downward drag in the
+ * terminal must never reload the page and drop the WebSocket (B9). */
+html,
+body {
+  overscroll-behavior: none;
+}
+
+@media (max-width: 767px) {
+  /* iOS Safari auto-zooms the page when focusing any input < 16px, and the
+   * zoom persists after dismissal (B8). Scoped fix — desktop keeps text-sm. */
+  input,
+  textarea {
+    font-size: 16px;
+  }
+
+  /* Match the terminal background so safe-area gutters and the keyboard
+   * band don't flash a different color (§5). */
+  body {
+    background-color: #2b2622;
+  }
+}

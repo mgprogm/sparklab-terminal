@@ -7,21 +7,40 @@
  * XTerm component together. The XTerm component is never remounted on session
  * switch; switching happens via the `sessionId` prop → the effect inside
  * XTermComponent disposes the old Connection and creates a new one.
+ *
+ * Mobile (< md, mobile UX spec §1): the inline sidebar is replaced by a left
+ * Sheet drawer opened from a hamburger button; the root height tracks the
+ * visual viewport (`--app-height`, iOS keyboard fallback) and an extra-keys
+ * bar renders below the terminal on coarse-pointer devices.
  */
 
+import { Button } from "@sparklab/ui/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from "@sparklab/ui/components/ui/sheet";
 import { cn } from "@sparklab/ui/lib/utils";
+import { Menu } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DynamicXTerm } from "./dynamic-xterm";
+import { ExtraKeysBar } from "./extra-keys-bar";
+import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
+import { useMediaQuery } from "../hooks/use-media-query";
 import {
   useCreateSession,
   useDeleteSession,
   useSessions,
 } from "../hooks/use-sessions";
+import { useVisualViewport } from "../hooks/use-visual-viewport";
 import { useTerminalStore } from "../store";
 
+import type { TerminalHandle } from "./xterm";
 import type { ConnectionStatus } from "../connection";
+import type { ModifierSnapshot } from "../keys";
 
 export function TerminalShell() {
   const {
@@ -29,6 +48,8 @@ export function TerminalShell() {
     setActiveSessionId,
     sidebarCollapsed,
     toggleSidebar,
+    mobileSidebarOpen,
+    setMobileSidebarOpen,
   } = useTerminalStore();
 
   const { data: sessions = [] } = useSessions();
@@ -42,6 +63,16 @@ export function TerminalShell() {
 
   // Ref to the xterm container for focus restoration.
   const termContainerRef = useRef<HTMLDivElement>(null);
+  // Imperative terminal handle (focus / sendInput / cursor-keys mode).
+  const terminalHandleRef = useRef<TerminalHandle | null>(null);
+  // Sticky Ctrl/Alt state shared between the extra-keys bar and xterm onData.
+  const modifiersRef = useRef<ModifierSnapshot | null>(null);
+
+  // `< md` = mobile: overlay drawer instead of the inline sidebar (§1.1).
+  const isMobile = useMediaQuery("(max-width: 767px)");
+
+  // iOS keyboard fallback: mirror visualViewport.height into --app-height.
+  useVisualViewport();
 
   // ---- "Active session vanished → fall back" ----
   useEffect(() => {
@@ -123,6 +154,33 @@ export function TerminalShell() {
     }
   }, []);
 
+  // ---- Mobile drawer wrappers: auto-close on select/create/delete (§1.2).
+  // No focus restoration on mobile — refocusing xterm would summon the
+  // keyboard uninvited; the user taps the terminal instead (§4.1).
+  const handleMobileSelectSession = useCallback(
+    (id: string) => {
+      handleSelectSession(id);
+      setMobileSidebarOpen(false);
+    },
+    [handleSelectSession, setMobileSidebarOpen],
+  );
+
+  const handleMobileCreateSession = useCallback(
+    (name?: string) => {
+      handleCreateSession(name);
+      setMobileSidebarOpen(false);
+    },
+    [handleCreateSession, setMobileSidebarOpen],
+  );
+
+  const handleMobileDeleteSession = useCallback(
+    (id: string) => {
+      handleDeleteSession(id);
+      setMobileSidebarOpen(false);
+    },
+    [handleDeleteSession, setMobileSidebarOpen],
+  );
+
   const activeMeta = sessions.find((s) => s.id === activeSessionId);
 
   // Status dot color classes matching the original design.
@@ -134,31 +192,66 @@ export function TerminalShell() {
   );
 
   return (
-    <div className="bg-background text-secondary-foreground flex h-screen overflow-hidden font-sans text-sm antialiased">
-      <SessionSidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        collapsed={sidebarCollapsed}
-        onSelectSession={handleSelectSession}
-        onCreateSession={handleCreateSession}
-        onDeleteSession={handleDeleteSession}
-        onToggleCollapse={toggleSidebar}
-        onDialogClose={handleDialogClose}
-      />
+    <div className="bg-background text-secondary-foreground flex h-[var(--app-height,100dvh)] overflow-hidden pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)] font-sans text-sm antialiased">
+      {/* Desktop inline sidebar (hidden < md via CSS, unmounted on mobile). */}
+      {!isMobile && (
+        <SessionSidebar
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          collapsed={sidebarCollapsed}
+          onSelectSession={handleSelectSession}
+          onCreateSession={handleCreateSession}
+          onDeleteSession={handleDeleteSession}
+          onToggleCollapse={toggleSidebar}
+          onDialogClose={handleDialogClose}
+        />
+      )}
+
+      {/* Mobile left drawer with the same (always-expanded) session list. */}
+      {isMobile && (
+        <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+          <SheetContent
+            side="left"
+            className="w-[min(80vw,300px)] max-w-none gap-0"
+          >
+            <SheetTitle className="sr-only">Sessions</SheetTitle>
+            <SheetDescription className="sr-only">
+              Select, create, or delete a terminal session.
+            </SheetDescription>
+            <SessionList
+              sessions={sessions}
+              activeSessionId={activeSessionId}
+              variant="drawer"
+              onSelectSession={handleMobileSelectSession}
+              onCreateSession={handleMobileCreateSession}
+              onDeleteSession={handleMobileDeleteSession}
+            />
+          </SheetContent>
+        </Sheet>
+      )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Header bar */}
-        <div className="border-border flex h-[42px] items-center gap-2.5 border-b px-4">
+        <div className="border-border flex h-[42px] min-w-0 items-center gap-2.5 border-b px-4">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="-ml-2.5 size-11 shrink-0 md:hidden"
+            aria-label="Open sessions"
+            onClick={() => setMobileSidebarOpen(true)}
+          >
+            <Menu className="size-5" />
+          </Button>
           <span
             className={cn(
-              "text-sm font-medium",
+              "min-w-0 truncate text-sm font-medium",
               activeSessionId ? "text-foreground" : "text-muted-foreground",
             )}
           >
             {activeMeta?.name ??
               (activeSessionId ? activeSessionId : "no session")}
           </span>
-          <span className="ml-auto flex items-center gap-1.5">
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
             <span className={dotClass} />
             <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">
               {status.text}
@@ -167,12 +260,17 @@ export function TerminalShell() {
         </div>
 
         {/* Terminal viewport or empty state */}
-        <div className="relative flex-1 overflow-hidden" ref={termContainerRef}>
+        <div
+          className="relative min-h-0 flex-1 overflow-hidden"
+          ref={termContainerRef}
+        >
           {activeSessionId ? (
             <DynamicXTerm
               sessionId={activeSessionId}
               onStatusChange={handleStatusChange}
               onSessionError={handleSessionError}
+              handleRef={terminalHandleRef}
+              modifiersRef={modifiersRef}
             />
           ) : (
             <div className="flex h-full items-center justify-center">
@@ -180,6 +278,12 @@ export function TerminalShell() {
             </div>
           )}
         </div>
+
+        {/* Extra keys — coarse-pointer devices only (CSS-gated, §3.2). */}
+        <ExtraKeysBar
+          handleRef={terminalHandleRef}
+          modifiersRef={modifiersRef}
+        />
       </div>
     </div>
   );
