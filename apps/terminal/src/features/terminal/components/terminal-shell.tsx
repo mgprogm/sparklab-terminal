@@ -31,6 +31,7 @@ import {
   AgentActivityOverlay,
   AgentChatPanel,
   AgentFab,
+  useAgentStore,
 } from "@/features/agent-chat";
 
 import { DynamicXTerm } from "./dynamic-xterm";
@@ -45,6 +46,7 @@ import {
   useDeleteSession,
   useSessions,
 } from "../hooks/use-sessions";
+import { useUrlFlagSync } from "../hooks/use-url-flag-sync";
 import { useVisualViewport } from "../hooks/use-visual-viewport";
 import { resolveActiveSession } from "../session-fallback";
 import { useTerminalStore } from "../store";
@@ -69,6 +71,10 @@ export function TerminalShell() {
     settingsOpen,
     setSettingsOpen,
   } = useTerminalStore();
+
+  // Agent panel open state lives in the agent-chat store (persisted there).
+  const agentPanelOpen = useAgentStore((s) => s.panelOpen);
+  const setAgentPanelOpen = useAgentStore((s) => s.setPanelOpen);
 
   const { data: sessions = [], isSuccess: sessionsLoaded } = useSessions();
   const createSession = useCreateSession();
@@ -97,6 +103,9 @@ export function TerminalShell() {
   // against the loaded list. Routes only through setActiveSessionId — never
   // touches XTerm props, so the no-remount invariant holds.
   useSessionUrlSync(activeSessionId, setActiveSessionId);
+  // `?settings` and `?agent` open the settings dialog / agent panel on load.
+  useUrlFlagSync("settings", settingsOpen, setSettingsOpen);
+  useUrlFlagSync("agent", agentPanelOpen, setAgentPanelOpen);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
