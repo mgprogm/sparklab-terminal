@@ -49,22 +49,39 @@ export function isPortAccepting(port: number): Promise<boolean> {
 }
 
 /**
- * Kill whatever LISTENS on GATEWAY_PORT. -sTCP:LISTEN is load-bearing: a bare
- * `lsof -ti:PORT` also matches CLIENT sockets — including the Playwright
- * worker's own undici keep-alive connections — and kill -9 would take the
- * worker itself down.
+ * Kill whatever LISTENS on GATEWAY_PORT, and WAIT until the port actually
+ * stops accepting. -sTCP:LISTEN is load-bearing: a bare `lsof -ti:PORT` also
+ * matches CLIENT sockets — including the Playwright worker's own undici
+ * keep-alive connections — and kill -9 would take the worker itself down.
+ *
+ * The wait is equally load-bearing: kill -9 returns before the kernel tears
+ * down the victim's listen socket. Spawning a replacement in that window
+ * makes it crash with EADDRINUSE while the readiness probe happily connects
+ * to the DYING listener — "ready" flips to a dead port moments later
+ * (observed as ECONNRESET/ECONNREFUSED on the first WS attach in gate-7d).
  */
 export async function killGatewayListener(): Promise<void> {
-  await execFileAsync("bash", [
-    "-c",
-    `lsof -ti tcp:${GATEWAY_PORT} -sTCP:LISTEN | xargs -r kill -9`,
-  ]).catch(() => {});
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    await execFileAsync("bash", [
+      "-c",
+      `lsof -ti tcp:${GATEWAY_PORT} -sTCP:LISTEN | xargs -r kill -9`,
+    ]).catch(() => {});
+    if (!(await isPortAccepting(GATEWAY_PORT))) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `port ${GATEWAY_PORT} still accepting 10s after killing its listener`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 /**
  * Spawn a gateway on GATEWAY_PORT and wait until it accepts connections.
- * `extraEnv` supplies auth mode (GATEWAY_AUTH_TOKEN, ALLOWED_ORIGINS);
- * open mode otherwise (GATEWAY_AUTH_TOKEN/ALLOWED_ORIGINS stripped).
+ * `extraEnv` supplies auth mode (GATEWAY_AUTH_USER + GATEWAY_AUTH_PASSWORD,
+ * ALLOWED_ORIGINS); open mode otherwise (all auth vars stripped —
+ * GATEWAY_AUTH_TOKEN included, since the gateway hard-fails on the legacy var).
  */
 export async function spawnOrphanGateway(
   extraEnv: Record<string, string> = {},
@@ -74,6 +91,9 @@ export async function spawnOrphanGateway(
     PORT: String(GATEWAY_PORT),
   };
   delete env.GATEWAY_AUTH_TOKEN;
+  delete env.GATEWAY_AUTH_USER;
+  delete env.GATEWAY_AUTH_PASSWORD;
+  delete env.GATEWAY_AUTH_PASSWORD_HASH;
   delete env.ALLOWED_ORIGINS;
   Object.assign(env, extraEnv);
   const child = spawn("node", ["src/server.js"], {
@@ -83,8 +103,22 @@ export async function spawnOrphanGateway(
     cwd: GATEWAY_DIR,
   });
   child.unref();
+  // A child that dies before becoming ready (EADDRINUSE against a
+  // half-dead predecessor, fatal config) must fail the spec loudly — the
+  // TCP probe alone can't tell "our gateway is ready" from "some other
+  // listener answered". killGatewayListener() waiting for port release
+  // prevents the EADDRINUSE case; this catches anything else.
+  let exited: number | null = null;
+  child.on("exit", (code) => {
+    exited = code ?? -1;
+  });
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
+    if (exited !== null) {
+      throw new Error(
+        `gateway on port ${GATEWAY_PORT} exited with code ${String(exited)} before accepting connections`,
+      );
+    }
     if (await isPortAccepting(GATEWAY_PORT)) return child.pid ?? -1;
     await new Promise((r) => setTimeout(r, 250));
   }

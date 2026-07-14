@@ -6,6 +6,7 @@ node_modules/
 
 # Next.js
 .next/
+.next-e2e/
 
 # Build outputs
 dist/

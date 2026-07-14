@@ -43,7 +43,10 @@ export default defineConfig({
       // with NEXT_PUBLIC_GATEWAY_URL pointing at the test gateway BEFORE
       // running Playwright. The rewrite destination is also set via the env var
       // at start time (rewrites read the var at config load, not at build).
-      command: `NEXT_PUBLIC_GATEWAY_URL=http://localhost:${GATEWAY_PORT} npx next start -p ${NEXT_PORT}`,
+      // NEXT_DIST_DIR isolates the e2e build in .next-e2e: a concurrently
+      // running `next dev` rewrites .next and corrupts the prod manifest
+      // ("routesManifest.dataRoutes is not iterable" at next start).
+      command: `NEXT_DIST_DIR=.next-e2e NEXT_PUBLIC_GATEWAY_URL=http://localhost:${GATEWAY_PORT} npx next start -p ${NEXT_PORT}`,
       port: NEXT_PORT,
       reuseExistingServer: false,
       timeout: 30_000,
