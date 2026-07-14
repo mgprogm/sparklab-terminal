@@ -1,6 +1,6 @@
 # Phase 3 Plan: Hardening + Daily-Driver UX
 
-Status: **Workstream A implemented + verified** (2026-07-14). Gate 7 green, 14/14 E2E passing.
+Status: **Workstreams A and B implemented** (2026-07-14). Gate 7 verified green (14/14 E2E at the A milestone); B is implemented and unit-verified, gate 8 added â€” final full-suite matrix pending QA.
 Branch: `feat/monorepo-platform`.
 
 ## Goal / definition of done
@@ -69,6 +69,8 @@ New Playwright spec `apps/e2e/specs/gate-7-auth.spec.ts`, same style as gates 1â
 ### Status update (2026-07-14)
 
 Workstream A (A1--A5) is implemented and verified. All E2E specs pass (14 tests; gates 1--6 in open mode, gate 7 boots an authed gateway on the same port). Codex CLI was unavailable (bwrap sandbox error), so leads implemented directly.
+
+**Workstream B (2026-07-14, same day):** B1 and B2 landed. The scrollback endpoint (`GET /api/sessions/:id/scrollback`, capture-pane based, `-E -1` history-only) plus client-side injection behind the attach redraw are implemented per the B1 design, with `connection-scrollback` unit tests and the new gate 8 (`gate-8-scrollback.spec.ts`: REST assertions, UI scroll-up journey, vim-redraw regression). B2's `attachedClients`/`lastActivity` fields and sidebar viewers/idle badges landed with `session-list-status` unit tests. Implemented and unit-verified; the final full-suite E2E matrix is pending QA at time of writing.
 
 Two documented follow-ups remain before A5 is fully complete:
 

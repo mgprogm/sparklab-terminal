@@ -7,8 +7,10 @@ export {
   // REST: GET /api/sessions
   SessionInfoSchema,
   ListSessionsResponseSchema,
+  ScrollbackResponseSchema,
   type SessionInfo,
   type ListSessionsResponse,
+  type ScrollbackResponse,
   // REST: errors
   ApiErrorSchema,
   type ApiError,

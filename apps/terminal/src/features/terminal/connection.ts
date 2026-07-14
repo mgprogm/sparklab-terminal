@@ -24,9 +24,11 @@
  *   function calls (`setStatus`, `refreshSessions`).
  */
 import {
+  ScrollbackResponseSchema,
   WS_CLOSE_UNAUTHORIZED,
   type WsServerMessage,
 } from "@sparklab/shared-types";
+
 import type { Terminal } from "@xterm/xterm";
 
 // ---- Constants (same values as the original) ----
@@ -60,6 +62,8 @@ export class Connection {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private noReconnect = false;
+  private pendingScrollback: string | null = null;
+  private scrollbackFetched = false;
 
   /** The gateway origin used for WebSocket connections. */
   private readonly gatewayUrl: string;
@@ -84,6 +88,7 @@ export class Connection {
 
   connect(): void {
     if (this.noReconnect) return;
+    this.fetchScrollback();
     const proto = this.gatewayUrl.startsWith("https") ? "wss" : "ws";
     const host = this.gatewayUrl.replace(/^https?:\/\//, "");
     const url = `${proto}://${host}/attach?session=${encodeURIComponent(this.sessionId)}`;
@@ -137,10 +142,21 @@ export class Connection {
       }
       // Binary: raw pty output.
       if (this.freshConnect) {
-        // First bytes after (re)connect are the fresh attach redraw. Clear
-        // stale content so the redraw doesn't stack on top of it.
+        // First bytes after (re)connect: reset, inject scrollback, then write frame.
+        // tmux's attach redraw (absolute cursor addressing) repaints the live screen
+        // on top, pushing the injected history into xterm's scrollback buffer.
         this.term.reset();
         this.freshConnect = false;
+        if (this.scrollbackFetched && this.pendingScrollback) {
+          // Trim the last term.rows lines to reduce duplication with tmux's redraw.
+          const lines = this.pendingScrollback.split("\n");
+          const keepCount = Math.max(0, lines.length - this.term.rows);
+          if (keepCount > 0) {
+            this.term.write(lines.slice(0, keepCount).join("\r\n") + "\r\n");
+          }
+        }
+        this.pendingScrollback = null;
+        this.scrollbackFetched = false;
       }
       this.term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
@@ -180,6 +196,29 @@ export class Connection {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
+  }
+
+  private fetchScrollback(): void {
+    this.scrollbackFetched = false;
+    this.pendingScrollback = null;
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(this.sessionId)}/scrollback?lines=2000`,
+        );
+        if (this.noReconnect) return;
+        if (!res.ok) {
+          this.scrollbackFetched = true;
+          return;
+        }
+        const data: unknown = await res.json();
+        const parsed = ScrollbackResponseSchema.safeParse(data);
+        this.pendingScrollback = parsed.success ? parsed.data.lines : null;
+        this.scrollbackFetched = true;
+      } catch {
+        this.scrollbackFetched = true;
+      }
+    })();
   }
 
   private startHeartbeat(): void {

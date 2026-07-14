@@ -4,7 +4,7 @@ Three layers, each proving something the others can't:
 
 1. **Gateway acceptance scripts** — real tmux, real gateway, no browser. Prove the _process-survival_ core.
 2. **Vitest unit tests** — fast, isolated. Prove the _client protocol logic_ (Connection class, schemas, stores, hooks).
-3. **Playwright E2E** — real browser against a production build. Prove the _seven gates_ end to end (gates 1--6 are the historical cut-over gates; gate 7 is the Phase 3 auth gate).
+3. **Playwright E2E** — real browser against a production build. Prove the _eight gates_ end to end (gates 1--6 are the historical cut-over gates; gates 7--8 are the Phase 3 auth and scrollback gates).
 
 ```bash
 pnpm test                 # all Vitest suites (via turbo)
@@ -40,6 +40,11 @@ Shared presets in `@sparklab/config-vitest` (`base` = node env, `react` = jsdom 
 | `apps/terminal/.../auth/api.test.ts`              | Auth API client: login (204/401/429), me (200/401), logout                                                                                                                                                                                                                              | 6     |
 | `apps/terminal/.../auth/login-screen.test.tsx`    | Login form rendering, token submission, invalid-token error display                                                                                                                                                                                                                     | 3     |
 | `apps/terminal/.../auth/use-auth-status.test.tsx` | `useAuthStatus` hook: authenticated and unauthenticated states                                                                                                                                                                                                                          | 2     |
+| `apps/terminal/.../connection-auth.test.ts`       | Connection close code 4001: sets `noReconnect`, fires `onAuthError`; normal close codes still reconnect                                                                                                                                                                                 | 3     |
+| `apps/terminal/.../connection-scrollback.test.ts` | Scrollback injection sequencing: inject when fetch wins the race, skip when fetch fails or loses the race, no fetch after `noReconnect`                                                                                                                                                 | 4     |
+| `apps/terminal/.../session-list-status.test.tsx`  | B2 status badges: viewer count, idle time, old-gateway compat (fields absent), schema accepts both shapes                                                                                                                                                                               | 4     |
+| `apps/terminal/.../keys.test.ts`                  | Mobile key helpers: Ctrl/Alt input transforms, modifier arm/lock/consume, arrow CSI/SS3 sequences                                                                                                                                                                                       | 15    |
+| `apps/terminal/.../store-persist.test.ts`         | Store persistence partialize (keeps `activeSessionId` + `sidebarCollapsed`, drops transient UI state)                                                                                                                                                                                   | 2     |
 
 Convention: tests live in `__tests__/` beside the feature (or next to the source in packages). Use the `react` preset for anything touching the DOM.
 
@@ -47,23 +52,25 @@ Convention: tests live in `__tests__/` beside the feature (or next to the source
 
 Chromium only, serial workers. `playwright.config.ts` boots a **production build** of `apps/terminal` (port 3902, built with `NEXT_PUBLIC_GATEWAY_URL=http://localhost:3907`) and a gateway on port 3907 via `webServer`. First run: `pnpm exec playwright install chromium`.
 
-Gates 1--6 are the **cut-over gates** -- the checklist that had to pass before the legacy vanilla-JS frontend was deleted (it did, 2026-07-14). Gate 7 is the Phase 3 auth gate:
+Gates 1--6 are the **cut-over gates** -- the checklist that had to pass before the legacy vanilla-JS frontend was deleted (it did, 2026-07-14). Gates 7--8 are the Phase 3 gates (auth, scrollback):
 
-| Spec                             | Gate                                  | Method                                                                                                                                                                                                                          |
-| -------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gate-1-gateway-scripts.spec.ts` | Gateway scripts still pass            | Runs all three scripts via `execFile`                                                                                                                                                                                           |
-| `gate-2-thai-roundtrip.spec.ts`  | Multibyte UTF-8 uncorrupted           | Types `สวัสดีครับ`, echoes to a file inside the session, asserts file bytes                                                                                                                                                     |
-| `gate-3-reconnect.spec.ts`       | Clean redraw after gateway restart    | Kills + respawns the gateway mid-session; asserts a pre-restart marker appears exactly once and input still works                                                                                                               |
-| `gate-4-job-survival.spec.ts`    | Jobs survive page close               | Starts a ticking counter, closes the page, reopens; asserts the counter advanced                                                                                                                                                |
-| `gate-5-vim-redraw.spec.ts`      | Full-screen apps redraw on reattach   | Opens vim, reloads the page, asserts vim UI in `capture-pane`                                                                                                                                                                   |
-| `gate-6-multi-viewer.spec.ts`    | Resize follows the latest client      | Two pages, different viewports; asserts tmux `window_width` follows                                                                                                                                                             |
-| `gate-7-auth.spec.ts`            | Unauthenticated is rejected (Phase 3) | REST 401 without cookie; 429 rate limit after 5 wrong tokens; 403 on disallowed WS origin; 4001 close on unauthenticated WS; UI login journey (wrong token error, correct login, keystroke echo, cookie persists across reload) |
-| `strictmode-check.spec.ts`       | No double-attach                      | Asserts `tmux list-clients` shows exactly 1 client after page load                                                                                                                                                              |
+| Spec                             | Gate                                    | Method                                                                                                                                                                                                                                                    |
+| -------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gate-1-gateway-scripts.spec.ts` | Gateway scripts still pass              | Runs all three scripts via `execFile`                                                                                                                                                                                                                     |
+| `gate-2-thai-roundtrip.spec.ts`  | Multibyte UTF-8 uncorrupted             | Types `สวัสดีครับ`, echoes to a file inside the session, asserts file bytes                                                                                                                                                                               |
+| `gate-3-reconnect.spec.ts`       | Clean redraw after gateway restart      | Kills + respawns the gateway mid-session; asserts a pre-restart marker appears exactly once and input still works                                                                                                                                         |
+| `gate-4-job-survival.spec.ts`    | Jobs survive page close                 | Starts a ticking counter, closes the page, reopens; asserts the counter advanced                                                                                                                                                                          |
+| `gate-5-vim-redraw.spec.ts`      | Full-screen apps redraw on reattach     | Opens vim, reloads the page, asserts vim UI in `capture-pane`                                                                                                                                                                                             |
+| `gate-6-multi-viewer.spec.ts`    | Resize follows the latest client        | Two pages, different viewports; asserts tmux `window_width` follows                                                                                                                                                                                       |
+| `gate-7-auth.spec.ts`            | Unauthenticated is rejected (Phase 3)   | REST 401 without cookie; 429 rate limit after 5 wrong tokens; 403 on disallowed WS origin; 4001 close on unauthenticated WS; UI login journey (wrong token error, correct login, keystroke echo, cookie persists across reload)                           |
+| `gate-8-scrollback.spec.ts`      | Scrollback survives reconnect (Phase 3) | REST scrollback assertions (history-only capture via `-E -1`, `lines` clamping, 404 on bogus ids); UI reload + Shift+PageUp reveals a history line not on the visible screen; vim-redraw regression (gate-5 invariant) stays clean with scrollback active |
+| `strictmode-check.spec.ts`       | No double-attach                        | Asserts `tmux list-clients` shows exactly 1 client after page load                                                                                                                                                                                        |
 
 Caveats:
 
 - Timing-sensitive (shell readiness, reconnect backoff); CI runners may need timeout tuning.
 - The StrictMode check runs against the prod build; the dev-mode double-mount behavior is covered by the Connection unit tests (dispose + supersession).
+- Gate 8 disables WebGL at browser launch to force xterm's DOM renderer — the WebGL renderer draws to canvas and leaves no readable text in the DOM to assert against.
 
 ## CI (`.github/workflows/ci.yml`)
 
@@ -84,3 +91,5 @@ Git hooks (husky): pre-commit runs `lint-staged` (prettier on staged files — e
 | Anything touching pty/tmux spawning | all three gateway scripts                            |
 | Auth endpoints or cookie logic      | auth unit tests + gate 7                             |
 | `features/auth/` UI                 | auth unit tests + gate 7 (UI journey)                |
+| Scrollback endpoint or injection    | connection-scrollback tests + gate 8                 |
+| Session status fields / badges      | session-list-status tests + shared-types tests       |

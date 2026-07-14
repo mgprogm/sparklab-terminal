@@ -212,7 +212,7 @@ async function listSessions() {
     const res = await tmux([
       "list-sessions",
       "-F",
-      "#{session_name}\t#{session_created}\t#{pane_current_command}\t#{session_attached}",
+      "#{session_name}\t#{session_created}\t#{pane_current_command}\t#{session_attached}\t#{session_activity}",
     ]);
     out = res.stdout;
   } catch {
@@ -224,7 +224,8 @@ async function listSessions() {
   const liveIds = [];
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
-    const [name, created, currentCommand, attached] = line.split("\t");
+    const [name, created, currentCommand, attached, activity] =
+      line.split("\t");
     if (!name || !name.startsWith(PREFIX)) continue;
     liveIds.push(name);
     const m = meta[name] || {};
@@ -234,7 +235,9 @@ async function listSessions() {
       createdAt: m.createdAt || (created ? Number(created) * 1000 : null),
       tags: m.tags || [],
       currentCommand: currentCommand || "",
-      attached: attached === "1",
+      attached: Number(attached) > 0,
+      attachedClients: Number(attached) || 0,
+      lastActivity: activity ? Number(activity) : null,
     });
   }
   // Prune metadata for sessions tmux no longer knows about.
@@ -435,6 +438,54 @@ async function handleApi(req, res, url) {
     } catch (err) {
       console.error(`[api] list failed: ${err.message}`);
       return sendJson(res, 500, { error: "failed to list sessions" });
+    }
+  }
+
+  // GET /api/sessions/:id/scrollback
+  // B1: Read-only scrollback capture via tmux capture-pane.
+  // Auth required (handled above). GET is exempt from Origin check.
+  if (
+    req.method === "GET" &&
+    parts.length === 4 &&
+    parts[1] === "sessions" &&
+    parts[3] === "scrollback"
+  ) {
+    const id = decodeURIComponent(parts[2]);
+    if (!ID_RE.test(id)) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    if (!(await sessionExists(id))) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    // Parse lines param: integer 1..10000, default 2000.
+    const rawLines = url.searchParams.get("lines");
+    let lines = 2000;
+    if (rawLines !== null) {
+      const parsed = parseInt(rawLines, 10);
+      if (Number.isFinite(parsed)) {
+        lines = Math.min(10000, Math.max(1, parsed));
+      }
+      // If not a valid integer, fall back to default 2000.
+    }
+    try {
+      // -p: stdout  -e: ANSI escapes  -J: join wrapped lines
+      // -S -<N>: start N lines back  -E -1: stop before last visible line
+      const result = await tmux([
+        "capture-pane",
+        "-p",
+        "-e",
+        "-J",
+        "-S",
+        `-${lines}`,
+        "-E",
+        "-1",
+        "-t",
+        id,
+      ]);
+      return sendJson(res, 200, { lines: result.stdout });
+    } catch (err) {
+      console.error(`[api] scrollback failed: ${err.message}`);
+      return sendJson(res, 500, { error: "failed to capture scrollback" });
     }
   }
 

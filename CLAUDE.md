@@ -44,7 +44,7 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 
 - **The gateway never owns the job.** On WS attach it spawns a node-pty running `tmux attach-session -t <name>`. On WS close it kills **only that pty** (which detaches the tmux client). It must **never** run `tmux kill-session` on disconnect — that line's absence is what keeps jobs alive. See `teardown()` in `src/server.js`.
 - **tmux is the source of truth for session state.** There is no database. A restarted gateway rediscovers everything via `tmux has-session` / `tmux ls`. Sessions are created explicitly via `POST /api/sessions`; attach never creates.
-- **State restoration on reconnect is tmux's attach redraw, not replay.** Phase 1 deliberately does NOT use `capture-pane`. When a client attaches, tmux redraws the current screen automatically (including full-screen apps like vim/htop). Adding `capture-pane` replay on top would double-draw — see the design doc's Edge Cases before attempting scrollback replay.
+- **tmux's attach redraw is the single painter of the visible screen.** On attach, tmux redraws the current screen automatically (including full-screen apps like vim/htop). Scrollback history is additionally fetched via the REST `capture-pane` endpoint (`GET /api/sessions/:id/scrollback`) and injected client-side _behind_ the redraw on the first binary frame — see `docs/TERMINAL-PROTOCOL.md`. Naive replay ON TOP of the redraw remains forbidden (double-draw).
 
 ## Load-bearing invariants (don't break these)
 
@@ -57,7 +57,7 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 
 - `apps/terminal-gateway/` — Node gateway (plain JS). `src/server.js` is the entire gateway: REST session CRUD + auth endpoints, `/attach` WS endpoint, tmux session management, origin allowlist, rate limiting. Sessions are `web-<uuid>`, created via `POST /api/sessions`.
 - `apps/terminal/` — Next.js frontend. Auth gate in `src/features/auth/`; terminal logic in `src/features/terminal/`.
-- `apps/e2e/` — Playwright E2E suite (gates 1--7 + StrictMode check).
+- `apps/e2e/` — Playwright E2E suite (gates 1--8 + StrictMode check).
 - `packages/shared-types/` — Zod schemas for REST, WS, and auth (`src/terminal.ts`, `src/auth.ts`).
 - `test/` (in `apps/terminal-gateway/`) — smoke + acceptance scripts.
 - `deploy/Caddyfile` — reverse-proxy example for production.
@@ -65,4 +65,4 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 
 ## Status & what's deliberately absent
 
-Phase 1 (attach/detach, reconnect), Phase 2 (multi-session REST + UI), and Phase 3 Workstream A (token auth, origin allowlist, rate limiting, loopback bind, deploy docs) are done and verified (14/14 E2E, 2026-07-14). Expose the gateway only via the reverse-proxy topology in `docs/DEPLOYMENT.md` with `GATEWAY_AUTH_TOKEN` set. **Not yet implemented:** scrollback restore + session status (Workstream B, in progress), multi-user isolation (Phase 4).
+Phase 1 (attach/detach, reconnect), Phase 2 (multi-session REST + UI), and Phase 3 (Workstream A: token auth, origin allowlist, rate limiting, loopback bind, deploy docs; Workstream B: scrollback restore, session status badges) are done (2026-07-14). Expose the gateway only via the reverse-proxy topology in `docs/DEPLOYMENT.md` with `GATEWAY_AUTH_TOKEN` set. **Not yet implemented (Phase 4):** multi-user isolation, session sharing / read-only viewers, mobile phase-2 extras (PWA, pinch-zoom).

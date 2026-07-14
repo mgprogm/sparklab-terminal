@@ -50,6 +50,18 @@ const SHELLS = new Set([
   "-sh",
   "-zsh",
 ]);
+
+/** Formats a relative time string from epoch seconds. */
+function formatRelativeTime(epochSeconds: number): string {
+  const diffSeconds = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+  if (diffSeconds < 60) return "idle now";
+  const minutes = Math.floor(diffSeconds / 60);
+  if (minutes < 60) return `idle ${String(minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `idle ${String(hours)}h`;
+  return `idle ${String(Math.floor(hours / 24))}d`;
+}
+
 function isRunning(cmd: string): boolean {
   return !!cmd && !SHELLS.has(cmd);
 }
@@ -204,6 +216,19 @@ export function SessionList({
                             {s.currentCommand}
                           </span>
                         )}
+                        {/* B2: Status badge — plain text (not tooltip-only, mobile spec) */}
+                        {s.attachedClients !== undefined &&
+                        s.attachedClients > 0 ? (
+                          <span className="text-chart-1 truncate text-xs">
+                            {s.attachedClients === 1
+                              ? "1 viewer"
+                              : `${String(s.attachedClients)} viewers`}
+                          </span>
+                        ) : s.lastActivity != null ? (
+                          <span className="text-muted-foreground truncate text-xs">
+                            {formatRelativeTime(s.lastActivity)}
+                          </span>
+                        ) : null}
                       </div>
                     )}
                   </button>

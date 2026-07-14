@@ -18,10 +18,14 @@ Returns `SessionInfo[]`:
     "createdAt": 1752444000000, // epoch ms; nullable
     "tags": [], // reserved for future use
     "currentCommand": "bash", // command in the active pane
-    "attached": true // ≥1 tmux client attached
+    "attached": true, // ≥1 tmux client attached
+    "attachedClients": 1, // optional: count of attached tmux clients
+    "lastActivity": 1752444000 // optional: last activity, epoch SECONDS (not ms)
   }
 ]
 ```
+
+`attachedClients` and `lastActivity` are optional in the schema (Phase 3 B2) so older gateways still validate; the UI shows a viewers badge when `attachedClients > 0`, else an idle-time badge from `lastActivity`.
 
 ### `POST /api/sessions` → 201
 
@@ -32,6 +36,14 @@ Create a session. Body (all fields optional):
 ```
 
 Response: `{ "id": "web-…", "name": "…", "createdAt": 1752444000000 }`
+
+### `GET /api/sessions/:id/scrollback?lines=N` → 200
+
+Captures the session's scrollback history via `tmux capture-pane -p -e -J -S -<N> -E -1` — ANSI escapes preserved (`-e`), wrapped lines joined (`-J`), and the visible screen excluded (`-E -1`): the response is history **only**. `lines` clamps to 1–10000, default 2000 (non-numeric values fall back to the default). Read-only; no state. Auth-guarded like all `/api/*`.
+
+Response: `{ "lines": "<ANSI-colored text>" }` (`ScrollbackResponseSchema`). Unknown or malformed id → 404.
+
+**Client sequencing contract** (`connection.ts`): the fetch starts before the WS opens. On the first binary frame after (re)connect the client calls `term.reset()`, writes the fetched history (trimmed by the last `term.rows` lines to reduce duplication with the redraw), **then** writes the frame — tmux's attach redraw stays the single painter of the visible screen and pushes the injected history into xterm's scrollback buffer. If the first frame beats the fetch, attach proceeds without history (accepted race).
 
 ### `DELETE /api/sessions/:id` → 204
 
@@ -92,7 +104,7 @@ These are what the smoke/acceptance scripts and the E2E gates protect. Every one
 
 1. **Raw bytes end to end.** The pty is spawned with `encoding: null`, so `onData` yields Buffers. pty output → WS binary frame → `term.write(Uint8Array)`. Keystrokes → `TextEncoder` → WS binary → `pty.write`. Decoding to a JS string anywhere mid-pipeline corrupts multibyte UTF-8 (verified with Thai input — E2E gate 2).
 2. **The gateway never kills the session on disconnect.** `teardown()` kills only the attach pty. Job survival across tab close / network loss / gateway restart depends on this single absence.
-3. **Reconnect resets before redraw.** The client sets a fresh-connect flag on every (re)connect and calls `term.reset()` on the _first binary frame_ after it, so tmux's attach redraw lands on a clean screen. No `capture-pane` replay — it would double-draw.
+3. **Reconnect resets before redraw; scrollback goes behind it, never on top.** The client sets a fresh-connect flag on every (re)connect and calls `term.reset()` on the _first binary frame_ after it, so tmux's attach redraw lands on a clean screen. Scrollback history is injected between the reset and that first frame (see the scrollback endpoint above) — tmux's redraw remains the single painter of the visible screen. Naive `capture-pane` replay _on top of_ the redraw remains forbidden — it double-draws.
 4. **Frame-type routing.** Anything new on the wire follows the split above: binary = terminal I/O, JSON text = control. Never mix.
 5. **One live connection per terminal.** The `Connection` class enforces single-live-connection semantics: a `noReconnect` guard blocks _both_ resurrection paths (onclose-backoff and heartbeat force-close), and supersession checks ignore events from a replaced socket. In React this pairs with StrictMode-safe effect cleanup so dev double-mount never yields two tmux clients.
 6. **Multi-viewer sizing.** Sessions are created with `window-size latest` + `aggressive-resize on` so tmux follows the most recently active client (E2E gate 6).
@@ -102,6 +114,7 @@ These are what the smoke/acceptance scripts and the E2E gates protect. Every one
 
 `features/terminal/connection.ts` implements, per session attach:
 
+- **Scrollback fetch**: each `connect()` kicks off the scrollback fetch before opening the WS; the result is injected on the first binary frame (see the scrollback endpoint above).
 - **Heartbeat**: periodic `{"type":"ping"}`; if no activity (pong or output) arrives in the window, the socket is force-closed, which routes into the reconnect path.
 - **Reconnect backoff**: 1s → 2s → 4s → 8s → 15s (capped), reset on successful connect.
 - **`dispose()`** clears all timers/handlers and sets `noReconnect` — after dispose, nothing can resurrect the socket.

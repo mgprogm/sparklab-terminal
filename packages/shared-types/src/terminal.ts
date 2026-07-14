@@ -60,6 +60,11 @@ export const SessionInfoSchema = z.object({
   currentCommand: z.string(),
   /** Whether at least one tmux client is attached to this session. */
   attached: z.boolean(),
+  /** Count of tmux clients attached to this session. */
+  attachedClients: z.number().int().optional(),
+  /** Unix epoch seconds when the session was last active. The gateway sends
+   * null when tmux reports no activity timestamp; older gateways omit it. */
+  lastActivity: z.number().nullable().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfoSchema>;
 
@@ -139,3 +144,7 @@ export const WsServerMessageSchema = z.discriminatedUnion("type", [
   WsErrorSchema,
 ]);
 export type WsServerMessage = z.infer<typeof WsServerMessageSchema>;
+
+/** Response body for GET /api/sessions/:id/scrollback. */
+export const ScrollbackResponseSchema = z.object({ lines: z.string() });
+export type ScrollbackResponse = z.infer<typeof ScrollbackResponseSchema>;
