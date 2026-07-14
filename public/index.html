@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Web Terminal</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <style>
       /* Fonts vendored locally (no CDN — CSP/offline safe). */
@@ -56,6 +57,17 @@
         width: 248px; flex: 0 0 248px; display: flex; flex-direction: column;
         background: var(--canvas); border-right: 1px solid var(--hairline);
       }
+      /* Collapsed rail: icons only. No width transition — one clean resize, not
+         a burst of frames (xterm refits via the ResizeObserver on #term). */
+      #app.collapsed #sidebar { width: 52px; flex-basis: 52px; }
+      #app.collapsed #sidebar-head { justify-content: center; padding: 0; }
+      #app.collapsed #sidebar-head strong { display: none; }
+      #app.collapsed #new-session { padding: 6px 9px; }
+      #app.collapsed .lbl { display: none; }
+      #app.collapsed .session { justify-content: center; padding: 9px 0; gap: 0; }
+      #app.collapsed .session .meta,
+      #app.collapsed .session .del { display: none; }
+      #app.collapsed #session-list { padding: 6px 4px; }
       #sidebar-head {
         display: flex; align-items: center; justify-content: space-between;
         height: 42px; padding: 0 14px; border-bottom: 1px solid var(--hairline);
@@ -70,6 +82,19 @@
         transition: background 120ms ease;
       }
       #new-session:hover { background: var(--primary-hover); }
+
+      /* Footer collapse/expand toggle — full-width, always visible, keeps the
+         42px sidebar-head free so it stays aligned with the main header. */
+      #toggle-sidebar {
+        display: flex; align-items: center; justify-content: center; gap: 8px;
+        flex: 0 0 auto; height: 38px; cursor: pointer; border: none;
+        border-top: 1px solid var(--hairline); background: transparent;
+        color: var(--mute); font: 500 12px var(--font-ui);
+        letter-spacing: 0.3px; transition: background 120ms ease, color 120ms ease;
+      }
+      #toggle-sidebar:hover { background: var(--canvas-hover); color: var(--body); }
+      #toggle-sidebar .chev { font-size: 14px; line-height: 1; }
+
       #session-list { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 6px; }
       .session {
         display: flex; align-items: center; gap: 10px;
@@ -140,6 +165,52 @@
       #session-list::-webkit-scrollbar-thumb {
         background: var(--canvas-soft); border-radius: var(--r-pill); border: 3px solid var(--canvas);
       }
+
+      /* ---- Modal (replaces native prompt/confirm/alert) ---- */
+      #modal-overlay {
+        position: fixed; inset: 0; z-index: 100;
+        display: flex; align-items: center; justify-content: center; padding: 24px;
+        background: rgba(20, 17, 15, 0.62);
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+      }
+      #modal-overlay.hidden { display: none; }
+      #modal {
+        width: 100%; max-width: 400px;
+        /* Lives outside #app, so set the UI font here — otherwise the h2/p fall
+           back to the UA default (Times) while only input/buttons look right. */
+        font: 14px/1.5 var(--font-ui); color: var(--body-strong);
+        -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+        background: var(--canvas-soft); border: 1px solid var(--hairline);
+        border-radius: var(--r-lg); padding: 20px;
+        display: flex; flex-direction: column; gap: 12px;
+        animation: modal-in 120ms ease;
+      }
+      @keyframes modal-in {
+        from { opacity: 0; transform: translateY(6px) scale(0.98); }
+        to   { opacity: 1; transform: none; }
+      }
+      @media (prefers-reduced-motion: reduce) { #modal { animation: none; } }
+      #modal h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); }
+      #modal p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--body); }
+      #modal-input {
+        width: 100%; padding: 9px 11px; font: 14px var(--font-ui); color: var(--ink);
+        background: var(--canvas); border: 1px solid var(--hairline);
+        border-radius: var(--r-md); outline: none; transition: border-color 120ms ease;
+      }
+      #modal-input::placeholder { color: var(--mute); }
+      #modal-input:focus { border-color: var(--primary); }
+      #modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+      #modal-actions button {
+        cursor: pointer; border-radius: var(--r-sm); padding: 8px 15px;
+        font: 500 13px var(--font-ui); border: 1px solid transparent;
+        transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      }
+      .btn-primary { background: var(--primary); color: var(--on-primary); }
+      .btn-primary:hover { background: var(--primary-hover); }
+      .btn-ghost { background: transparent; color: var(--body); border-color: var(--hairline); }
+      .btn-ghost:hover { background: var(--canvas-hover); color: var(--ink); }
+      .btn-danger { background: var(--danger); color: var(--on-primary); }
+      .btn-danger:hover { filter: brightness(1.08); }
     </style>
   </head>
   <body>
@@ -147,9 +218,12 @@
       <div id="sidebar">
         <div id="sidebar-head">
           <strong>Sessions</strong>
-          <button id="new-session" title="Create a new session">+ New</button>
+          <button id="new-session" title="Create a new session"><span aria-hidden="true">+</span><span class="lbl">&nbsp;New</span></button>
         </div>
         <ul id="session-list"></ul>
+        <button id="toggle-sidebar" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true">
+          <span class="chev" aria-hidden="true">«</span><span class="lbl">Collapse</span>
+        </button>
       </div>
 
       <div id="main">
@@ -162,6 +236,18 @@
           <button id="create-first">Create your first session</button>
         </div>
         <div id="term-wrap" class="hidden"><div id="term"></div></div>
+      </div>
+    </div>
+
+    <div id="modal-overlay" class="hidden">
+      <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h2 id="modal-title"></h2>
+        <p id="modal-message"></p>
+        <input id="modal-input" type="text" autocomplete="off" spellcheck="false" />
+        <div id="modal-actions">
+          <button id="modal-cancel" class="btn-ghost"></button>
+          <button id="modal-confirm" class="btn-primary"></button>
+        </div>
       </div>
     </div>
 

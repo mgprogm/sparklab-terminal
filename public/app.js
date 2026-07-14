@@ -302,6 +302,7 @@ function renderList() {
     const li = document.createElement('li');
     li.className = 'session' + (s.id === activeSessionId ? ' active' : '');
     li.dataset.id = s.id;
+    li.title = s.name; // names are hidden in the collapsed rail — keep them on hover
 
     const runDot = document.createElement('span');
     runDot.className = 'run-dot' + (isRunning(s.currentCommand) ? ' running' : '') + (s.attached ? ' attached' : '');
@@ -334,9 +335,69 @@ function renderList() {
   }
 }
 
+// ---- Modal (in-page replacement for native prompt/confirm/alert) ----
+// One reusable dialog, one at a time. openModal resolves a Promise: text-input
+// modals resolve to the string (or null on cancel), button-only modals resolve
+// to true/false. Focusing the modal moves focus off xterm's textarea, so
+// keystrokes go to the dialog; on close we hand focus back to the terminal.
+const overlay = document.getElementById('modal-overlay');
+const modalTitle = document.getElementById('modal-title');
+const modalMessage = document.getElementById('modal-message');
+const modalInput = document.getElementById('modal-input');
+const modalCancel = document.getElementById('modal-cancel');
+const modalConfirm = document.getElementById('modal-confirm');
+
+function openModal({
+  title = '', message = '', input = false, value = '', placeholder = '',
+  confirmText = 'OK', cancelText = 'Cancel', danger = false, showCancel = true,
+} = {}) {
+  return new Promise((resolve) => {
+    modalTitle.textContent = title;
+    modalMessage.textContent = message;
+    modalMessage.style.display = message ? '' : 'none';
+    modalInput.style.display = input ? '' : 'none';
+    if (input) { modalInput.value = value; modalInput.placeholder = placeholder; }
+    modalConfirm.textContent = confirmText;
+    modalConfirm.className = danger ? 'btn-danger' : 'btn-primary';
+    modalCancel.textContent = cancelText;
+    modalCancel.style.display = showCancel ? '' : 'none';
+
+    overlay.classList.remove('hidden');
+    if (input) { modalInput.focus(); modalInput.select(); } else { modalConfirm.focus(); }
+
+    function done(result) {
+      overlay.classList.add('hidden');
+      modalConfirm.removeEventListener('click', onConfirm);
+      modalCancel.removeEventListener('click', onCancel);
+      overlay.removeEventListener('mousedown', onOverlayDown);
+      document.removeEventListener('keydown', onKeydown, true);
+      resolve(result);
+      try { term.focus(); } catch {}
+    }
+    const onConfirm = () => done(input ? modalInput.value : true);
+    const onCancel = () => done(input ? null : false);
+    const onOverlayDown = (e) => { if (e.target === overlay) onCancel(); };
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      else if (e.key === 'Enter') { e.preventDefault(); onConfirm(); }
+    };
+
+    modalConfirm.addEventListener('click', onConfirm);
+    modalCancel.addEventListener('click', onCancel);
+    overlay.addEventListener('mousedown', onOverlayDown);
+    document.addEventListener('keydown', onKeydown, true);
+  });
+}
+
+const modalPrompt = (title, opts = {}) => openModal({ title, input: true, confirmText: 'Create', ...opts });
+const modalConfirm2 = (title, message, opts = {}) =>
+  openModal({ title, message, confirmText: 'Delete', danger: true, ...opts });
+const modalAlert = (title, message) =>
+  openModal({ title, message, confirmText: 'OK', showCancel: false });
+
 // ---- Actions ----
 async function createSession() {
-  const name = prompt('New session name (optional):', '');
+  const name = await modalPrompt('New session', { placeholder: 'Session name (optional)' });
   if (name === null) return; // cancelled
   try {
     const res = await fetch('/api/sessions', {
@@ -346,28 +407,29 @@ async function createSession() {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(`Create failed: ${err.error || res.status}`);
+      await modalAlert('Create failed', String(err.error || res.status));
       return;
     }
     const created = await res.json();
     await refreshSessions();
     switchTo(created.id);
   } catch (e) {
-    alert(`Create failed: ${e.message}`);
+    await modalAlert('Create failed', e.message);
   }
 }
 
 async function deleteSession(id, name) {
-  if (!confirm(`Delete "${name || id}"? This kills the running job. Continue?`)) return;
+  const ok = await modalConfirm2('Delete session', `Delete "${name || id}"? This kills the running job.`);
+  if (!ok) return;
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!res.ok && res.status !== 204) {
       const err = await res.json().catch(() => ({}));
-      alert(`Delete failed: ${err.error || res.status}`);
+      await modalAlert('Delete failed', String(err.error || res.status));
       return;
     }
   } catch (e) {
-    alert(`Delete failed: ${e.message}`);
+    await modalAlert('Delete failed', e.message);
     return;
   }
   if (id === activeSessionId) {
@@ -382,6 +444,28 @@ async function deleteSession(id, name) {
 
 document.getElementById('new-session').addEventListener('click', createSession);
 document.getElementById('create-first').addEventListener('click', createSession);
+
+// ---- Sidebar collapse/expand ----
+// State persists across reloads. No manual refit: shrinking the sidebar grows
+// #main -> #term, and the ResizeObserver on #term (above) refits xterm for us.
+const appEl = document.getElementById('app');
+const toggleBtn = document.getElementById('toggle-sidebar');
+const toggleChev = toggleBtn.querySelector('.chev');
+
+function setCollapsed(collapsed) {
+  appEl.classList.toggle('collapsed', collapsed);
+  toggleChev.textContent = collapsed ? '»' : '«';
+  toggleBtn.setAttribute('aria-expanded', String(!collapsed));
+  toggleBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  toggleBtn.setAttribute('aria-label', toggleBtn.title);
+  try { localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0'); } catch {}
+}
+
+toggleBtn.addEventListener('click', () => setCollapsed(!appEl.classList.contains('collapsed')));
+
+let startCollapsed = false;
+try { startCollapsed = localStorage.getItem('sidebarCollapsed') === '1'; } catch {}
+setCollapsed(startCollapsed);
 
 // ---- Poll ----
 setInterval(refreshSessions, POLL_MS);
