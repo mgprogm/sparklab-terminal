@@ -25,16 +25,16 @@ const POLL_MS = 3000;
 // ---- The single, shared terminal ----
 const term = new Terminal({
   cursorBlink: true,
-  fontFamily: "'JetBrains Mono Variable', ui-monospace, Menlo, Monaco, 'Courier New', monospace",
+  fontFamily: "'DM Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
   fontSize: 14,
   scrollback: 10000,
-  // Cursor-inspired dark theme; the caret carries the brand orange.
+  // Warp-inspired warm-dark theme; off-white caret (no chromatic accent).
   theme: {
-    background: '#171614',
-    foreground: '#e8e7e1',
-    cursor: '#f54e00',
-    cursorAccent: '#171614',
-    selectionBackground: '#3a3833',
+    background: '#2b2622',
+    foreground: '#f7f5f0',
+    cursor: '#f7f5f0',
+    cursorAccent: '#2b2622',
+    selectionBackground: '#4a443f',
   },
 });
 

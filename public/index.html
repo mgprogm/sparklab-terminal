@@ -6,141 +6,137 @@
     <title>Web Terminal</title>
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <style>
-      /* Fonts vendored locally (no CDN — CSP/offline safe). Variable weight axis. */
+      /* Fonts vendored locally (no CDN — CSP/offline safe). */
       @font-face {
         font-family: 'Inter Variable'; font-style: normal; font-weight: 100 900;
         font-display: swap; src: url('/vendor/fonts/inter-latin.woff2') format('woff2');
       }
       @font-face {
-        font-family: 'JetBrains Mono Variable'; font-style: normal; font-weight: 100 800;
-        font-display: swap; src: url('/vendor/fonts/jetbrains-mono-latin.woff2') format('woff2');
+        font-family: 'DM Mono'; font-style: normal; font-weight: 400;
+        font-display: swap; src: url('/vendor/fonts/dm-mono-latin.woff2') format('woff2');
       }
 
-      /* Cursor-inspired theme, dark-adapted. Warm near-black neutrals, a single
-         scarce brand voltage (Cursor Orange), hairline depth — no shadows. */
+      /* Warp-inspired theme. A single warm near-charcoal band; NO chromatic
+         accent — the off-white primary (#f7f5f0) is the brand's only voltage,
+         doubling as text and as button fill. Hairline depth, no shadows, tight
+         3/4px radii. Inter for chrome, DM Mono for the terminal. */
       :root {
-        --term-bg: #171614;
-        --canvas: #1c1b19;
-        --sidebar: #201f1c;
-        --surface: #201f1c;
-        --surface-hover: #2a2825;
-        --surface-active: #302e2a;
-        --hairline: #302e2a;
-        --hairline-soft: #262421;
-        --text: #e8e7e1;
-        --muted: #a5a196;
-        --muted-soft: #7d7a70;
-        --accent: #f54e00;         /* Cursor Orange — used scarcely */
-        --accent-active: #d04200;
-        --on-accent: #ffffff;
-        --running: #2ea373;        /* semantic-success family */
-        --warn: #c08532;
-        --error: #cf2d56;          /* semantic-error */
-        --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-pill: 9999px;
+        --canvas: #2b2622;         /* warm dark — the only page surface */
+        --canvas-soft: #383330;    /* cards, hover/active rows, inputs */
+        --canvas-hover: #322d29;   /* subtle row hover, between the two */
+        --hairline: #3f3a36;
+        --ink: #f7f5f0;            /* primary text = brand off-white */
+        --body-strong: #dad2c1;
+        --body: #c9c0ad;
+        --mute: #aea69c;
+        --primary: #f7f5f0;        /* off-white — button fill, active indicator */
+        --primary-hover: #e5e0d5;
+        --on-primary: #2b2622;
+        /* Functional connection/run state (not a brand accent), warm-tuned. */
+        --ok: #9db989;
+        --warn: #cbab6f;
+        --danger: #cf8a76;
+        --r-sm: 3px; --r-md: 4px; --r-lg: 6px; --r-pill: 9999px;
         --font-ui: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
-        --font-mono: 'JetBrains Mono Variable', ui-monospace, Menlo, Monaco, 'Courier New', monospace;
+        --font-mono: 'DM Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Courier New', monospace;
       }
 
       * { box-sizing: border-box; }
-      html, body { margin: 0; height: 100%; background: var(--term-bg); }
+      html, body { margin: 0; height: 100%; background: var(--canvas); }
       #app {
-        display: flex; height: 100vh; color: var(--text);
-        font: 13px/1.5 var(--font-ui);
+        display: flex; height: 100vh; color: var(--body-strong);
+        font: 14px/1.5 var(--font-ui);
         -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
-      }
-      .caps {
-        font-size: 11px; font-weight: 600; letter-spacing: 0.88px;
-        text-transform: uppercase; color: var(--muted);
       }
 
       /* ---- Sidebar ---- */
       #sidebar {
-        width: 244px; flex: 0 0 244px; display: flex; flex-direction: column;
-        background: var(--sidebar); border-right: 1px solid var(--hairline);
+        width: 248px; flex: 0 0 248px; display: flex; flex-direction: column;
+        background: var(--canvas); border-right: 1px solid var(--hairline);
       }
       #sidebar-head {
         display: flex; align-items: center; justify-content: space-between;
-        padding: 14px 14px; border-bottom: 1px solid var(--hairline);
+        padding: 14px; border-bottom: 1px solid var(--hairline);
       }
       #sidebar-head strong {
-        font-size: 11px; font-weight: 600; letter-spacing: 0.88px;
-        text-transform: uppercase; color: var(--muted);
+        font-size: 12px; font-weight: 500; letter-spacing: 0.4px;
+        text-transform: uppercase; color: var(--mute);
       }
       #new-session {
-        cursor: pointer; border: none; background: var(--accent); color: var(--on-accent);
-        border-radius: var(--r-sm); padding: 5px 11px; font: 500 12px var(--font-ui);
+        cursor: pointer; border: none; background: var(--primary); color: var(--on-primary);
+        border-radius: var(--r-sm); padding: 6px 12px; font: 500 13px var(--font-ui);
         transition: background 120ms ease;
       }
-      #new-session:hover { background: var(--accent-active); }
+      #new-session:hover { background: var(--primary-hover); }
       #session-list { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 6px; }
       .session {
         display: flex; align-items: center; gap: 10px;
         padding: 9px 10px; cursor: pointer; border-radius: var(--r-md);
         border-left: 2px solid transparent; transition: background 120ms ease;
       }
-      .session:hover { background: var(--surface-hover); }
-      .session.active { background: var(--surface-active); border-left-color: var(--accent); }
+      .session:hover { background: var(--canvas-hover); }
+      .session.active { background: var(--canvas-soft); border-left-color: var(--primary); }
       .session .run-dot {
-        width: 8px; height: 8px; border-radius: var(--r-pill);
-        background: var(--muted-soft); flex: 0 0 auto;
+        width: 7px; height: 7px; border-radius: var(--r-pill);
+        background: var(--mute); flex: 0 0 auto;
       }
-      .session .run-dot.running { background: var(--running); }
-      .session .run-dot.attached { box-shadow: 0 0 0 2px rgba(46,163,115,0.30); }
+      .session .run-dot.running { background: var(--ok); }
+      .session .run-dot.attached { box-shadow: 0 0 0 2px rgba(157,185,137,0.28); }
       .session .meta { flex: 1; min-width: 0; }
       .session .name {
-        display: block; font-size: 13px; overflow: hidden;
+        display: block; font-size: 14px; color: var(--body); overflow: hidden;
         text-overflow: ellipsis; white-space: nowrap;
       }
-      .session.active .name { color: var(--accent); }
+      .session.active .name { color: var(--ink); }
       .session .cmd {
-        display: block; font-family: var(--font-mono); color: var(--muted-soft);
-        font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        display: block; font-family: var(--font-mono); color: var(--mute);
+        font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .session .del {
-        cursor: pointer; border: none; background: transparent; color: var(--muted-soft);
+        cursor: pointer; border: none; background: transparent; color: var(--mute);
         font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: var(--r-sm);
         transition: background 120ms ease, color 120ms ease;
       }
-      .session .del:hover { background: rgba(207,45,86,0.16); color: var(--error); }
+      .session .del:hover { background: rgba(207,138,118,0.16); color: var(--danger); }
 
       #empty-state {
         flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
         gap: 16px; text-align: center;
       }
-      #empty-state p { margin: 0; color: var(--muted); }
+      #empty-state p { margin: 0; color: var(--mute); }
       #create-first {
-        cursor: pointer; border: none; background: var(--accent); color: var(--on-accent);
-        border-radius: var(--r-md); padding: 10px 18px; font: 500 14px var(--font-ui);
+        cursor: pointer; border: none; background: var(--primary); color: var(--on-primary);
+        border-radius: var(--r-sm); padding: 9px 16px; font: 500 14px var(--font-ui);
         transition: background 120ms ease;
       }
-      #create-first:hover { background: var(--accent-active); }
+      #create-first:hover { background: var(--primary-hover); }
 
       /* ---- Main pane ---- */
       #main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--canvas); }
       #bar {
         display: flex; align-items: center; gap: 10px;
-        padding: 9px 16px; background: var(--surface); border-bottom: 1px solid var(--hairline);
+        padding: 10px 16px; background: var(--canvas); border-bottom: 1px solid var(--hairline);
       }
-      #bar #title { font-weight: 600; font-size: 13px; }
-      #bar #title.none { color: var(--muted-soft); font-weight: 400; }
+      #bar #title { font-weight: 500; font-size: 14px; color: var(--ink); }
+      #bar #title.none { color: var(--mute); font-weight: 400; }
       #status { display: flex; align-items: center; gap: 7px; margin-left: auto; }
       #statusText {
-        font-size: 11px; font-weight: 600; letter-spacing: 0.88px;
-        text-transform: uppercase; color: var(--muted);
+        font-size: 11px; font-weight: 500; letter-spacing: 0.4px;
+        text-transform: uppercase; color: var(--mute);
       }
-      #dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--muted-soft); }
-      #dot.connected { background: var(--running); }
+      #dot { width: 7px; height: 7px; border-radius: var(--r-pill); background: var(--mute); }
+      #dot.connected { background: var(--ok); }
       #dot.reconnecting { background: var(--warn); }
-      #dot.disconnected { background: var(--error); }
-      #term-wrap { flex: 1; min-height: 0; position: relative; background: var(--term-bg); }
-      #term { position: absolute; inset: 0; padding: 8px 6px; }
+      #dot.disconnected { background: var(--danger); }
+      #term-wrap { flex: 1; min-height: 0; position: relative; background: var(--canvas); }
+      #term { position: absolute; inset: 0; padding: 10px 8px; }
       .xterm { height: 100%; }
       #term-wrap.hidden { display: none; }
 
       /* Scrollbar (sidebar) tuned to the warm-dark palette. */
       #session-list::-webkit-scrollbar { width: 10px; }
       #session-list::-webkit-scrollbar-thumb {
-        background: var(--surface-active); border-radius: var(--r-pill); border: 3px solid var(--sidebar);
+        background: var(--canvas-soft); border-radius: var(--r-pill); border: 3px solid var(--canvas);
       }
     </style>
   </head>

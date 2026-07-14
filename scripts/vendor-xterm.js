@@ -16,11 +16,11 @@ const assets = [
   ["@xterm/addon-web-links/lib/addon-web-links.js", "addon-web-links.js"],
 ];
 
-// Fonts (Cursor-inspired theme): Inter for UI chrome, JetBrains Mono for the
-// terminal + code surfaces. Variable (weight-axis) woff2, latin subset.
+// Fonts (Warp-inspired theme): Inter for UI chrome, DM Mono for the terminal +
+// code surfaces. Inter is variable (weight axis); DM Mono ships fixed weights.
 const fonts = [
   ["@fontsource-variable/inter/files/inter-latin-wght-normal.woff2", "inter-latin.woff2"],
-  ["@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2", "jetbrains-mono-latin.woff2"],
+  ["@fontsource/dm-mono/files/dm-mono-latin-400-normal.woff2", "dm-mono-latin.woff2"],
 ];
 
 mkdirSync(out, { recursive: true });
