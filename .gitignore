@@ -37,3 +37,6 @@ coverage/
 
 # graphify knowledge-graph output (regenerate with graphify_azure.py)
 graphify-out/
+
+# agent-service chat history (per-chat JSONL)
+apps/agent-service/data/

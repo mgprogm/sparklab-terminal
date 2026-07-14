@@ -1,0 +1,26 @@
+{
+  "name": "@sparklab/agent-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Chat service: a custom tool-calling loop over Azure OpenAI that operates tmux terminals via the gateway",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "tsx --env-file-if-exists=.env src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node --env-file-if-exists=.env test/smoke.js"
+  },
+  "dependencies": {
+    "@sparklab/shared-types": "workspace:*",
+    "openai": "^4.104.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@sparklab/config-typescript": "workspace:*",
+    "@types/node": "^20.17.6",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}

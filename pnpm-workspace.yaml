@@ -1,6 +1,11 @@
 packages:
   - "apps/*"
   - "packages/*"
+# Pin @types/node to one version so the new agent-service (which adds tsx, and
+# thus a new vite optional-peer permutation) can't drag a second @types/node
+# major into the graph — two majors collapse vite's config types to `never`.
+overrides:
+  "@types/node": "20.17.6"
 allowBuilds:
   esbuild: true
   node-pty: true
