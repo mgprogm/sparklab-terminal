@@ -39,6 +39,7 @@ import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
 import { useMediaQuery } from "../hooks/use-media-query";
+import { useSessionUrlSync } from "../hooks/use-session-url-sync";
 import {
   useCreateSession,
   useDeleteSession,
@@ -90,6 +91,12 @@ export function TerminalShell() {
 
   // iOS keyboard fallback: mirror visualViewport.height into --app-height.
   useVisualViewport();
+
+  // Deep-linking: `?session=<id>` ↔ activeSessionId. The URL read (on mount)
+  // overrides the persisted id; resolveActiveSession below then validates it
+  // against the loaded list. Routes only through setActiveSessionId — never
+  // touches XTerm props, so the no-remount invariant holds.
+  useSessionUrlSync(activeSessionId, setActiveSessionId);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
