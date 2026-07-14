@@ -25,10 +25,17 @@ const POLL_MS = 3000;
 // ---- The single, shared terminal ----
 const term = new Terminal({
   cursorBlink: true,
-  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  fontFamily: "'JetBrains Mono Variable', ui-monospace, Menlo, Monaco, 'Courier New', monospace",
   fontSize: 14,
   scrollback: 10000,
-  theme: { background: '#1e1e1e' },
+  // Cursor-inspired dark theme; the caret carries the brand orange.
+  theme: {
+    background: '#171614',
+    foreground: '#e8e7e1',
+    cursor: '#f54e00',
+    cursorAccent: '#171614',
+    selectionBackground: '#3a3833',
+  },
 });
 
 const fitAddon = new FitAddon.FitAddon();
@@ -213,6 +220,7 @@ function switchTo(sessionId) {
     termWrap.classList.add('hidden');
     emptyState.style.display = '';
     titleEl.textContent = 'no session';
+    titleEl.classList.add('none');
     setStatus('disconnected', 'idle');
     renderList();
     return;
@@ -225,6 +233,7 @@ function switchTo(sessionId) {
 
   const meta = sessions.find((s) => s.id === sessionId);
   titleEl.textContent = meta ? meta.name : sessionId;
+  titleEl.classList.remove('none');
 
   activeConnection = new Connection(sessionId, { onStatus: setStatus });
   activeConnection.connect();
