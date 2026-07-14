@@ -48,6 +48,8 @@ export interface XTermProps {
   onStatusChange?: (status: ConnectionStatus, text: string) => void;
   /** Called when a server error frame fires (deleted/invalid session). */
   onSessionError?: () => void;
+  /** Called when the WebSocket closes because authentication expired. */
+  onAuthError?: () => void;
   /** Populated with the imperative TerminalHandle (stable ref from useRef). */
   handleRef?: RefObject<TerminalHandle | null>;
   /** Sticky-modifier state owned by the extra-keys bar (stable ref). */
@@ -65,6 +67,7 @@ export function XTermComponent({
   sessionId,
   onStatusChange,
   onSessionError,
+  onAuthError,
   handleRef,
   modifiersRef,
 }: XTermProps) {
@@ -81,6 +84,8 @@ export function XTermComponent({
   onStatusRef.current = onStatusChange;
   const onSessionErrorRef = useRef(onSessionError);
   onSessionErrorRef.current = onSessionError;
+  const onAuthErrorRef = useRef(onAuthError);
+  onAuthErrorRef.current = onAuthError;
 
   // ---- One-shot effect: create Terminal + addons, wire up I/O ----
   useEffect(() => {
@@ -224,6 +229,7 @@ export function XTermComponent({
     const callbacks: ConnectionCallbacks = {
       onStatus: (state, text) => onStatusRef.current?.(state, text),
       onSessionError: () => onSessionErrorRef.current?.(),
+      onAuthError: () => onAuthErrorRef.current?.(),
     };
 
     const conn = new Connection(sessionId, term, callbacks);

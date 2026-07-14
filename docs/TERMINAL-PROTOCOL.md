@@ -41,6 +41,36 @@ Kills the tmux session (the **only** place `tmux kill-session` is ever run). No 
 
 Always `{ "error": "<message>" }`.
 
+## Authentication
+
+Token auth, cookie sessions, origin allowlist, rate limiting. Schemas live in `packages/shared-types/src/auth.ts` (including `WS_CLOSE_UNAUTHORIZED = 4001`).
+
+**Open mode:** when `GATEWAY_AUTH_TOKEN` is unset, auth and origin checks are fully disabled. The gateway refuses to start tokenless on a non-loopback `HOST` (`process.exit(1)`).
+
+### Auth endpoints (no session cookie required)
+
+| Method | Path               | Success                                                                                                  | Errors                                                                                                                                                 |
+| ------ | ------------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST` | `/api/auth/login`  | `204` + `Set-Cookie: gw_session=<sid>` (HttpOnly, SameSite=Strict, Path=/; +Secure when `TRUST_PROXY=1`) | `401` (invalid token) · `429` + `Retry-After` header (5 attempts/min/IP, fixed window) · `400` (malformed body / missing token) · `413` (body > 64 KB) |
+| `POST` | `/api/auth/logout` | `204` (clears cookie)                                                                                    | --                                                                                                                                                     |
+| `GET`  | `/api/auth/me`     | `200 { "authenticated": true }`                                                                          | `401 { "error": "unauthorized" }`                                                                                                                      |
+
+All other `/api/*` routes require a valid `gw_session` cookie (or open mode) and return `401` without one.
+
+### Origin allowlist
+
+`ALLOWED_ORIGINS` env (comma-separated; default `http://localhost:3000,http://localhost:3007`). Checked on:
+
+- **WS upgrade** (`/attach`): disallowed or absent Origin -> `403` pre-handshake (raw `HTTP/1.1 403 Forbidden` on the socket, no WebSocket frame). Skipped in open mode.
+- **Mutating REST** (`POST`/`DELETE` on `/api/*`): disallowed Origin header (when present) -> `403 { "error": "forbidden origin" }`. Skipped in open mode.
+
+### WebSocket auth and limits
+
+- **Unauthenticated `/attach`**: handshake completes, server sends a JSON error frame `{"type":"error","message":"unauthorized"}`, then closes with code **4001**. The client must treat 4001 as `noReconnect` -- do not backoff-retry against a 401.
+- **Connection cap**: concurrent WS connections are capped at `MAX_WS_CONNECTIONS` (default 32). Over-cap connections receive a JSON error frame `{"type":"error","message":"too many connections"}` and close code **1013** (Try Again Later).
+- **Body cap**: all HTTP request bodies are capped at 64 KB (`413` if exceeded).
+- **Timeout guards**: `headersTimeout=30s`, `requestTimeout=60s`.
+
 ## WebSocket: `/attach?session=<id>`
 
 `ws://<gateway>/attach?session=web-…` — the session must already exist (attach never creates). On attach the gateway spawns a node-pty running `tmux attach-session -t <id>`; on socket close it kills **only that pty**, which detaches the tmux client and leaves the session running.

@@ -15,6 +15,7 @@
  */
 
 import { Button } from "@sparklab/ui/components/ui/button";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Sheet,
   SheetContent,
@@ -24,6 +25,8 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import { Menu } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+import { authKeys, useLogout } from "@/features/auth";
 
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
@@ -43,6 +46,8 @@ import type { ConnectionStatus } from "../connection";
 import type { ModifierSnapshot } from "../keys";
 
 export function TerminalShell() {
+  const queryClient = useQueryClient();
+  const logoutMutation = useLogout();
   const {
     activeSessionId,
     setActiveSessionId,
@@ -103,6 +108,10 @@ export function TerminalShell() {
     // Nothing extra — the sessions query will refetch on its 3s interval and
     // the vanish-fallback effect above will route to the next session.
   }, []);
+
+  const handleAuthError = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: authKeys.me() });
+  }, [queryClient]);
 
   const handleSelectSession = useCallback(
     (id: string) => {
@@ -204,6 +213,7 @@ export function TerminalShell() {
           onDeleteSession={handleDeleteSession}
           onToggleCollapse={toggleSidebar}
           onDialogClose={handleDialogClose}
+          onLogout={() => logoutMutation.mutate()}
         />
       )}
 
@@ -269,6 +279,7 @@ export function TerminalShell() {
               sessionId={activeSessionId}
               onStatusChange={handleStatusChange}
               onSessionError={handleSessionError}
+              onAuthError={handleAuthError}
               handleRef={terminalHandleRef}
               modifiersRef={modifiersRef}
             />

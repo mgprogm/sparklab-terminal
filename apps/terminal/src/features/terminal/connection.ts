@@ -23,7 +23,10 @@
  * - Callbacks (`onStatus`, `onSessionError`) replace direct DOM / module-level
  *   function calls (`setStatus`, `refreshSessions`).
  */
-import type { WsServerMessage } from "@sparklab/shared-types";
+import {
+  WS_CLOSE_UNAUTHORIZED,
+  type WsServerMessage,
+} from "@sparklab/shared-types";
 import type { Terminal } from "@xterm/xterm";
 
 // ---- Constants (same values as the original) ----
@@ -36,6 +39,8 @@ export interface ConnectionCallbacks {
   onStatus: (state: ConnectionStatus, text: string) => void;
   /** Called when the server sends an error frame (deleted session, etc.). */
   onSessionError: () => void;
+  /** Called when the server rejects the WebSocket due to authentication. */
+  onAuthError?: () => void;
 }
 
 /**
@@ -46,6 +51,7 @@ export class Connection {
   private readonly term: Terminal;
   private readonly onStatus: ConnectionCallbacks["onStatus"];
   private readonly onSessionError: ConnectionCallbacks["onSessionError"];
+  private readonly onAuthError: (() => void) | undefined;
 
   private ws: WebSocket | null = null;
   private attempt = 0;
@@ -67,6 +73,7 @@ export class Connection {
     this.term = term;
     this.onStatus = callbacks.onStatus;
     this.onSessionError = callbacks.onSessionError;
+    this.onAuthError = callbacks.onAuthError;
 
     // Derive gateway URL from environment. In production behind a reverse
     // proxy this would be the same origin; in dev it points at the gateway's
@@ -138,9 +145,15 @@ export class Connection {
       this.term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       if (this.ws !== ws) return; // a superseded socket closing: ignore
       this.stopHeartbeat();
+      if (ev.code === WS_CLOSE_UNAUTHORIZED) {
+        this.noReconnect = true;
+        this.onStatus("disconnected", "unauthorized");
+        this.onAuthError?.();
+        return;
+      }
       this.scheduleReconnect();
     };
     ws.onerror = () => {

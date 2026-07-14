@@ -150,61 +150,69 @@ export function SessionList({
           {sessions.map((s) => (
             <Tooltip key={s.id}>
               <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (s.id !== activeSessionId) onSelectSession(s.id);
-                  }}
+                <div
                   className={cn(
-                    "pointer-coarse:py-3 group flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-left transition-colors",
-                    collapsed && "justify-center px-0 py-2",
+                    "group relative flex w-full items-center rounded-sm transition-colors",
+                    collapsed && "justify-center",
                     s.id === activeSessionId
                       ? "border-l-primary bg-secondary border-l-2"
                       : "hover:bg-accent border-l-2 border-l-transparent",
                   )}
                 >
-                  {/* Status dot */}
-                  <span
+                  {/* Row select button — covers the content area (no nesting issue) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (s.id !== activeSessionId) onSelectSession(s.id);
+                    }}
                     className={cn(
-                      "size-[7px] shrink-0 rounded-full",
-                      isRunning(s.currentCommand)
-                        ? "bg-chart-1"
-                        : "bg-muted-foreground",
-                      s.attached && "ring-chart-1/30 ring-2",
+                      "pointer-coarse:py-3 flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left",
+                      collapsed ? "justify-center px-0" : "px-2.5",
                     )}
-                    title={
-                      (isRunning(s.currentCommand)
-                        ? `running: ${s.currentCommand}`
-                        : "idle shell") + (s.attached ? " (attached)" : "")
-                    }
-                  />
-
-                  {/* Name + command */}
-                  {!collapsed && (
-                    <div className="min-w-0 flex-1">
-                      <span
-                        className={cn(
-                          "block truncate text-sm",
-                          s.id === activeSessionId
-                            ? "text-foreground"
-                            : "text-secondary-foreground",
-                        )}
-                      >
-                        {s.name}
-                      </span>
-                      {s.currentCommand && (
-                        <span className="text-muted-foreground block truncate font-mono text-xs">
-                          {s.currentCommand}
-                        </span>
+                  >
+                    {/* Status dot */}
+                    <span
+                      className={cn(
+                        "size-[7px] shrink-0 rounded-full",
+                        isRunning(s.currentCommand)
+                          ? "bg-chart-1"
+                          : "bg-muted-foreground",
+                        s.attached && "ring-chart-1/30 ring-2",
                       )}
-                    </div>
-                  )}
+                      title={
+                        (isRunning(s.currentCommand)
+                          ? `running: ${s.currentCommand}`
+                          : "idle shell") + (s.attached ? " (attached)" : "")
+                      }
+                    />
 
-                  {/* Delete button — always visible + enlarged on touch (B4/B10) */}
+                    {/* Name + command */}
+                    {!collapsed && (
+                      <div className="min-w-0 flex-1">
+                        <span
+                          className={cn(
+                            "block truncate text-sm",
+                            s.id === activeSessionId
+                              ? "text-foreground"
+                              : "text-secondary-foreground",
+                          )}
+                        >
+                          {s.name}
+                        </span>
+                        {s.currentCommand && (
+                          <span className="text-muted-foreground block truncate font-mono text-xs">
+                            {s.currentCommand}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </button>
+
+                  {/* Delete button — true sibling, not nested inside select button */}
                   {!collapsed && (
                     <button
                       type="button"
-                      className="text-muted-foreground hover:bg-destructive/20 hover:text-destructive pointer-coarse:p-2.5 pointer-coarse:opacity-100 shrink-0 rounded-sm p-1 opacity-0 transition-all group-hover:opacity-100"
+                      className="text-muted-foreground hover:bg-destructive/20 hover:text-destructive pointer-coarse:p-2.5 pointer-coarse:opacity-100 mr-1.5 shrink-0 rounded-sm p-1 opacity-0 transition-all group-hover:opacity-100"
                       title="Delete session (kills the running job)"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -214,7 +222,7 @@ export function SessionList({
                       <Trash2 className="size-3.5" />
                     </button>
                   )}
-                </button>
+                </div>
               </TooltipTrigger>
               {collapsed && (
                 <TooltipContent side="right">{s.name}</TooltipContent>

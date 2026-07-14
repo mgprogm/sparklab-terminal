@@ -50,6 +50,8 @@ Plain-JS Node server, no framework, no build step. Two files:
 
 Deliberate choices: it stays plain JS (moved verbatim in the monorepo restructure; TS conversion is a separate future task), and it serves no frontend anymore (its old vanilla-JS `public/` was deleted after the cut-over gates passed; static requests now 404).
 
+The auth boundary lives at the gateway: single shared-secret token auth via `GATEWAY_AUTH_TOKEN`, in-memory cookie sessions (`gw_session`, HttpOnly, SameSite=Strict, 30-day absolute expiry), origin allowlist on WS upgrades and mutating REST, per-IP login rate limiting (5/min). The gateway binds `127.0.0.1` by default; TLS terminates at a reverse proxy (Caddy) per [DEPLOYMENT.md](DEPLOYMENT.md). When `GATEWAY_AUTH_TOKEN` is unset, auth is disabled (open mode); the gateway refuses to start tokenless on a non-loopback `HOST`.
+
 Tests live in `test/` as standalone node scripts (see [TESTING.md](TESTING.md)) — they are the load-bearing proof of job survival.
 
 ### `apps/terminal` (`@sparklab/terminal`)

@@ -9,7 +9,7 @@
 
 import { Separator } from "@sparklab/ui/components/ui/separator";
 import { cn } from "@sparklab/ui/lib/utils";
-import { ChevronsLeft, ChevronsRight } from "lucide-react";
+import { ChevronsLeft, ChevronsRight, LogOut } from "lucide-react";
 
 import { SessionList } from "./session-list";
 
@@ -25,6 +25,7 @@ interface SessionSidebarProps {
   onToggleCollapse: () => void;
   /** Called after any dialog closes so the terminal can reclaim focus. */
   onDialogClose?: () => void;
+  onLogout?: () => void;
 }
 
 export function SessionSidebar({
@@ -36,6 +37,7 @@ export function SessionSidebar({
   onDeleteSession,
   onToggleCollapse,
   onDialogClose,
+  onLogout,
 }: SessionSidebarProps) {
   return (
     <aside
@@ -55,6 +57,18 @@ export function SessionSidebar({
       />
 
       <Separator />
+
+      {onLogout && (
+        <button
+          type="button"
+          onClick={onLogout}
+          aria-label="Sign out"
+          className="border-border text-muted-foreground hover:bg-accent hover:text-secondary-foreground flex h-[38px] w-full items-center justify-center gap-2 border-t bg-transparent text-xs font-medium tracking-wider transition-colors"
+        >
+          <LogOut className="size-3.5" />
+          {!collapsed && <span>Sign out</span>}
+        </button>
+      )}
 
       {/* Collapse toggle (desktop-only affordance) */}
       <button

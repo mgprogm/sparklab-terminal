@@ -1,5 +1,5 @@
-import { TerminalShell } from "@/features/terminal";
+import { AuthGate } from "@/components/auth-gate";
 
 export default function TerminalPage() {
-  return <TerminalShell />;
+  return <AuthGate />;
 }

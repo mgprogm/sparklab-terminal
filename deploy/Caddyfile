@@ -1,0 +1,27 @@
+# Caddyfile — single-origin reverse proxy for the web terminal stack.
+#
+# Caddy handles TLS automatically (Let's Encrypt / ZeroSSL).  The two backend
+# services bind to loopback only; Caddy is the sole public-facing process.
+#
+# Replace "term.example.com" with your actual domain.
+# Run: caddy run --config Caddyfile (or systemd unit — see DEPLOYMENT.md)
+
+term.example.com {
+    # Gateway: WebSocket attach endpoint and REST API.
+    # Must come before the catch-all so /attach and /api/* hit the gateway.
+    handle /attach {
+        reverse_proxy 127.0.0.1:3007
+    }
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:3007
+    }
+
+    # Everything else → Next.js terminal app.
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+
+    # Caddy issues and renews TLS certificates automatically.
+    # No tls directive needed — it is the default for a named host.
+}

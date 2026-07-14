@@ -5,10 +5,12 @@
 | [GETTING-STARTED.md](GETTING-STARTED.md)               | Prerequisites, install, starting dev, ports, environment variables                                                      |
 | [ARCHITECTURE.md](ARCHITECTURE.md)                     | Monorepo layout, the three-lifetimes design, every app and package                                                      |
 | [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)           | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
-| [TESTING.md](TESTING.md)                               | Unit tests, Playwright E2E, the six cut-over gates, CI pipeline                                                         |
+| [TESTING.md](TESTING.md)                               | Unit tests, Playwright E2E, the seven gates (six cut-over + auth), CI pipeline                                          |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                     | Code conventions: feature folders, imports, state rules, commits                                                        |
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                   | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior) |
 | [FRONTEND-PLATFORM-PLAN.md](FRONTEND-PLATFORM-PLAN.md) | The implementation plan that produced the current monorepo (executed 2026-07-14; kept as a decision record)             |
+| [DEPLOYMENT.md](DEPLOYMENT.md)                         | Production deployment: reverse-proxy topology, environment variables, Caddyfile, systemd, safety checklist              |
+| [PHASE-3-HARDENING-PLAN.md](PHASE-3-HARDENING-PLAN.md) | Workstream A (auth/hardening) shipped 2026-07-14; Workstream B (scrollback, session status) in progress                 |
 
 ## Quick orientation
 

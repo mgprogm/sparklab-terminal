@@ -6,6 +6,8 @@ import {
 } from "@sparklab/shared-types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { UnauthorizedError } from "@/features/auth/api";
+
 // ---- Query-key factory ----
 export const sessionKeys = {
   all: ["sessions"] as const,
@@ -16,6 +18,7 @@ export const sessionKeys = {
 
 async function fetchSessions(): Promise<ListSessionsResponse> {
   const res = await fetch("/api/sessions");
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok)
     throw new Error(`Failed to fetch sessions: ${String(res.status)}`);
   const data: unknown = await res.json();
@@ -28,6 +31,7 @@ async function createSessionApi(name?: string): Promise<CreateSessionResponse> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     const err = (await res
       .json()
@@ -42,6 +46,7 @@ async function deleteSessionApi(id: string): Promise<void> {
   const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok && res.status !== 204) {
     const err = (await res
       .json()

@@ -69,6 +69,10 @@ jobs:
 
       - name: Build apps
         run: pnpm turbo build
+        env:
+          # playwright.config.ts boots the gateway on 3907; the client WS URL
+          # is inlined at build time, so the e2e build must bake it in.
+          NEXT_PUBLIC_GATEWAY_URL: http://localhost:3907
 
       - name: Install Playwright browsers
         run: pnpm --filter @sparklab/e2e exec playwright install chromium --with-deps

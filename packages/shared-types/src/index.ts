@@ -29,3 +29,12 @@ export {
   type WsError,
   type WsServerMessage,
 } from "./terminal";
+export {
+  LoginBodySchema,
+  AuthErrorSchema,
+  MeResponseSchema,
+  WS_CLOSE_UNAUTHORIZED,
+  type LoginBody,
+  type AuthError,
+  type MeResponse,
+} from "./auth";

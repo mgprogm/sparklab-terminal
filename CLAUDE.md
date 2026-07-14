@@ -23,15 +23,16 @@ A web terminal whose defining property is that **jobs survive the browser and th
 ## Commands
 
 ```bash
-npm install          # installs deps AND runs postinstall (vendors xterm into public/vendor/)
-npm start            # gateway on http://localhost:3007 (override with PORT=xxxx)
-npm run dev          # same, with --watch reload
-npm run smoke        # test: proves node-pty can attach to tmux and the session outlives pty.kill()
-npm run acceptance   # test: proves a job keeps counting while disconnected, then resumes live
-npm run vendor       # re-copy xterm assets from node_modules -> public/vendor/ (rarely needed by hand)
+pnpm install                          # workspace install (pnpm + Turborepo)
+pnpm dev                              # turbo dev: gateway (3007) + Next.js terminal app (3000)
+pnpm build / lint / typecheck / test  # turbo across all workspaces
+pnpm --filter @sparklab/terminal-gateway smoke             # node-pty attaches tmux; session outlives pty.kill()
+pnpm --filter @sparklab/terminal-gateway acceptance        # job keeps counting while disconnected, resumes live
+pnpm --filter @sparklab/terminal-gateway acceptance:multi  # multi-session isolation; DELETE is the only kill
+pnpm --filter @sparklab/e2e e2e       # Playwright gates (needs a production build with NEXT_PUBLIC_GATEWAY_URL=http://localhost:3907)
 ```
 
-There is no build, lint, or test-runner framework. The two "tests" are standalone node scripts under `test/` that spawn real tmux sessions and a real gateway, assert with plain `throw`, and print `PASS`/`FAIL`. Run them individually with `node test/<file>.js`. Both clean up their tmux sessions; if one is interrupted, check for orphans with `tmux ls` and `tmux kill-session -t <name>`.
+The gateway "tests" are standalone node scripts under `apps/terminal-gateway/test/` that spawn real tmux sessions and a real gateway, assert with plain `throw`, and print `PASS`/`FAIL`. They clean up their tmux sessions; if one is interrupted, check for orphans with `tmux ls` and `tmux kill-session -t <name>`.
 
 ## Architecture: three independent lifetimes
 
@@ -42,24 +43,26 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 ```
 
 - **The gateway never owns the job.** On WS attach it spawns a node-pty running `tmux attach-session -t <name>`. On WS close it kills **only that pty** (which detaches the tmux client). It must **never** run `tmux kill-session` on disconnect — that line's absence is what keeps jobs alive. See `teardown()` in `src/server.js`.
-- **tmux is the source of truth for session state.** There is no database. A restarted gateway rediscovers everything via `tmux has-session` / `tmux ls`. Sessions are (re)created lazily by `ensureSession()` on first attach.
+- **tmux is the source of truth for session state.** There is no database. A restarted gateway rediscovers everything via `tmux has-session` / `tmux ls`. Sessions are created explicitly via `POST /api/sessions`; attach never creates.
 - **State restoration on reconnect is tmux's attach redraw, not replay.** Phase 1 deliberately does NOT use `capture-pane`. When a client attaches, tmux redraws the current screen automatically (including full-screen apps like vim/htop). Adding `capture-pane` replay on top would double-draw — see the design doc's Edge Cases before attempting scrollback replay.
 
 ## Load-bearing invariants (don't break these)
 
 - **Raw bytes end to end.** The pty is spawned with `encoding: null` so `onData` yields Buffers, never decoded strings. pty output → WS **binary** frames → `term.write(Uint8Array)`; keystrokes → `TextEncoder` → WS binary → `pty.write`. Decoding to a JS string anywhere mid-pipeline corrupts multibyte UTF-8 (verified with Thai input). Keep binary frames binary.
 - **WS message routing is by frame type, not content.** Binary frame = keystrokes. Text frame = JSON control message (`resize`, `ping`). Server → client control messages are also JSON text (`exit`, `pong`). Anything new on the wire follows this split.
-- **Reconnect resets the terminal before the redraw.** The client (`public/app.js`) sets `freshConnect = true` on each (re)connect and calls `term.reset()` on the first binary frame after, so tmux's attach redraw doesn't stack on stale content.
+- **Reconnect resets the terminal before the redraw.** The client (`apps/terminal/src/features/terminal/connection.ts`) sets `freshConnect = true` on each (re)connect and calls `term.reset()` on the first binary frame after, so tmux's attach redraw doesn't stack on stale content.
 - **Multi-viewer sizing:** sessions are configured with `window-size latest` + `aggressive-resize on` so tmux follows the most recently active client instead of shrinking to the smallest.
 
 ## Layout
 
-- The gateway now lives in `apps/terminal-gateway/` (moved in Phase 0); the paths below are relative to that directory.
-- `src/server.js` — the entire gateway: static file serving, `/attach` WS endpoint, tmux session management. Single hardcoded session `web-main`.
-- `public/` — frontend. `app.js` is all the client logic; `vendor/` is gitignored and regenerated by `scripts/vendor-xterm.js` (postinstall) — never edit files in `vendor/`, and never switch the frontend to a CDN (offline/CSP requirement).
-- `test/` — smoke + acceptance scripts.
+- `apps/terminal-gateway/` — Node gateway (plain JS). `src/server.js` is the entire gateway: REST session CRUD + auth endpoints, `/attach` WS endpoint, tmux session management, origin allowlist, rate limiting. Sessions are `web-<uuid>`, created via `POST /api/sessions`.
+- `apps/terminal/` — Next.js frontend. Auth gate in `src/features/auth/`; terminal logic in `src/features/terminal/`.
+- `apps/e2e/` — Playwright E2E suite (gates 1--7 + StrictMode check).
+- `packages/shared-types/` — Zod schemas for REST, WS, and auth (`src/terminal.ts`, `src/auth.ts`).
+- `test/` (in `apps/terminal-gateway/`) — smoke + acceptance scripts.
+- `deploy/Caddyfile` — reverse-proxy example for production.
 - `docs/DESIGN-SYSTEM.md` — design and phased plan.
 
 ## Status & what's deliberately absent
 
-Phase 1 (single session, attach/detach, reconnect) is done and verified. **Not yet implemented (Phase 2+): auth, WSS/HTTPS, REST create/list/kill, multi-session UI, `capture-pane` scrollback.** A terminal is unauthenticated remote code execution — **do not expose this gateway publicly as-is.**
+Phase 1 (attach/detach, reconnect), Phase 2 (multi-session REST + UI), and Phase 3 Workstream A (token auth, origin allowlist, rate limiting, loopback bind, deploy docs) are done and verified (14/14 E2E, 2026-07-14). Expose the gateway only via the reverse-proxy topology in `docs/DEPLOYMENT.md` with `GATEWAY_AUTH_TOKEN` set. **Not yet implemented:** scrollback restore + session status (Workstream B, in progress), multi-user isolation (Phase 4).

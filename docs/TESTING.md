@@ -4,7 +4,7 @@ Three layers, each proving something the others can't:
 
 1. **Gateway acceptance scripts** — real tmux, real gateway, no browser. Prove the _process-survival_ core.
 2. **Vitest unit tests** — fast, isolated. Prove the _client protocol logic_ (Connection class, schemas, stores, hooks).
-3. **Playwright E2E** — real browser against a production build. Prove the _six cut-over gates_ end to end.
+3. **Playwright E2E** — real browser against a production build. Prove the _seven gates_ end to end (gates 1--6 are the historical cut-over gates; gate 7 is the Phase 3 auth gate).
 
 ```bash
 pnpm test                 # all Vitest suites (via turbo)
@@ -30,13 +30,16 @@ They clean up their tmux sessions; if interrupted, check `tmux ls` and `tmux kil
 
 Shared presets in `@sparklab/config-vitest` (`base` = node env, `react` = jsdom + Testing Library).
 
-| Suite                                        | Covers                                                                                                                                                                                                                                                                                  | Tests |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| `packages/shared-types/src/terminal.test.ts` | Schema round-trips against the real gateway payload shapes                                                                                                                                                                                                                              | 28    |
-| `apps/terminal/.../connection.test.ts`       | **The executable spec of the Connection class**: Uint8Array writes, `term.reset()` exactly once per fresh connect, resize/ping JSON frames, `noReconnect` blocks both resurrection paths, backoff schedule (1s→2s→4s→8s→15s), heartbeat force-close, `dispose()` finality, supersession | 35    |
-| `apps/terminal/.../store.test.ts`            | Zustand store + active-session-vanished fallback                                                                                                                                                                                                                                        | 8     |
-| `apps/terminal/.../use-sessions.test.tsx`    | Query hooks with mocked fetch; Zod failures surface as errors                                                                                                                                                                                                                           | 7     |
-| `apps/terminal/.../session-sidebar.test.tsx` | Sidebar rendering, create dialog, delete confirmation, collapse, selection                                                                                                                                                                                                              | 12    |
+| Suite                                             | Covers                                                                                                                                                                                                                                                                                  | Tests |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| `packages/shared-types/src/terminal.test.ts`      | Schema round-trips against the real gateway payload shapes                                                                                                                                                                                                                              | 28    |
+| `apps/terminal/.../connection.test.ts`            | **The executable spec of the Connection class**: Uint8Array writes, `term.reset()` exactly once per fresh connect, resize/ping JSON frames, `noReconnect` blocks both resurrection paths, backoff schedule (1s→2s→4s→8s→15s), heartbeat force-close, `dispose()` finality, supersession | 35    |
+| `apps/terminal/.../store.test.ts`                 | Zustand store + active-session-vanished fallback                                                                                                                                                                                                                                        | 8     |
+| `apps/terminal/.../use-sessions.test.tsx`         | Query hooks with mocked fetch; Zod failures surface as errors                                                                                                                                                                                                                           | 7     |
+| `apps/terminal/.../session-sidebar.test.tsx`      | Sidebar rendering, create dialog, delete confirmation, collapse, selection                                                                                                                                                                                                              | 12    |
+| `apps/terminal/.../auth/api.test.ts`              | Auth API client: login (204/401/429), me (200/401), logout                                                                                                                                                                                                                              | 6     |
+| `apps/terminal/.../auth/login-screen.test.tsx`    | Login form rendering, token submission, invalid-token error display                                                                                                                                                                                                                     | 3     |
+| `apps/terminal/.../auth/use-auth-status.test.tsx` | `useAuthStatus` hook: authenticated and unauthenticated states                                                                                                                                                                                                                          | 2     |
 
 Convention: tests live in `__tests__/` beside the feature (or next to the source in packages). Use the `react` preset for anything touching the DOM.
 
@@ -44,17 +47,18 @@ Convention: tests live in `__tests__/` beside the feature (or next to the source
 
 Chromium only, serial workers. `playwright.config.ts` boots a **production build** of `apps/terminal` (port 3902, built with `NEXT_PUBLIC_GATEWAY_URL=http://localhost:3907`) and a gateway on port 3907 via `webServer`. First run: `pnpm exec playwright install chromium`.
 
-The specs are the **six cut-over gates** — the checklist that had to pass before the legacy vanilla-JS frontend was deleted (it did, 2026-07-14):
+Gates 1--6 are the **cut-over gates** -- the checklist that had to pass before the legacy vanilla-JS frontend was deleted (it did, 2026-07-14). Gate 7 is the Phase 3 auth gate:
 
-| Spec                             | Gate                                | Method                                                                                                            |
-| -------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `gate-1-gateway-scripts.spec.ts` | Gateway scripts still pass          | Runs all three scripts via `execFile`                                                                             |
-| `gate-2-thai-roundtrip.spec.ts`  | Multibyte UTF-8 uncorrupted         | Types `สวัสดีครับ`, echoes to a file inside the session, asserts file bytes                                       |
-| `gate-3-reconnect.spec.ts`       | Clean redraw after gateway restart  | Kills + respawns the gateway mid-session; asserts a pre-restart marker appears exactly once and input still works |
-| `gate-4-job-survival.spec.ts`    | Jobs survive page close             | Starts a ticking counter, closes the page, reopens; asserts the counter advanced                                  |
-| `gate-5-vim-redraw.spec.ts`      | Full-screen apps redraw on reattach | Opens vim, reloads the page, asserts vim UI in `capture-pane`                                                     |
-| `gate-6-multi-viewer.spec.ts`    | Resize follows the latest client    | Two pages, different viewports; asserts tmux `window_width` follows                                               |
-| `strictmode-check.spec.ts`       | No double-attach                    | Asserts `tmux list-clients` shows exactly 1 client after page load                                                |
+| Spec                             | Gate                                  | Method                                                                                                                                                                                                                          |
+| -------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gate-1-gateway-scripts.spec.ts` | Gateway scripts still pass            | Runs all three scripts via `execFile`                                                                                                                                                                                           |
+| `gate-2-thai-roundtrip.spec.ts`  | Multibyte UTF-8 uncorrupted           | Types `สวัสดีครับ`, echoes to a file inside the session, asserts file bytes                                                                                                                                                     |
+| `gate-3-reconnect.spec.ts`       | Clean redraw after gateway restart    | Kills + respawns the gateway mid-session; asserts a pre-restart marker appears exactly once and input still works                                                                                                               |
+| `gate-4-job-survival.spec.ts`    | Jobs survive page close               | Starts a ticking counter, closes the page, reopens; asserts the counter advanced                                                                                                                                                |
+| `gate-5-vim-redraw.spec.ts`      | Full-screen apps redraw on reattach   | Opens vim, reloads the page, asserts vim UI in `capture-pane`                                                                                                                                                                   |
+| `gate-6-multi-viewer.spec.ts`    | Resize follows the latest client      | Two pages, different viewports; asserts tmux `window_width` follows                                                                                                                                                             |
+| `gate-7-auth.spec.ts`            | Unauthenticated is rejected (Phase 3) | REST 401 without cookie; 429 rate limit after 5 wrong tokens; 403 on disallowed WS origin; 4001 close on unauthenticated WS; UI login journey (wrong token error, correct login, keystroke echo, cookie persists across reload) |
+| `strictmode-check.spec.ts`       | No double-attach                      | Asserts `tmux list-clients` shows exactly 1 client after page load                                                                                                                                                              |
 
 Caveats:
 
@@ -78,3 +82,5 @@ Git hooks (husky): pre-commit runs `lint-staged` (prettier on staged files — e
 | `connection.ts` / `xterm.tsx`       | connection unit tests + gates 2–4 + strictmode check |
 | Session REST semantics              | shared-types tests + `use-sessions` tests + gate 1   |
 | Anything touching pty/tmux spawning | all three gateway scripts                            |
+| Auth endpoints or cookie logic      | auth unit tests + gate 7                             |
+| `features/auth/` UI                 | auth unit tests + gate 7 (UI journey)                |
