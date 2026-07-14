@@ -10,11 +10,39 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type {
   AgentApprovalBehavior,
+  AgentChatSummary,
+  AgentReplayEntry,
   AgentStatusState,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
 import { WRITE_TOOL_NAMES } from "./tool-meta";
 import type { TranscriptEntry } from "./types";
+
+/** Fold a server-reconstructed replay entry into a UI transcript entry. */
+function replayToEntry(e: AgentReplayEntry): TranscriptEntry {
+  switch (e.kind) {
+    case "user":
+      return { kind: "user", id: e.id, text: e.text ?? "" };
+    case "assistant":
+      return {
+        kind: "assistant",
+        id: e.id,
+        text: e.text ?? "",
+        streaming: false,
+      };
+    case "tool":
+      return {
+        kind: "tool",
+        id: e.id,
+        tool: e.tool ?? "",
+        sessionId: e.sessionId,
+        summary: e.summary ?? "",
+        input: e.input,
+        state: e.ok === false ? "error" : "ok",
+        resultSummary: e.resultSummary,
+      };
+  }
+}
 
 let seq = 0;
 const nextId = () => `e${String(++seq)}`;
@@ -31,6 +59,9 @@ interface AgentState {
   chatId: string | null;
   entries: TranscriptEntry[];
   unreadCount: number;
+
+  /** Past chats for the history modal (populated by `list_chats`). */
+  chats: AgentChatSummary[];
 
   /** Session the composer targets; null = follow the focused terminal ("Auto"). */
   pinnedTargetId: string | null;
@@ -51,7 +82,8 @@ interface AgentState {
   ingest: (frame: AgentWsServerMessage) => void;
   /** Resolve an approval entry locally (server has been told separately). */
   resolveApproval: (requestId: string, behavior: AgentApprovalBehavior) => void;
-  clearConversation: () => void;
+  /** Wipe transcript + chatId for a fresh chat (the WS reconnects with none). */
+  resetForNewChat: () => void;
 }
 
 function bumpWrite(
@@ -91,6 +123,7 @@ export const useAgentStore = create<AgentState>()(
       chatId: null,
       entries: [],
       unreadCount: 0,
+      chats: [],
 
       pinnedTargetId: null,
       setPinnedTargetId: (id) => set({ pinnedTargetId: id }),
@@ -111,6 +144,24 @@ export const useAgentStore = create<AgentState>()(
         switch (frame.type) {
           case "chat_started":
             set({ chatId: frame.chatId });
+            break;
+
+          case "chat_list":
+            set({ chats: frame.chats });
+            break;
+
+          case "chat_history":
+            // REPLACE, never append: this fires on explicit load, page reload,
+            // AND every transient reconnect (server JSONL is the source of
+            // truth). Appending would duplicate the transcript on a flaky link.
+            set({
+              chatId: frame.chatId,
+              entries: frame.entries.map(replayToEntry),
+              unreadCount: 0,
+              status: "idle",
+              agentActiveSessionIds: [],
+              _writeActive: {},
+            });
             break;
 
           case "assistant_delta":
@@ -274,8 +325,9 @@ export const useAgentStore = create<AgentState>()(
           ),
         })),
 
-      clearConversation: () =>
+      resetForNewChat: () =>
         set({
+          chatId: null,
           entries: [],
           unreadCount: 0,
           status: "idle",
@@ -285,7 +337,9 @@ export const useAgentStore = create<AgentState>()(
     }),
     {
       name: "agent-chat-store",
-      partialize: (s) => ({ panelOpen: s.panelOpen }),
+      // Persist chatId too so a page reload resumes the last conversation (the
+      // service replays its transcript via chat_history on reconnect).
+      partialize: (s) => ({ panelOpen: s.panelOpen, chatId: s.chatId }),
     },
   ),
 );

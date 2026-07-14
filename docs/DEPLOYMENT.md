@@ -70,6 +70,11 @@ Because Caddy serves the agent WS at the same public origin as the site,
 `NEXT_PUBLIC_AGENT_URL` is typically the same host as `NEXT_PUBLIC_GATEWAY_URL`
 (both `wss://term.example.com`); the path (`/agent` vs `/attach`) routes them.
 
+Conversation history is stored as JSONL files under `apps/agent-service/data/`
+(gitignored, one file per chat). Back up or prune that directory as needed — the
+user can delete individual chats from the panel's History modal, but there is no
+automatic expiry.
+
 ## Step-by-step: production on a VPS
 
 ### 1. Install prerequisites

@@ -5,8 +5,8 @@
  * connection lifecycle); renders a docked right column on desktop and a bottom
  * Sheet on mobile. Closed = nothing visible but the FAB.
  */
-import { useEffect, useMemo, useRef } from "react";
-import { EllipsisVertical, Sparkles, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { EllipsisVertical, History, Plus, Sparkles, X } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,6 +31,7 @@ import { useTerminalStore } from "@/features/terminal/store";
 import { useAgentStore } from "../store";
 import { useAgentChat } from "../use-agent-chat";
 import { ApprovalCard } from "./approval-card";
+import { ChatHistoryDialog } from "./chat-history-dialog";
 import { AssistantMessage, UserMessage } from "./chat-message";
 import { Composer } from "./composer";
 import { ToolEventRow } from "./tool-event-row";
@@ -48,14 +49,31 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   const togglePanel = useAgentStore((s) => s.togglePanel);
   const entries = useAgentStore((s) => s.entries);
   const connected = useAgentStore((s) => s.connected);
-  const clearConversation = useAgentStore((s) => s.clearConversation);
+  const chatId = useAgentStore((s) => s.chatId);
+  const chats = useAgentStore((s) => s.chats);
   const resolveApproval = useAgentStore((s) => s.resolveApproval);
   const setAutoApprove = useAgentStore((s) => s.setAutoApprove);
   const addUserMessage = useAgentStore((s) => s.addUserMessage);
 
   const activeSessionId = useTerminalStore((s) => s.activeSessionId);
   const { data: sessions = [] } = useSessions();
-  const { sendUserMessage, sendApproval, interrupt } = useAgentChat();
+  const {
+    sendUserMessage,
+    sendApproval,
+    interrupt,
+    listChats,
+    newChat,
+    loadChat,
+    deleteChat,
+  } = useAgentChat();
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  // Refresh the history list whenever the modal is open and the socket is up
+  // (covers first open, a reconnect while open, and post-delete refetch).
+  useEffect(() => {
+    if (historyOpen && connected) listChats();
+  }, [historyOpen, connected, listChats]);
 
   const sessionName = useMemo(() => {
     const m = new Map<string, string>();
@@ -106,7 +124,8 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <Header
         connected={connected}
-        onClear={clearConversation}
+        onNewChat={newChat}
+        onOpenHistory={() => setHistoryOpen(true)}
         onClose={() => setPanelOpen(false)}
       />
       <MessageStream
@@ -120,6 +139,15 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
         activeSessionId={activeSessionId}
         onSend={handleSend}
         onStop={interrupt}
+      />
+      <ChatHistoryDialog
+        open={historyOpen}
+        onOpenChange={setHistoryOpen}
+        chats={chats}
+        activeChatId={chatId}
+        onSelect={loadChat}
+        onDelete={deleteChat}
+        onNew={newChat}
       />
     </div>
   );
@@ -152,11 +180,13 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
 
 function Header({
   connected,
-  onClear,
+  onNewChat,
+  onOpenHistory,
   onClose,
 }: {
   connected: boolean;
-  onClear: () => void;
+  onNewChat: () => void;
+  onOpenHistory: () => void;
   onClose: () => void;
 }) {
   return (
@@ -182,9 +212,13 @@ function Header({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={onClear}>
-              <Trash2 className="size-3.5" />
-              Clear conversation
+            <DropdownMenuItem onClick={onNewChat}>
+              <Plus className="size-3.5" />
+              New chat
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onOpenHistory}>
+              <History className="size-3.5" />
+              History
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

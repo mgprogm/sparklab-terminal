@@ -16,6 +16,7 @@ import {
 import { config } from "./config.js";
 import { gateway } from "./gateway-client.js";
 import { AgentLoop } from "./agent-loop.js";
+import { deleteChat, listChats } from "./history.js";
 
 const server = createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
@@ -81,6 +82,14 @@ wss.on("connection", (ws: WebSocket, req) => {
         break;
       case "interrupt":
         loop.interrupt();
+        break;
+      case "list_chats":
+        void listChats().then((chats) => send({ type: "chat_list", chats }));
+        break;
+      case "delete_chat":
+        void deleteChat(msg.data.chatId)
+          .then(() => listChats())
+          .then((chats) => send({ type: "chat_list", chats }));
         break;
     }
   };

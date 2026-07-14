@@ -148,6 +148,14 @@ export class AgentConnection {
     this.sendRaw({ type: "interrupt" });
   }
 
+  listChats(): void {
+    this.sendRaw({ type: "list_chats" });
+  }
+
+  deleteChat(chatId: string): void {
+    this.sendRaw({ type: "delete_chat", chatId });
+  }
+
   dispose(): void {
     this.noReconnect = true;
     if (this.reconnectTimer) {

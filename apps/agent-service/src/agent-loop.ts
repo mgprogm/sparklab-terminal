@@ -19,7 +19,12 @@ import type {
 import { azure, MODEL } from "./azure.js";
 import { CAPS } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
-import { appendMessages, loadChat, newChatId } from "./history.js";
+import {
+  appendMessages,
+  loadChat,
+  newChatId,
+  reconstructTranscript,
+} from "./history.js";
 import { systemPrompt } from "./system-prompt.js";
 import {
   TOOLS,
@@ -61,6 +66,15 @@ export class AgentLoop {
   async init(): Promise<void> {
     await this.ready;
     this.send({ type: "chat_started", chatId: this.chatId });
+    // Replay the transcript so a resumed chat (explicit load, page reload, or
+    // transient reconnect) renders. The client REPLACES its entries with this.
+    if (this.history.length > 0) {
+      this.send({
+        type: "chat_history",
+        chatId: this.chatId,
+        entries: reconstructTranscript(this.history),
+      });
+    }
   }
 
   onApprovalResponse(requestId: string, behavior: AgentApprovalBehavior): void {

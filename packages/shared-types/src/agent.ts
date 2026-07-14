@@ -126,12 +126,27 @@ export const AgentPingSchema = z.object({
 });
 export type AgentPing = z.infer<typeof AgentPingSchema>;
 
+/** User asks for the list of past chats (to populate the history modal). */
+export const AgentListChatsSchema = z.object({
+  type: z.literal("list_chats"),
+});
+export type AgentListChats = z.infer<typeof AgentListChatsSchema>;
+
+/** User deletes a past chat by id. The server replies with a fresh chat_list. */
+export const AgentDeleteChatSchema = z.object({
+  type: z.literal("delete_chat"),
+  chatId: z.string(),
+});
+export type AgentDeleteChat = z.infer<typeof AgentDeleteChatSchema>;
+
 /** Discriminated union of all client -> server agent chat messages. */
 export const AgentWsClientMessageSchema = z.discriminatedUnion("type", [
   AgentUserMessageSchema,
   AgentApprovalResponseSchema,
   AgentInterruptSchema,
   AgentPingSchema,
+  AgentListChatsSchema,
+  AgentDeleteChatSchema,
 ]);
 export type AgentWsClientMessage = z.infer<typeof AgentWsClientMessageSchema>;
 
@@ -233,6 +248,64 @@ export const AgentPongSchema = z.object({
 });
 export type AgentPong = z.infer<typeof AgentPongSchema>;
 
+/** One row in the chat history list — metadata derived from the JSONL file. */
+export const AgentChatSummarySchema = z.object({
+  /** Chat id (== JSONL filename stem, resumable via ?resumeChatId=). */
+  id: z.string(),
+  /** Derived from the first user message; empty string if none yet. */
+  title: z.string(),
+  /** Last-modified time of the JSONL file, epoch milliseconds. */
+  updatedAt: z.number(),
+  /** Number of persisted messages (user + assistant + tool). */
+  messageCount: z.number().int(),
+});
+export type AgentChatSummary = z.infer<typeof AgentChatSummarySchema>;
+
+/** Server reports the list of past chats (reply to list_chats / delete_chat). */
+export const AgentChatListSchema = z.object({
+  type: z.literal("chat_list"),
+  chats: z.array(AgentChatSummarySchema),
+});
+export type AgentChatList = z.infer<typeof AgentChatListSchema>;
+
+/**
+ * One reconstructed transcript entry, replayed when a chat is resumed. The
+ * server folds the stored OpenAI messages into these so the browser never sees
+ * the raw model message format. `tool` entries carry the fields a live
+ * `tool_use` + `tool_result` pair would have produced.
+ */
+export const AgentReplayEntrySchema = z.object({
+  kind: z.enum(["user", "assistant", "tool"]),
+  id: z.string(),
+  /** user / assistant text. */
+  text: z.string().optional(),
+  /** tool: tool name. */
+  tool: z.string().optional(),
+  /** tool: session it targeted, if any. */
+  sessionId: z.string().optional(),
+  /** tool: one-line call summary. */
+  summary: z.string().optional(),
+  /** tool: raw input. */
+  input: z.unknown().optional(),
+  /** tool: whether the call succeeded (undefined when no result was recorded). */
+  ok: z.boolean().optional(),
+  /** tool: short outcome text on failure. */
+  resultSummary: z.string().optional(),
+});
+export type AgentReplayEntry = z.infer<typeof AgentReplayEntrySchema>;
+
+/**
+ * Full transcript of a resumed chat, sent right after `chat_started` when the
+ * chat has prior history. The client REPLACES its transcript with this (also
+ * the correct resync on a transient reconnect — the server JSONL is truth).
+ */
+export const AgentChatHistorySchema = z.object({
+  type: z.literal("chat_history"),
+  chatId: z.string(),
+  entries: z.array(AgentReplayEntrySchema),
+});
+export type AgentChatHistory = z.infer<typeof AgentChatHistorySchema>;
+
 /** Discriminated union of all server -> client agent chat messages. */
 export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatStartedSchema,
@@ -244,5 +317,7 @@ export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentStatusSchema,
   AgentErrorSchema,
   AgentPongSchema,
+  AgentChatListSchema,
+  AgentChatHistorySchema,
 ]);
 export type AgentWsServerMessage = z.infer<typeof AgentWsServerMessageSchema>;

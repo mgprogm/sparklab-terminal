@@ -56,12 +56,16 @@ is reserved for the terminal's `/attach`). Schemas live in
 | `approval_response` | `requestId`, `behavior`    | answer a pending approval (`allow` / `allow_always` / `deny`) |
 | `interrupt`         | —                          | abort the current turn (Stop button)                          |
 | `ping`              | —                          | heartbeat                                                     |
+| `list_chats`        | —                          | request the past-chat list for the history modal              |
+| `delete_chat`       | `chatId`                   | delete a past chat; server replies with a fresh `chat_list`   |
 
 ### Server → client
 
 | type                | fields                                                   | meaning                                                    |
 | ------------------- | -------------------------------------------------------- | ---------------------------------------------------------- |
 | `chat_started`      | `chatId`                                                 | keys the JSONL history; pass as `?resumeChatId=` to resume |
+| `chat_history`      | `chatId`, `entries[]`                                    | resumed transcript (user/assistant/tool); client REPLACES  |
+| `chat_list`         | `chats[]` (`id`,`title`,`updatedAt`,`messageCount`)      | past-chat list (reply to `list_chats`/`delete_chat`)       |
 | `assistant_delta`   | `text`                                                   | streamed token chunk                                       |
 | `assistant_message` | `text`                                                   | finalized assistant segment                                |
 | `tool_use`          | `callId`, `tool`, `sessionId?`, `summary`, `input`       | a tool is being invoked                                    |
@@ -98,3 +102,27 @@ the UI (the gateway's single `DELETE` call site).
   message; `interrupt` aborts the in-flight Azure request via `AbortController`.
 - **Persistence:** one JSONL file per chat under `apps/agent-service/data/`
   (gitignored) records the full message history for resume.
+
+## Conversation history
+
+Every chat is a durable JSONL file, so past conversations are browsable and
+resumable from the panel's "Chat options" (⋮) menu → **History**.
+
+- **List** (`list_chats` → `chat_list`): metadata is DERIVED from each file —
+  title from the first user message, `updatedAt` from the file mtime,
+  `messageCount` from the line count. There is no sidecar or database.
+- **Resume / load:** switching to a past chat is a reconnect with
+  `?resumeChatId=<id>`; on connect the service replays the reconstructed
+  transcript via `chat_history`, which the client uses to **replace** its view.
+  Because that frame also fires on any transient reconnect (the JSONL is the
+  source of truth), the client always replaces — never appends. The browser
+  persists the active `chatId`, so a page reload resumes the same conversation.
+- **New chat:** reconnect with no `resumeChatId`; the service mints a fresh id
+  and the previous chat stays in history.
+- **Delete** (`delete_chat`): removes the JSONL file and returns a fresh
+  `chat_list`; deleting the active chat drops the UI to a new chat. (Deleting a
+  _session_ is still human-only — there is no `kill_session`.)
+- The transcript replayed to the browser is reconstructed server-side from the
+  stored OpenAI messages, so the raw model message format never reaches the
+  client. Approval prompts aren't persisted, so a resumed transcript shows the
+  writes as tool rows (denied writes render as error-state rows).
