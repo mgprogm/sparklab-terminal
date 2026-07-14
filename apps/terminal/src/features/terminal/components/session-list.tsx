@@ -198,7 +198,7 @@ export function SessionList({
                       }
                     />
 
-                    {/* Name + command */}
+                    {/* Name on line 1; command + status share line 2 */}
                     {!collapsed && (
                       <div className="min-w-0 flex-1">
                         <span
@@ -211,24 +211,41 @@ export function SessionList({
                         >
                           {s.name}
                         </span>
-                        {s.currentCommand && (
-                          <span className="text-muted-foreground block truncate font-mono text-xs">
-                            {s.currentCommand}
-                          </span>
-                        )}
-                        {/* B2: Status badge — plain text (not tooltip-only, mobile spec) */}
-                        {s.attachedClients !== undefined &&
-                        s.attachedClients > 0 ? (
-                          <span className="text-chart-1 truncate text-xs">
-                            {s.attachedClients === 1
-                              ? "1 viewer"
-                              : `${String(s.attachedClients)} viewers`}
-                          </span>
-                        ) : s.lastActivity != null ? (
-                          <span className="text-muted-foreground truncate text-xs">
-                            {formatRelativeTime(s.lastActivity)}
-                          </span>
-                        ) : null}
+                        <span className="flex min-w-0 items-baseline gap-1.5 text-xs">
+                          {s.currentCommand && (
+                            <span className="text-muted-foreground min-w-0 truncate font-mono">
+                              {s.currentCommand}
+                            </span>
+                          )}
+                          {/* B2: Status badge — plain text (not tooltip-only,
+                              mobile spec). Command truncates first; the badge
+                              never does. */}
+                          {s.attachedClients !== undefined &&
+                          s.attachedClients > 0 ? (
+                            <span className="text-chart-1 shrink-0">
+                              {s.currentCommand && (
+                                <span
+                                  aria-hidden="true"
+                                  className="text-muted-foreground mr-1.5"
+                                >
+                                  ·
+                                </span>
+                              )}
+                              {s.attachedClients === 1
+                                ? "1 viewer"
+                                : `${String(s.attachedClients)} viewers`}
+                            </span>
+                          ) : s.lastActivity != null ? (
+                            <span className="text-muted-foreground shrink-0">
+                              {s.currentCommand && (
+                                <span aria-hidden="true" className="mr-1.5">
+                                  ·
+                                </span>
+                              )}
+                              {formatRelativeTime(s.lastActivity)}
+                            </span>
+                          ) : null}
+                        </span>
                       </div>
                     )}
                   </button>

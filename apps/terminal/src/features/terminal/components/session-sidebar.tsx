@@ -2,7 +2,8 @@
 
 /**
  * SessionSidebar — the desktop (≥ md) inline sidebar: an <aside> wrapping
- * SessionList plus the collapse toggle. On mobile the sidebar is replaced by
+ * SessionList (whose header line carries the collapse toggle) plus the
+ * signed-in footer. On mobile the sidebar is replaced by
  * a Sheet drawer in TerminalShell (mobile UX spec §1.2); the `hidden md:flex`
  * classes also guard the pre-hydration frame on small screens.
  */
@@ -45,10 +46,27 @@ export function SessionSidebar({
   return (
     <aside
       className={cn(
-        "border-border bg-background hidden h-full flex-col border-r transition-[width,flex-basis] duration-0 md:flex",
+        "border-border bg-background relative hidden h-full flex-col border-r transition-[width,flex-basis] duration-0 md:flex",
         collapsed ? "w-[52px] flex-[0_0_52px]" : "w-[248px] flex-[0_0_248px]",
       )}
     >
+      {/* Collapse toggle — a small round button STRADDLING the sidebar's
+          right border, vertically centered on the 42px header line. */}
+      <button
+        type="button"
+        onClick={onToggleCollapse}
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        className="border-border bg-background text-muted-foreground hover:bg-accent hover:text-secondary-foreground absolute -right-3 top-[21px] z-20 flex size-6 -translate-y-1/2 items-center justify-center rounded-full border shadow-sm transition-colors"
+      >
+        {collapsed ? (
+          <ChevronsRight className="size-3.5" />
+        ) : (
+          <ChevronsLeft className="size-3.5" />
+        )}
+      </button>
+
       <SessionList
         sessions={sessions}
         activeSessionId={activeSessionId}
@@ -80,25 +98,6 @@ export function SessionSidebar({
           {!collapsed && <span>Sign out</span>}
         </button>
       )}
-
-      {/* Collapse toggle (desktop-only affordance) */}
-      <button
-        type="button"
-        className="border-border text-muted-foreground hover:bg-accent hover:text-secondary-foreground flex h-[38px] items-center justify-center gap-2 border-t bg-transparent text-xs font-medium tracking-wider transition-colors"
-        onClick={onToggleCollapse}
-        aria-expanded={!collapsed}
-        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {collapsed ? (
-          <ChevronsRight className="size-3.5" />
-        ) : (
-          <>
-            <ChevronsLeft className="size-3.5" />
-            <span>Collapse</span>
-          </>
-        )}
-      </button>
     </aside>
   );
 }
