@@ -97,7 +97,7 @@ export function ApprovalCard({
           deny();
         }
       }}
-      className="border-chart-2/40 bg-card flex flex-col gap-2 rounded-md border p-3 outline-none"
+      className="border-chart-2/40 bg-card flex flex-col gap-2 rounded-md border p-2.5 outline-none"
     >
       <div className="text-chart-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider">
         <Keyboard className="size-3.5" />
@@ -115,7 +115,7 @@ export function ApprovalCard({
       </div>
 
       {parts.length > 0 && (
-        <div className="bg-secondary/60 rounded-sm p-2 font-mono text-xs leading-relaxed">
+        <div className="bg-secondary/60 rounded-sm px-2 py-1.5 font-mono text-xs leading-relaxed">
           {parts.map((p, i) => (
             <span key={i}>
               {visualizeKeys(p).map((seg, j) => (

@@ -39,7 +39,7 @@ function renderInline(text: string) {
 
 export function UserMessage({ entry }: { entry: UserEntry }) {
   return (
-    <div className="bg-secondary/50 text-foreground rounded-sm px-3 py-2 text-sm">
+    <div className="bg-secondary/50 text-foreground rounded-sm px-2.5 py-1.5 text-sm">
       {renderInline(entry.text)}
     </div>
   );

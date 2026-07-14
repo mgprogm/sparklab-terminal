@@ -238,7 +238,7 @@ function MessageStream({
     <div
       ref={scrollRef}
       onScroll={onScroll}
-      className="[&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/40 flex-1 space-y-3 overflow-y-auto px-3.5 py-3 [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-1.5"
+      className="[&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/40 flex-1 space-y-2.5 overflow-y-auto px-3.5 py-3 [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-1.5"
     >
       {entries.map((e) => {
         switch (e.kind) {
@@ -279,7 +279,7 @@ function MessageStream({
               <div
                 key={e.id}
                 className={cn(
-                  "rounded-sm px-3 py-2 text-xs",
+                  "rounded-sm px-2.5 py-1.5 text-xs",
                   e.tone === "error"
                     ? "text-destructive bg-destructive/10"
                     : "text-muted-foreground bg-secondary/40",
@@ -296,8 +296,8 @@ function MessageStream({
 
 function EmptyState({ onSuggest }: { onSuggest: (text: string) => void }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-      <Sparkles className="text-muted-foreground size-8" />
+    <div className="flex flex-1 flex-col items-center justify-center gap-2.5 px-6 text-center">
+      <Sparkles className="text-muted-foreground size-6" />
       <div className="space-y-1">
         <p className="text-foreground text-sm font-medium">Terminal agent</p>
         <p className="text-muted-foreground text-xs leading-relaxed">

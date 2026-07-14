@@ -69,7 +69,7 @@ export function ToolEventRow({
         </span>
       </button>
       {open && (
-        <div className="bg-card border-border mt-1 max-h-56 overflow-auto whitespace-pre rounded-md border p-2 font-mono text-xs">
+        <div className="bg-secondary/40 [&::-webkit-scrollbar-thumb]:bg-border mt-1 max-h-56 overflow-auto whitespace-pre rounded-sm p-2 font-mono text-xs [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5">
           {formatInput(entry.input)}
           {entry.resultSummary && (
             <>
