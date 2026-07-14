@@ -30,7 +30,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      <body className="h-dvh overflow-hidden antialiased">
+      {/* suppressHydrationWarning: browser extensions (e.g. ColorZilla's
+          cz-shortcut-listen) inject attributes on <body> before React
+          hydrates; suppression is attribute-only and one level deep. */}
+      <body
+        className="h-dvh overflow-hidden antialiased"
+        suppressHydrationWarning
+      >
         <Providers>{children}</Providers>
       </body>
     </html>
