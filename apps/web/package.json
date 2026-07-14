@@ -1,0 +1,36 @@
+{
+  "name": "@sparklab/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --turbopack --port 3001",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^5.0.2",
+    "@sparklab/shared-types": "workspace:*",
+    "@sparklab/ui": "workspace:*",
+    "@tanstack/react-query": "^5.80.7",
+    "next": "^15.3.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-hook-form": "^7.56.4",
+    "zod": "^3.25.67",
+    "zustand": "^5.0.5"
+  },
+  "devDependencies": {
+    "@sparklab/config-eslint": "workspace:*",
+    "@sparklab/config-typescript": "workspace:*",
+    "@tailwindcss/postcss": "^4.1.10",
+    "@types/node": "20.17.6",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "eslint": "^9.29.0",
+    "tailwindcss": "^4.1.10",
+    "typescript": "^5.8.3"
+  }
+}

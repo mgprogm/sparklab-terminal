@@ -30,3 +30,6 @@ coverage/
 .env
 .env.local
 .env*.local
+
+# TypeScript incremental build info
+*.tsbuildinfo

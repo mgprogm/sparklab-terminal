@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@import "@sparklab/ui/globals.css";
+
+/* Scan the ui package for Tailwind classes used in components. */
+@source "../../../../packages/ui/src";

@@ -1,0 +1,23 @@
+{
+  "name": "@sparklab/config-vitest",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./base": "./base.js",
+    "./react": "./react.js"
+  },
+  "dependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@vitejs/plugin-react": "^4.5.2",
+    "vitest": "^3.2.4"
+  },
+  "peerDependencies": {
+    "vitest": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  }
+}
