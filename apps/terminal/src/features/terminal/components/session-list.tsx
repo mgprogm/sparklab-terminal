@@ -34,10 +34,12 @@ import {
   TooltipTrigger,
 } from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
-import { Plus, Trash2, Terminal } from "lucide-react";
+import { Plus, Trash2, Terminal, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import type { SessionInfo } from "@sparklab/shared-types";
+
+import { useAgentStore } from "@/features/agent-chat";
 
 // Shell processes that don't count as "running a job".
 const SHELLS = new Set([
@@ -91,6 +93,8 @@ export function SessionList({
   onDialogClose,
 }: SessionListProps) {
   const drawer = variant === "drawer";
+  // Sessions the agent is actively writing to — drives the amber row badge.
+  const agentActiveSessionIds = useAgentStore((s) => s.agentActiveSessionIds);
 
   // ---- Create dialog state ----
   const [createOpen, setCreateOpen] = useState(false);
@@ -190,6 +194,8 @@ export function SessionList({
                           ? "bg-chart-1"
                           : "bg-muted-foreground",
                         s.attached && "ring-chart-1/30 ring-2",
+                        agentActiveSessionIds.includes(s.id) &&
+                          "ring-chart-2/40 ring-2",
                       )}
                       title={
                         (isRunning(s.currentCommand)
@@ -215,6 +221,20 @@ export function SessionList({
                           {s.currentCommand && (
                             <span className="text-muted-foreground min-w-0 truncate font-mono">
                               {s.currentCommand}
+                            </span>
+                          )}
+                          {agentActiveSessionIds.includes(s.id) && (
+                            <span className="text-chart-2 flex shrink-0 items-center gap-1">
+                              {s.currentCommand && (
+                                <span
+                                  aria-hidden="true"
+                                  className="text-muted-foreground"
+                                >
+                                  ·
+                                </span>
+                              )}
+                              <Sparkles className="size-3" />
+                              agent
                             </span>
                           )}
                           {/* B2: Status badge — plain text (not tooltip-only,

@@ -27,6 +27,11 @@ import { Menu } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { authKeys, useAuthStatus, useLogout } from "@/features/auth";
+import {
+  AgentActivityOverlay,
+  AgentChatPanel,
+  AgentFab,
+} from "@/features/agent-chat";
 
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
@@ -292,6 +297,11 @@ export function TerminalShell() {
               <p className="text-muted-foreground">No session selected.</p>
             </div>
           )}
+
+          {/* Agent Chat: amber attribution overlay + floating entry button,
+              both anchored inside the terminal viewport. */}
+          <AgentActivityOverlay activeSessionId={activeSessionId} />
+          <AgentFab />
         </div>
 
         {/* Extra keys — coarse-pointer devices only (CSS-gated, §3.2). */}
@@ -300,6 +310,10 @@ export function TerminalShell() {
           modifiersRef={modifiersRef}
         />
       </div>
+
+      {/* Agent Chat panel: docked right column (desktop) / bottom sheet
+          (mobile). Always mounted — owns the ⌘J shortcut and WS connection. */}
+      <AgentChatPanel isMobile={isMobile} />
     </div>
   );
 }
