@@ -16,7 +16,13 @@ import {
   TooltipTrigger,
 } from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
-import { ChevronsLeft, ChevronsRight, CircleUser, LogOut } from "lucide-react";
+import {
+  ChevronsLeft,
+  ChevronsRight,
+  CircleUser,
+  LogOut,
+  Settings,
+} from "lucide-react";
 
 import { SessionList } from "./session-list";
 
@@ -35,6 +41,8 @@ interface SessionSidebarProps {
   /** Signed-in username; absent in open mode (dev, auth disabled). */
   username?: string;
   onLogout?: () => void;
+  /** Opens the settings dialog (owned by the shell). */
+  onOpenSettings?: () => void;
 }
 
 export function SessionSidebar({
@@ -48,6 +56,7 @@ export function SessionSidebar({
   onDialogClose,
   username,
   onLogout,
+  onOpenSettings,
 }: SessionSidebarProps) {
   return (
     <aside
@@ -84,9 +93,11 @@ export function SessionSidebar({
       />
 
       {/* Account row — one footer line mirroring the 42px header line:
-          identity (glyph + username) on the left, compact icon-only sign-out
-          on the right. Collapsed rail centers the sign-out icon alone. */}
-      {onLogout && (
+          identity (glyph + username) on the left, compact icon-only actions
+          (settings gear, then sign-out) on the right. The gear always renders
+          — even in open mode where sign-out is absent — so it lives outside the
+          onLogout guard. Collapsed rail centers the icons alone. */}
+      {(onOpenSettings || onLogout) && (
         <>
           <Separator />
           <div
@@ -97,7 +108,7 @@ export function SessionSidebar({
                 : "justify-between gap-2 px-2.5",
             )}
           >
-            {!collapsed && (
+            {!collapsed && onLogout && (
               <div className="flex min-w-0 items-center gap-2" title={username}>
                 <CircleUser className="text-muted-foreground size-4 shrink-0" />
                 <span className="text-foreground truncate text-xs font-medium">
@@ -105,22 +116,42 @@ export function SessionSidebar({
                 </span>
               </div>
             )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="Sign out"
-                  onClick={onLogout}
-                  className="text-muted-foreground hover:text-secondary-foreground shrink-0"
-                >
-                  <LogOut className="size-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">
-                {username ? `Sign out (${username})` : "Sign out"}
-              </TooltipContent>
-            </Tooltip>
+            <div className="flex shrink-0 items-center gap-0.5">
+              {onOpenSettings && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Settings"
+                      onClick={onOpenSettings}
+                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
+                    >
+                      <Settings className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">Settings</TooltipContent>
+                </Tooltip>
+              )}
+              {onLogout && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Sign out"
+                      onClick={onLogout}
+                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
+                    >
+                      <LogOut className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    {username ? `Sign out (${username})` : "Sign out"}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </div>
           </div>
         </>
       )}

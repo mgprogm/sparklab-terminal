@@ -17,11 +17,13 @@ describe("useTerminalStore persistence", () => {
       ...useTerminalStore.getState(),
       activeSessionId: "web-abc",
       sidebarCollapsed: true,
+      terminalFontSize: 16,
       mobileSidebarOpen: true,
     });
     expect(persisted).toEqual({
       activeSessionId: "web-abc",
       sidebarCollapsed: true,
+      terminalFontSize: 16,
     });
     expect(persisted).not.toHaveProperty("mobileSidebarOpen");
   });

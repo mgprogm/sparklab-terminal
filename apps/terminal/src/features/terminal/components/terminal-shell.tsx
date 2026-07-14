@@ -37,6 +37,7 @@ import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
+import { SettingsDialog } from "./settings-dialog";
 import { useMediaQuery } from "../hooks/use-media-query";
 import {
   useCreateSession,
@@ -63,6 +64,8 @@ export function TerminalShell() {
     toggleSidebar,
     mobileSidebarOpen,
     setMobileSidebarOpen,
+    settingsOpen,
+    setSettingsOpen,
   } = useTerminalStore();
 
   const { data: sessions = [] } = useSessions();
@@ -223,6 +226,7 @@ export function TerminalShell() {
           onDialogClose={handleDialogClose}
           username={me?.username}
           onLogout={me?.username ? () => logoutMutation.mutate() : undefined}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
       )}
 
@@ -314,6 +318,18 @@ export function TerminalShell() {
       {/* Agent Chat panel: docked right column (desktop) / bottom sheet
           (mobile). Always mounted — owns the ⌘J shortcut and WS connection. */}
       <AgentChatPanel isMobile={isMobile} />
+
+      {/* Settings modal — mounted once; open state lives in the store so any
+          entry point (sidebar gear) can trigger it. */}
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        username={me?.username}
+        onLogout={me?.username ? () => logoutMutation.mutate() : undefined}
+        statusState={status.state}
+        statusText={status.text}
+        sessionCount={sessions.length}
+      />
     </div>
   );
 }

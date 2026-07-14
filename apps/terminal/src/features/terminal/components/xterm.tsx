@@ -29,6 +29,7 @@ import {
   type ConnectionStatus,
 } from "../connection";
 import { applyModifiers, type ModifierSnapshot } from "../keys";
+import { useTerminalStore, type TerminalFontSize } from "../store";
 
 /**
  * Imperative handle exposed to the shell (mobile UX spec §3.4): focus
@@ -63,6 +64,11 @@ const encoder = new TextEncoder();
 const SMALL_SCREEN_QUERY = "(max-width: 429px)";
 const fontSizeFor = (small: boolean) => (small ? 13 : 14);
 
+// The user's font-size preference wins when it's a fixed number; "auto" defers
+// to the responsive breakpoint default (Settings dialog → Appearance).
+const effectiveFontSize = (pref: TerminalFontSize, small: boolean) =>
+  pref === "auto" ? fontSizeFor(small) : pref;
+
 export function XTermComponent({
   sessionId,
   onStatusChange,
@@ -77,6 +83,13 @@ export function XTermComponent({
   const fitRef = useRef<FitAddon | null>(null);
   const connectionRef = useRef<Connection | null>(null);
   const roRef = useRef<ResizeObserver | null>(null);
+
+  // Persisted font-size preference. Kept in a ref so the once-created
+  // breakpoint listener reads the latest value without rebuilding the terminal;
+  // a separate effect below reactively applies changes to the live terminal.
+  const fontSize = useTerminalStore((s) => s.terminalFontSize);
+  const fontSizeRef = useRef(fontSize);
+  fontSizeRef.current = fontSize;
 
   // Store callbacks in refs so the Connection always sees the latest without
   // needing to rebuild it on every render.
@@ -98,7 +111,7 @@ export function XTermComponent({
       cursorBlink: true,
       fontFamily:
         "'DM Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
-      fontSize: fontSizeFor(smallScreen.matches),
+      fontSize: effectiveFontSize(fontSizeRef.current, smallScreen.matches),
       scrollback: 10_000,
       // Warp-inspired warm-dark theme matching the gateway's public/index.html.
       theme: {
@@ -165,8 +178,9 @@ export function XTermComponent({
     roRef.current = ro;
 
     // Breakpoint-aware font size (spec §4.3): update + refit on crossing.
+    // A fixed user preference overrides the breakpoint; "auto" follows it.
     const onFontBreakpointChange = (e: MediaQueryListEvent) => {
-      term.options.fontSize = fontSizeFor(e.matches);
+      term.options.fontSize = effectiveFontSize(fontSizeRef.current, e.matches);
       try {
         fitAddon.fit();
       } catch {
@@ -199,6 +213,22 @@ export function XTermComponent({
       termRef.current = null;
     };
   }, []); // one-shot: created once, cleaned up on unmount
+
+  // ---- Font-size preference effect ----
+  // Apply the persisted preference to the live terminal and refit so the grid
+  // reflows. Mirrors the breakpoint handler's update+fit (no scroll-pin needed
+  // here). Runs after mount because termRef is set in the one-shot effect.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const small = window.matchMedia(SMALL_SCREEN_QUERY).matches;
+    term.options.fontSize = effectiveFontSize(fontSize, small);
+    try {
+      fitRef.current?.fit();
+    } catch {
+      /* noop */
+    }
+  }, [fontSize]);
 
   // ---- Session switching effect ----
   // When sessionId changes, dispose the old connection and (if non-null)
