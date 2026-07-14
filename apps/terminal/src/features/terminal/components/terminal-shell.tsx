@@ -45,6 +45,7 @@ import {
   useSessions,
 } from "../hooks/use-sessions";
 import { useVisualViewport } from "../hooks/use-visual-viewport";
+import { resolveActiveSession } from "../session-fallback";
 import { useTerminalStore } from "../store";
 
 import type { TerminalHandle } from "./xterm";
@@ -68,7 +69,7 @@ export function TerminalShell() {
     setSettingsOpen,
   } = useTerminalStore();
 
-  const { data: sessions = [] } = useSessions();
+  const { data: sessions = [], isSuccess: sessionsLoaded } = useSessions();
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
 
@@ -91,21 +92,17 @@ export function TerminalShell() {
   useVisualViewport();
 
   // ---- "Active session vanished → fall back" ----
+  // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
+  // the first successful load so the initial-fetch window (sessions === [],
+  // no initialData) can't null a persisted/URL-supplied id.
   useEffect(() => {
-    if (!sessions.length) {
-      if (activeSessionId) setActiveSessionId(null);
-      return;
-    }
-    // If the active session is gone, fall back to the first.
-    if (activeSessionId && !sessions.some((s) => s.id === activeSessionId)) {
-      setActiveSessionId(sessions[0]?.id ?? null);
-      return;
-    }
-    // On first load with sessions but nothing selected, attach to the first.
-    if (!activeSessionId && sessions.length) {
-      setActiveSessionId(sessions[0]?.id ?? null);
-    }
-  }, [sessions, activeSessionId, setActiveSessionId]);
+    const next = resolveActiveSession(
+      sessionsLoaded,
+      sessions,
+      activeSessionId,
+    );
+    if (next !== undefined) setActiveSessionId(next);
+  }, [sessionsLoaded, sessions, activeSessionId, setActiveSessionId]);
 
   // ---- Callbacks ----
   const handleStatusChange = useCallback(
