@@ -9,27 +9,32 @@ The security model: **TLS and the public surface live in the reverse proxy (Cadd
 Internet
    │  HTTPS / WSS  (443)
    ▼
-┌────────────────────────────────────┐
-│  Caddy  (public, TLS termination)  │
-│  term.example.com                  │
-└──────────┬──────────────┬──────────┘
-           │ /attach      │ /api/*          everything else
-           │ HTTP+WS      │ HTTP            HTTP
-           ▼              ▼                ▼
-   ┌───────────────┐              ┌───────────────┐
-   │  Gateway      │              │  Next.js app  │
-   │  127.0.0.1    │              │  127.0.0.1    │
-   │  :3007        │              │  :3000        │
-   └───────┬───────┘              └───────────────┘
-           │ tmux attach-session
-           ▼
-   ┌───────────────┐
-   │  tmux server  │  ← owns every running job
-   └───────────────┘
+┌─────────────────────────────────────────────────┐
+│  Caddy  (public, TLS termination)                │
+│  term.example.com                                │
+└──┬──────────────┬──────────────┬─────────────────┘
+   │ /attach      │ /agent       │ /api/*     everything else
+   │ HTTP+WS      │ HTTP+WS      │ HTTP       HTTP
+   ▼              ▼              ▼            ▼
+┌──────────┐  ┌──────────────┐          ┌───────────────┐
+│ Gateway  │  │ agent-service│          │  Next.js app  │
+│ 127.0.0.1│◄─┤ 127.0.0.1    │          │  127.0.0.1    │
+│ :3007    │  │ :3009        │          │  :3000        │
+└────┬─────┘  └──────────────┘          └───────────────┘
+     │ tmux attach-session      (agent-service drives terminals
+     ▼                           via the gateway's loopback REST)
+┌───────────────┐
+│  tmux server  │  ← owns every running job
+└───────────────┘
 ```
 
 The gateway never touches a public socket. All auth and origin enforcement
-happens inside the gateway process; Caddy only forwards and terminates TLS.
+happens inside the gateway process; Caddy only forwards and terminates TLS. The
+agent service also binds loopback: it verifies the browser's `gw_session`
+cookie against the gateway on each WS upgrade, and reaches tmux only through the
+gateway's REST API. Deploying Agent Chat is **optional** — omit the service and
+the `/agent` route and the terminal works unchanged (the chat panel just can't
+connect).
 
 ## Environment variables
 
@@ -44,6 +49,26 @@ happens inside the gateway process; Caddy only forwards and terminates TLS.
 | `TRUST_PROXY`                | _(unset / `0`)_                               | **Yes** (behind proxy) | Set to `1` when running behind a reverse proxy. Enables: reading client IP from `X-Forwarded-For`, adding `; Secure` to the session cookie.          |
 | `MAX_WS_CONNECTIONS`         | `32`                                          | No                     | Cap on concurrent WebSocket connections. Over-cap connections are rejected post-handshake with close code 1013.                                      |
 | `NEXT_PUBLIC_GATEWAY_URL`    | `http://localhost:3007`                       | **Yes**                | Inlined at build time into the Next.js app — must be the public WebSocket URL: `wss://term.example.com`.                                             |
+
+### Agent Chat (only if deploying `apps/agent-service`)
+
+Set in `apps/agent-service/.env` (gitignored). If you are not deploying Agent Chat, skip this table and the `/agent` Caddy route.
+
+| Variable                                      | Default                 | Required            | Description                                                                                                               |
+| --------------------------------------------- | ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `AZURE_OPENAI_ENDPOINT`                       | _(unset)_               | **Yes**             | Azure AI Foundry resource endpoint URL.                                                                                   |
+| `AZURE_OPENAI_API_KEY`                        | _(unset)_               | **Yes**             | Azure key. Secret — gitignored `.env` only, and rotate if ever exposed.                                                   |
+| `AZURE_OPENAI_API_VERSION`                    | `2025-04-01-preview`    | No                  | Pin the Azure OpenAI REST API version.                                                                                    |
+| `GPT56SOL_DEPLOYMENT`                         | _(unset)_               | **Yes**             | Deployment name (e.g. `gpt-5.6-sol`); used as the model id.                                                               |
+| `AGENT_PORT`                                  | `3009`                  | No                  | Listen port for the `/agent` WebSocket (loopback).                                                                        |
+| `GATEWAY_URL`                                 | `http://127.0.0.1:3007` | **Yes**             | Loopback gateway base URL the service drives terminals through.                                                           |
+| `ALLOWED_ORIGINS`                             | localhost dev origins   | **Yes**             | Allowed browser `Origin`s for the `/agent` WS. Set to your public origin, e.g. `https://term.example.com`.                |
+| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | _(unset)_               | **Yes** (auth mode) | Credentials the service uses to log in to the gateway. Match the gateway's; omit only in open mode.                       |
+| `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009` | **Yes**             | Inlined at build time into the Next.js app — the public agent WS URL: `wss://term.example.com` (same origin as the site). |
+
+Because Caddy serves the agent WS at the same public origin as the site,
+`NEXT_PUBLIC_AGENT_URL` is typically the same host as `NEXT_PUBLIC_GATEWAY_URL`
+(both `wss://term.example.com`); the path (`/agent` vs `/attach`) routes them.
 
 ## Step-by-step: production on a VPS
 
@@ -140,28 +165,55 @@ sudo systemctl enable --now web-terminal-gateway
 cd /opt/web-terminal && pnpm --filter @sparklab/terminal start &
 ```
 
+**Agent Chat service (optional).** If deploying it, add a second unit. It runs
+via `tsx`, so `ExecStart` invokes the workspace binary:
+
+```ini
+# /etc/systemd/system/web-terminal-agent.service
+[Unit]
+Description=Web Terminal Agent Service
+After=network.target web-terminal-gateway.service
+
+[Service]
+WorkingDirectory=/opt/web-terminal/apps/agent-service
+EnvironmentFile=/opt/web-terminal/apps/agent-service/.env
+ExecStart=/opt/web-terminal/apps/agent-service/node_modules/.bin/tsx src/index.ts
+Restart=on-failure
+User=www-data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Build the Next.js app with **both** public URLs baked in when Agent Chat is
+enabled: `NEXT_PUBLIC_GATEWAY_URL=wss://term.example.com NEXT_PUBLIC_AGENT_URL=wss://term.example.com pnpm --filter @sparklab/terminal build`.
+
 ## Caddyfile reference
 
 See `deploy/Caddyfile` for the full example. Key points:
 
 - `/attach` and `/api/*` → `reverse_proxy 127.0.0.1:3007` (gateway)
+- `/agent` → `reverse_proxy 127.0.0.1:3009` (agent service; omit if not deploying Agent Chat)
 - Everything else → `reverse_proxy 127.0.0.1:3000` (Next.js app)
 - Caddy issues and renews TLS certificates automatically for named hosts.
 
 ## "What makes this safe now" checklist
 
-| Threat                                 | Mitigation                                                                                                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unauthenticated shell access           | Username/password login required (scrypt-hashed, timing-safe verify); all `/api/*` except `/api/auth/*`, plus `/attach`, check the `gw_session` cookie. |
-| Cross-site WebSocket hijacking (CSWSH) | Origin header checked against `ALLOWED_ORIGINS` on every WS upgrade (pre-handshake 403 for unknown/absent origins).                                     |
-| CSRF on mutating REST endpoints        | Same origin check applied to `POST`/`DELETE /api/*` when an `Origin` header is present.                                                                 |
-| Credential brute-force                 | Login rate-limited to 5 attempts/min per IP (fixed window, 429 + `Retry-After`).                                                                        |
-| Slow-loris / large body                | 64 KB body cap on all endpoints; `headersTimeout=30s`, `requestTimeout=60s`.                                                                            |
-| Too many WS connections                | Capped at `MAX_WS_CONNECTIONS` (default 32); over-cap connections closed with code 1013.                                                                |
-| TLS/MITM                               | TLS terminated at Caddy with auto-renewing certificates. Session cookie gains `; Secure` when `TRUST_PROXY=1`.                                          |
-| Gateway exposed publicly               | `HOST` defaults to `127.0.0.1`; binds loopback only. Only Caddy listens on public interfaces.                                                           |
-| Non-loopback bind without credentials  | Gateway refuses to start (`process.exit(1)`) if no auth credentials are set and `HOST` is non-loopback.                                                 |
-| Password disclosure via config leak    | Production stores only the scrypt hash (`GATEWAY_AUTH_PASSWORD_HASH`); the plaintext password exists nowhere on the server.                             |
+| Threat                                 | Mitigation                                                                                                                                                                                                                         |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unauthenticated shell access           | Username/password login required (scrypt-hashed, timing-safe verify); all `/api/*` except `/api/auth/*`, plus `/attach`, check the `gw_session` cookie.                                                                            |
+| Cross-site WebSocket hijacking (CSWSH) | Origin header checked against `ALLOWED_ORIGINS` on every WS upgrade (pre-handshake 403 for unknown/absent origins).                                                                                                                |
+| CSRF on mutating REST endpoints        | Same origin check applied to `POST`/`DELETE /api/*` when an `Origin` header is present.                                                                                                                                            |
+| Credential brute-force                 | Login rate-limited to 5 attempts/min per IP (fixed window, 429 + `Retry-After`).                                                                                                                                                   |
+| Slow-loris / large body                | 64 KB body cap on all endpoints; `headersTimeout=30s`, `requestTimeout=60s`.                                                                                                                                                       |
+| Too many WS connections                | Capped at `MAX_WS_CONNECTIONS` (default 32); over-cap connections closed with code 1013.                                                                                                                                           |
+| TLS/MITM                               | TLS terminated at Caddy with auto-renewing certificates. Session cookie gains `; Secure` when `TRUST_PROXY=1`.                                                                                                                     |
+| Gateway exposed publicly               | `HOST` defaults to `127.0.0.1`; binds loopback only. Only Caddy listens on public interfaces.                                                                                                                                      |
+| Non-loopback bind without credentials  | Gateway refuses to start (`process.exit(1)`) if no auth credentials are set and `HOST` is non-loopback.                                                                                                                            |
+| Password disclosure via config leak    | Production stores only the scrypt hash (`GATEWAY_AUTH_PASSWORD_HASH`); the plaintext password exists nowhere on the server.                                                                                                        |
+| Unauthenticated agent access           | The `/agent` WS verifies the browser's `gw_session` cookie against the gateway on every upgrade (close `4001` on failure); its origin allowlist mirrors the gateway's. Binds loopback; only Caddy is public.                       |
+| Agent running commands unsupervised    | Every write tool (`type_text`/`press_keys`/`run_command`/`create_session`) requires per-call user approval (120s → deny); no `kill_session` tool exists. `allow_always` is per-chat, non-persistent. Per-turn caps bound runaways. |
+| Azure key disclosure                   | Key lives only in the gitignored `apps/agent-service/.env` (`chmod 600`), never inlined into client code; rotate immediately if exposed.                                                                                           |
 
 ## Development (open mode)
 

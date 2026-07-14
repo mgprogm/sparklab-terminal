@@ -1,5 +1,7 @@
 # Claude Web Terminal — Design
 
+> **Scope note.** This document is the authoritative design for the terminal core (the three-lifetimes model, attach/detach, reconnect, scrollback). The later **Agent Chat** feature (an AI agent that drives terminals via the gateway) is a _fourth_ independent lifetime and is specified separately in [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md); its architecture summary is in [ARCHITECTURE.md](ARCHITECTURE.md#the-agent-a-fourth-independent-lifetime).
+
 ## Goals (Requirements)
 
 1. **Jobs must not die when the web terminal is closed** — closing the tab, closing the browser, or losing network connectivity must not stop any running process.
@@ -38,19 +40,20 @@ tmux server (per user)      ← the real owner of processes, hardest to kill
 
 ### Why tmux as the session backend (instead of writing a custom PTY manager)
 
-| Concern | tmux backend | Custom PTY manager |
-|---|---|---|
-| Jobs survive browser close | ✅ | ✅ (doable) |
-| Jobs survive **web server restart/deploy** | ✅ for free | ❌ requires a separate daemon |
-| Scrollback / redraw of previous screen | ✅ built-in | Must build a ring buffer yourself |
+| Concern                                        | tmux backend               | Custom PTY manager                                  |
+| ---------------------------------------------- | -------------------------- | --------------------------------------------------- |
+| Jobs survive browser close                     | ✅                         | ✅ (doable)                                         |
+| Jobs survive **web server restart/deploy**     | ✅ for free                | ❌ requires a separate daemon                       |
+| Scrollback / redraw of previous screen         | ✅ built-in                | Must build a ring buffer yourself                   |
 | Full-screen apps (vim, htop) restore correctly | ✅ tmux keeps screen state | Very hard (requires server-side terminal emulation) |
-| Dependency | tmux must be installed | Pure Node |
+| Dependency                                     | tmux must be installed     | Pure Node                                           |
 
 → **Choose tmux**, because "survives web server restarts" and "correctly redraws vim/htop" are the expensive features tmux gives you for free.
 
 ## Main Flows
 
 ### 1. Create a session
+
 ```
 POST /api/sessions  { name?, cwd?, cmd? }
 → gateway: tmux new-session -d -s web-<uuid> -c <cwd>
@@ -59,6 +62,7 @@ POST /api/sessions  { name?, cwd?, cmd? }
 ```
 
 ### 2. Attach (open the web / reconnect)
+
 ```
 WS /api/sessions/:id/attach
 → gateway spawns PTY: tmux attach-session -t <id>
@@ -69,12 +73,14 @@ WS /api/sessions/:id/attach
 ```
 
 ### 3. Web closed / network drop
+
 ```
 WS close → gateway kills only the PTY client (tmux detach)
 → the tmux session and all jobs inside keep running — nothing dies
 ```
 
 ### 4. Web gateway dies (deploy/crash)
+
 ```
 The tmux server is an independent process → sessions remain intact
 New gateway boots → tmux list-sessions → instantly knows every existing session
@@ -99,6 +105,7 @@ Server → Client
 ```
 
 ### Resize with multiple viewers
+
 By default tmux shrinks to the smallest of all connected clients → set
 `window-size latest` + `aggressive-resize on` = use the most recently active client's size (same behavior as the VS Code terminal).
 
@@ -138,14 +145,14 @@ Metadata tmux can't hold (user-assigned names, tags) → store in a small SQLite
 
 ## Tech Stack Summary
 
-| Layer | Choice |
-|---|---|
-| Frontend | xterm.js + fit/webgl addons; vanilla or React |
-| Transport | WebSocket (ws library), binary frames |
-| Gateway | Node.js + node-pty |
-| Session backend | tmux (`new-session -d`, `attach`, `capture-pane`) |
-| Metadata | SQLite or JSON file |
-| Deploy | systemd service (gateway) — the tmux server lives outside the gateway's unit |
+| Layer           | Choice                                                                       |
+| --------------- | ---------------------------------------------------------------------------- |
+| Frontend        | xterm.js + fit/webgl addons; vanilla or React                                |
+| Transport       | WebSocket (ws library), binary frames                                        |
+| Gateway         | Node.js + node-pty                                                           |
+| Session backend | tmux (`new-session -d`, `attach`, `capture-pane`)                            |
+| Metadata        | SQLite or JSON file                                                          |
+| Deploy          | systemd service (gateway) — the tmux server lives outside the gateway's unit |
 
 ## Implementation Plan
 

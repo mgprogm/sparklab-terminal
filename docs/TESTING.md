@@ -12,19 +12,28 @@ pnpm --filter e2e test    # Playwright (boots its own gateway + app)
 pnpm --filter @sparklab/terminal-gateway smoke
 pnpm --filter @sparklab/terminal-gateway acceptance
 pnpm --filter @sparklab/terminal-gateway acceptance:multi
+pnpm --filter @sparklab/terminal-gateway test:agent-endpoints   # agent REST
+pnpm --filter @sparklab/agent-service smoke                     # Agent Chat, live (1 Azure call)
 ```
+
+Agent Chat adds a fourth surface: the agent REST endpoints (`test:agent-endpoints`, a gateway script) and a live end-to-end smoke of the agent service (§1a).
 
 ## 1. Gateway scripts (`apps/terminal-gateway/test/`)
 
 Standalone node scripts — no test framework, plain `throw`, print `PASS`/`FAIL`. **These are the load-bearing tests for the product's defining property; never rewrite them into Playwright.**
 
-| Script                             | Proves                                                                                             |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `smoke-pty-tmux.js`                | node-pty can attach to tmux; output arrives as raw Buffers; the tmux session survives `pty.kill()` |
-| `acceptance-survive-disconnect.js` | a counting job keeps running while no client is attached, then resumes live on reattach            |
-| `acceptance-multi-session.js`      | sessions are isolated; jobs survive switching between sessions; DELETE kills only its target       |
+| Script                             | Proves                                                                                                                                                                                                                                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `smoke-pty-tmux.js`                | node-pty can attach to tmux; output arrives as raw Buffers; the tmux session survives `pty.kill()`                                                                                                                                                                                            |
+| `acceptance-survive-disconnect.js` | a counting job keeps running while no client is attached, then resumes live on reattach                                                                                                                                                                                                       |
+| `acceptance-multi-session.js`      | sessions are isolated; jobs survive switching between sessions; DELETE kills only its target                                                                                                                                                                                                  |
+| `agent-endpoints.js`               | the agent REST: `GET /screen` captures plain text + cursor/size/mode metadata (history works); `POST /keys` types literally without executing, named `Enter` then executes, the key whitelist is enforced, 404s are correct (`pnpm --filter @sparklab/terminal-gateway test:agent-endpoints`) |
 
 They clean up their tmux sessions; if interrupted, check `tmux ls` and `tmux kill-session -t <name>`.
+
+## 1a. Agent service smoke (`apps/agent-service/test/smoke.js`)
+
+`pnpm --filter @sparklab/agent-service smoke` — a live end-to-end check of the Agent Chat backend. It spawns a real gateway (open mode) + the agent service, opens a WS to `/agent`, sends one message, auto-approves the write, and asserts the agent created a session in tmux through the approval flow, then cleans up. It makes **one real Azure call**, so it needs a valid `apps/agent-service/.env` and is not part of CI (it's a manual/local integration check). The model is slow (~15–20s/call), so the whole run takes ~1min.
 
 ## 2. Unit tests (Vitest)
 
@@ -93,3 +102,5 @@ Git hooks (husky): pre-commit runs `lint-staged` (prettier on staged files — e
 | `features/auth/` UI                 | auth unit tests + gate 7 (UI journey)                |
 | Scrollback endpoint or injection    | connection-scrollback tests + gate 8                 |
 | Session status fields / badges      | session-list-status tests + shared-types tests       |
+| Agent REST (`/screen`, `/keys`)     | `test:agent-endpoints` + shared-types (`agent.ts`)   |
+| Agent loop / tools / WS protocol    | `agent-service` typecheck + `agent-service` smoke    |

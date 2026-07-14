@@ -5,6 +5,7 @@
 | [GETTING-STARTED.md](GETTING-STARTED.md)               | Prerequisites, install, starting dev, ports, environment variables                                                      |
 | [ARCHITECTURE.md](ARCHITECTURE.md)                     | Monorepo layout, the three-lifetimes design, every app and package                                                      |
 | [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)           | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
+| [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                 | Agent Chat: the `/agent` WebSocket, auth, the 7 tools, approval + safety model, config                                  |
 | [TESTING.md](TESTING.md)                               | Unit tests, Playwright E2E, the eight gates (six cut-over + auth + scrollback), CI pipeline                             |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                     | Code conventions: feature folders, imports, state rules, commits                                                        |
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                   | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior) |
@@ -20,8 +21,11 @@ This repo is a **pnpm + Turborepo monorepo**. The flagship app is a web terminal
 Browser (Next.js + xterm.js) --WS--> Gateway (node-pty) --tmux attach--> tmux server --> shell + jobs
 ```
 
-- `apps/terminal-gateway` — Node gateway (plain JS): REST session CRUD + `/attach` WebSocket.
-- `apps/terminal` — Next.js frontend for the terminal (xterm.js, TanStack Query, Zustand).
+It also ships an **Agent Chat**: an AI agent (a custom tool-calling loop over Azure OpenAI, in `apps/agent-service`) that views and drives terminals — with per-write approval — through the gateway. See [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md).
+
+- `apps/terminal-gateway` — Node gateway (plain JS): REST session CRUD + agent REST (`/screen`, `/keys`) + `/attach` WebSocket.
+- `apps/agent-service` — Node/TS agent service: the `/agent` WebSocket + the tool-calling loop over `gpt-5.6-sol`.
+- `apps/terminal` — Next.js frontend: the terminal (xterm.js, TanStack Query, Zustand) + the Agent Chat panel.
 - `apps/web` — Next.js app that carries the exemplar patterns for future product features.
 - `apps/e2e` — Playwright suite proving the cut-over gates.
 - `packages/*` — shared UI, types, and config.
