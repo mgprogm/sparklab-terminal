@@ -454,9 +454,11 @@ export function SessionList({
               )}
             </button>
 
-            {/* Row actions: move/rename + delete */}
+            {/* Row actions: move/rename + delete. Always visible (not
+                hover-gated) so the terminate/delete action is discoverable
+                without hovering — works for local and remote sessions alike. */}
             {!collapsed && (
-              <div className="pointer-coarse:opacity-100 mr-1 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <div className="mr-1 flex shrink-0 items-center gap-0.5">
                 {onUpdateSession && (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -801,7 +803,11 @@ export function SessionList({
       </div>
 
       {/* Session list */}
-      <ScrollArea className="flex-1">
+      {/* Force Radix's internal viewport wrapper (display:table, sizes to the
+          longest row's max-content) to block so rows truncate within the
+          viewport width instead of overflowing horizontally — otherwise the
+          shrink-0 row actions get pushed past the right edge and clipped. */}
+      <ScrollArea className="flex-1 [&>[data-slot=scroll-area-viewport]>div]:!block">
         <div className={cn("space-y-0.5", collapsed ? "p-1" : "p-1.5")}>
           {collapsed
             ? renderFlatList()
