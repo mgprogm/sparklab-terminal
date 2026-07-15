@@ -11,7 +11,7 @@ export default [
     },
   },
   {
-    // Ignore Next.js build output
-    ignores: [".next/", "next-env.d.ts"],
+    // Ignore Next.js build output (.next, plus NEXT_DIST_DIR variants like .next-prod/.next-e2e)
+    ignores: [".next*/", "next-env.d.ts"],
   },
 ];
