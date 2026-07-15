@@ -27,11 +27,22 @@ describe("LoginScreen", () => {
     } as unknown as ReturnType<typeof useLogin>);
   });
 
-  it("renders username, password fields and submit button", () => {
+  it("hides the form until Ctrl+Space reveals it", async () => {
+    const user = userEvent.setup();
+
     render(<LoginScreen />, { wrapper: wrap() });
+
+    expect(screen.queryByRole("button", { name: /sign in/i })).toBeNull();
+
+    await user.keyboard("{Control>}[Space]{/Control}");
+
     expect(screen.getByLabelText(/username/i)).toBeTruthy();
     expect(screen.getByLabelText(/password/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: /sign in/i })).toBeTruthy();
+
+    await user.keyboard("{Control>}[Space]{/Control}");
+
+    expect(screen.queryByRole("button", { name: /sign in/i })).toBeNull();
   });
 
   it("submits form with entered credentials", async () => {
@@ -39,6 +50,7 @@ describe("LoginScreen", () => {
 
     render(<LoginScreen />, { wrapper: wrap() });
 
+    await user.keyboard("{Control>}[Space]{/Control}");
     await user.type(screen.getByLabelText(/username/i), "admin");
     await user.type(screen.getByLabelText(/password/i), "secret-password");
     await user.click(screen.getByRole("button", { name: /sign in/i }));

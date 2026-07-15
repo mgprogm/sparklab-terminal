@@ -212,9 +212,12 @@ test.describe("Gate 7: Auth enforcement", () => {
     sessionId = created.id;
     await waitForShellReady(sessionId);
 
-    // Unauthenticated browser -> login screen.
+    // Unauthenticated browser -> stealth login screen: the form is hidden
+    // behind the animated background until Ctrl+Space reveals it.
     await page.goto("/");
     await page.waitForLoadState("networkidle");
+    await expect(page.getByLabel("Username")).toBeHidden();
+    await page.keyboard.press("Control+Space");
     await expect(page.getByLabel("Username")).toBeVisible();
 
     // Wrong password -> inline error, still on the login screen.
