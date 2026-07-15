@@ -778,8 +778,8 @@ export function SessionList({
         )}
       >
         {!collapsed && (
-          <span className="text-muted-foreground text-xs font-medium uppercase tracking-wider">
-            Sessions
+          <span className="brand-shimmer text-xs font-bold uppercase tracking-[0.18em]">
+            SPARKLAB
           </span>
         )}
         {/* "New" lives in the header only when there's no account footer to host

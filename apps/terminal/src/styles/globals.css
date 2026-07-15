@@ -5,6 +5,46 @@
 @source "../../../../packages/ui/src";
 
 /*
+ * Brand wordmark (sidebar header): a slow metallic sheen sweeping across the
+ * text. Built from theme tokens so it tracks light/dark automatically —
+ * muted base, ink highlight, a whisper of the warm accent at the crest.
+ */
+.brand-shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 48%,
+    var(--chart-1) 52%,
+    var(--foreground) 56%,
+    var(--muted-foreground) 66%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: brand-shimmer-sweep 4.5s ease-in-out infinite;
+}
+
+@keyframes brand-shimmer-sweep {
+  0% {
+    background-position: 125% 0;
+  }
+  60%,
+  100% {
+    background-position: -125% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-shimmer {
+    animation: none;
+    background-position: 50% 0;
+  }
+}
+
+/*
  * Mobile hardening (mobile UX spec §4.2/§2.5/§5).
  */
 
