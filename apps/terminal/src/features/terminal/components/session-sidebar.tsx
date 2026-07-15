@@ -2,27 +2,15 @@
 
 /**
  * SessionSidebar — the desktop (≥ md) inline sidebar: an <aside> wrapping
- * SessionList (whose header line carries the collapse toggle) plus the
- * signed-in footer. On mobile the sidebar is replaced by
- * a Sheet drawer in TerminalShell (mobile UX spec §1.2); the `hidden md:flex`
- * classes also guard the pre-hydration frame on small screens.
+ * SessionList, which renders the session header/list AND the signed-in account
+ * footer (the footer hosts the primary "New" action on desktop). On mobile the
+ * sidebar is replaced by a Sheet drawer in TerminalShell (mobile UX spec §1.2);
+ * the `hidden md:flex` classes also guard the pre-hydration frame on small
+ * screens.
  */
 
-import { Button } from "@sparklab/ui/components/ui/button";
-import { Separator } from "@sparklab/ui/components/ui/separator";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
-import {
-  ChevronsLeft,
-  ChevronsRight,
-  CircleUser,
-  LogOut,
-  Settings,
-} from "lucide-react";
+import { ChevronsLeft, ChevronsRight } from "lucide-react";
 
 import { SessionList } from "./session-list";
 
@@ -101,71 +89,10 @@ export function SessionSidebar({
         onDeleteSession={onDeleteSession}
         onUpdateSession={onUpdateSession}
         onDialogClose={onDialogClose}
+        username={username}
+        onLogout={onLogout}
+        onOpenSettings={onOpenSettings}
       />
-
-      {/* Account row — one footer line mirroring the 42px header line:
-          identity (glyph + username) on the left, compact icon-only actions
-          (settings gear, then sign-out) on the right. The gear always renders
-          — even in open mode where sign-out is absent — so it lives outside the
-          onLogout guard. Collapsed rail centers the icons alone. */}
-      {(onOpenSettings || onLogout) && (
-        <>
-          <Separator />
-          <div
-            className={cn(
-              "flex h-[42px] shrink-0 items-center",
-              collapsed
-                ? "justify-center px-0"
-                : "justify-between gap-2 px-2.5",
-            )}
-          >
-            {!collapsed && onLogout && (
-              <div className="flex min-w-0 items-center gap-2" title={username}>
-                <CircleUser className="text-muted-foreground size-4 shrink-0" />
-                <span className="text-foreground truncate text-xs font-medium">
-                  {username ?? "Signed in"}
-                </span>
-              </div>
-            )}
-            <div className="flex shrink-0 items-center gap-0.5">
-              {onOpenSettings && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Settings"
-                      onClick={onOpenSettings}
-                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
-                    >
-                      <Settings className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">Settings</TooltipContent>
-                </Tooltip>
-              )}
-              {onLogout && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Sign out"
-                      onClick={onLogout}
-                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
-                    >
-                      <LogOut className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">
-                    {username ? `Sign out (${username})` : "Sign out"}
-                  </TooltipContent>
-                </Tooltip>
-              )}
-            </div>
-          </div>
-        </>
-      )}
     </aside>
   );
 }

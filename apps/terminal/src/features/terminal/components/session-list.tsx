@@ -33,6 +33,7 @@ import {
 import { Input } from "@sparklab/ui/components/ui/input";
 import { Label } from "@sparklab/ui/components/ui/label";
 import { ScrollArea } from "@sparklab/ui/components/ui/scroll-area";
+import { Separator } from "@sparklab/ui/components/ui/separator";
 import {
   Tooltip,
   TooltipContent,
@@ -43,10 +44,13 @@ import {
   Building2,
   ChevronDown,
   ChevronRight,
+  CircleUser,
   Folder,
+  LogOut,
   MoreHorizontal,
   Plus,
   Server,
+  Settings,
   Sparkles,
   Terminal,
   Trash2,
@@ -142,6 +146,13 @@ export interface SessionListProps {
   onUpdateSession?: (params: UpdateSessionParams) => void;
   /** Called after any dialog closes so the terminal can reclaim focus. */
   onDialogClose?: () => void;
+  /** Signed-in username; absent in open mode (dev, auth disabled). When any of
+   *  the account props below are present, the account footer renders and hosts
+   *  the "New" action; otherwise (mobile drawer) "New" stays in the header. */
+  username?: string;
+  onLogout?: () => void;
+  /** Opens the settings dialog (owned by the shell). */
+  onOpenSettings?: () => void;
 }
 
 export function SessionList({
@@ -155,8 +166,15 @@ export function SessionList({
   onDeleteSession,
   onUpdateSession,
   onDialogClose,
+  username,
+  onLogout,
+  onOpenSettings,
 }: SessionListProps) {
   const drawer = variant === "drawer";
+  // When account controls are wired (desktop sidebar), the footer renders and
+  // owns the primary "New" action; the header drops it. Without them (mobile
+  // drawer) there is no footer, so "New" remains in the header.
+  const showAccountFooter = !!(onOpenSettings || onLogout);
   // Multi-server mode: server headers appear only once a second server exists.
   const serverList = useMemo(() => servers ?? [], [servers]);
   const multiServer = serverList.length > 1;
@@ -762,20 +780,24 @@ export function SessionList({
             Sessions
           </span>
         )}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="default"
-              size={collapsed ? "icon-xs" : "xs"}
-              className={cn(drawer && "h-9 px-3 text-sm")}
-              onClick={() => openCreateDialog()}
-            >
-              <Plus className="size-3.5" />
-              {!collapsed && <span>New</span>}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Create a new session</TooltipContent>
-        </Tooltip>
+        {/* "New" lives in the header only when there's no account footer to host
+            it (the mobile drawer). On desktop it moves into the footer row. */}
+        {!showAccountFooter && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="default"
+                size={collapsed ? "icon-xs" : "xs"}
+                className={cn(drawer && "h-9 px-3 text-sm")}
+                onClick={() => openCreateDialog()}
+              >
+                <Plus className="size-3.5" />
+                {!collapsed && <span>New</span>}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Create a new session</TooltipContent>
+          </Tooltip>
+        )}
       </div>
 
       {/* Session list */}
@@ -817,6 +839,86 @@ export function SessionList({
           )}
         </div>
       </ScrollArea>
+
+      {/* Account footer — one 42px line mirroring the header: identity (glyph +
+          username) on the left, a compact icon-action group on the right. The
+          primary "New" action leads the group as a filled button so it reads as
+          primary while sharing the row's icon geometry; the settings gear and
+          sign-out follow as ghost icons. Collapsed rail centers the icons. */}
+      {showAccountFooter && (
+        <>
+          <Separator />
+          <div
+            className={cn(
+              "flex h-[42px] shrink-0 items-center",
+              collapsed
+                ? "justify-center px-0"
+                : "justify-between gap-2 px-2.5",
+            )}
+          >
+            {!collapsed && onLogout && (
+              <div className="flex min-w-0 items-center gap-2" title={username}>
+                <CircleUser className="text-muted-foreground size-4 shrink-0" />
+                <span className="text-foreground truncate text-xs font-medium">
+                  {username ?? "Signed in"}
+                </span>
+              </div>
+            )}
+            <div className="flex shrink-0 items-center gap-0.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="default"
+                    size="icon-xs"
+                    aria-label="New session"
+                    onClick={() => openCreateDialog()}
+                    className="shrink-0"
+                  >
+                    <Plus className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  Create a new session
+                </TooltipContent>
+              </Tooltip>
+              {onOpenSettings && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Settings"
+                      onClick={onOpenSettings}
+                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
+                    >
+                      <Settings className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">Settings</TooltipContent>
+                </Tooltip>
+              )}
+              {onLogout && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Sign out"
+                      onClick={onLogout}
+                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
+                    >
+                      <LogOut className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    {username ? `Sign out (${username})` : "Sign out"}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Add-server dialog (shared component; also reachable from Settings).
           Mounted only in multi-server mode — its query hooks require a
