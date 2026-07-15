@@ -1,9 +1,14 @@
 # Multi-server plan: "Connected Servers"
 
-> **Status: design proposal (2026-07-15) — not implemented.** This documents
-> the agreed direction for letting the terminal create sessions on any
-> registered server, not just the gateway host. Nothing below exists in code
-> yet; treat it as the decision record for the future workstream.
+> **Status: IMPLEMENTED — MVP shipped 2026-07-15.** The MVP section below
+> (Option C: SSH + remote tmux, server registry, qualified session ids, sidebar
+> grouping, add-server dialog, Servers settings tab, password auth opt-in) is
+> done and tests pass (`acceptance:remote`, `test:servers-password`). The
+> implementation spec is `docs/multi-server-impl-spec.md` (code-validated,
+> frozen). "Later" items — agent `server` arg, key-gen UI, Option B
+> hub-and-spoke — remain out of scope. This file is kept as the decision
+> record; `docs/multi-server-impl-spec.md` is the authoritative wire/code
+> contract.
 
 ## Problem
 
@@ -93,11 +98,20 @@ registry is **config, not state**, so it gets a home: a gitignored
 }
 ```
 
-SSH auth is **key-based only** — no passwords stored anywhere. Host keys are
-handled with `StrictHostKeyChecking=accept-new` (or a pinned `known_hosts`).
-The trust model is deliberate: the gateway host's public key is what you
-authorize on each server, so there is exactly one credential to rotate and the
-browser never holds server credentials.
+SSH auth is **key-based by default** — the original design stored no passwords.
+Host keys are handled with `StrictHostKeyChecking=accept-new` (or a pinned
+`known_hosts`). The trust model is deliberate: the gateway host's public key is
+what you authorize on each server, so there is exactly one credential to rotate
+and the browser never holds server credentials.
+
+**Departure added at implementation:** per-server **password auth** was added
+as an opt-in for hosts that only accept password login. The password is stored
+plaintext in the gitignored `servers.json` and is never sent to the browser
+(`GET /api/servers` returns only `authMethod: "key"|"password"`). The
+mechanism uses OpenSSH's askpass protocol (`SSH_ASKPASS` +
+`SSH_ASKPASS_REQUIRE=force`, OpenSSH ≥ 8.4) — not `sshpass` — so it works
+non-interactively on both the control exec path and the WS-attach pty path.
+See `docs/multi-server-impl-spec.md` §Password auth for full details.
 
 ## API changes (gateway)
 
