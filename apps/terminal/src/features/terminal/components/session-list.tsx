@@ -46,22 +46,40 @@ import {
   Folder,
   MoreHorizontal,
   Plus,
+  Server,
   Sparkles,
   Terminal,
   Trash2,
+  Unplug,
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 
-import { useAgentStore } from "@/features/agent-chat";
-
-import { groupSessions, hasAnyGrouping, flattenTree } from "../grouping";
+import {
+  groupSessions,
+  hasAnyGrouping,
+  flattenTree,
+  type SessionTree,
+} from "../grouping";
+import {
+  groupByServer,
+  isServerUnreachable,
+  orgCollapseKey,
+  projectCollapseKey,
+  serverCollapseKey,
+  serverDotClass,
+  serverStatus,
+  sessionServerId,
+} from "../server-grouping";
 import { useTerminalStore } from "../store";
+import { AddServerDialog } from "./add-server-dialog";
 
-import type { SessionInfo } from "@sparklab/shared-types";
 import type {
   CreateSessionParams,
   UpdateSessionParams,
 } from "../hooks/use-sessions";
+import type { ServerInfo, SessionInfo } from "@sparklab/shared-types";
+
+import { useAgentStore } from "@/features/agent-chat";
 
 // Shell processes that don't count as "running a job".
 const SHELLS = new Set([
@@ -111,6 +129,9 @@ function uniqueProjects(sessions: SessionInfo[], org: string): string[] {
 export interface SessionListProps {
   sessions: SessionInfo[];
   activeSessionId: string | null;
+  /** Registry servers. When absent or <= 1 the sidebar is single-server and
+   *  renders exactly as before (no server headers). */
+  servers?: ServerInfo[];
   /** Desktop-only collapsed (icon rail) mode. The mobile drawer never collapses. */
   collapsed?: boolean;
   /** "drawer" enlarges touch targets for the mobile Sheet. */
@@ -126,6 +147,7 @@ export interface SessionListProps {
 export function SessionList({
   sessions,
   activeSessionId,
+  servers,
   collapsed = false,
   variant = "sidebar",
   onSelectSession,
@@ -135,6 +157,19 @@ export function SessionList({
   onDialogClose,
 }: SessionListProps) {
   const drawer = variant === "drawer";
+  // Multi-server mode: server headers appear only once a second server exists.
+  const serverList = useMemo(() => servers ?? [], [servers]);
+  const multiServer = serverList.length > 1;
+  // Fast serverId -> record lookup for row-level reachability + tooltips.
+  const serverById = useMemo(() => {
+    const m = new Map<string, ServerInfo>();
+    for (const s of serverList) m.set(s.id, s);
+    return m;
+  }, [serverList]);
+  const serverGroups = useMemo(
+    () => (multiServer ? groupByServer(sessions, serverList) : []),
+    [multiServer, sessions, serverList],
+  );
   // Sessions the agent is actively writing to -- drives the amber row badge.
   const agentActiveSessionIds = useAgentStore((s) => s.agentActiveSessionIds);
 
@@ -147,6 +182,10 @@ export function SessionList({
   const [newName, setNewName] = useState("");
   const [newOrg, setNewOrg] = useState("");
   const [newProject, setNewProject] = useState("");
+  const [newServerId, setNewServerId] = useState("local");
+
+  // ---- Add-server dialog state (multi-server sidebar row) ----
+  const [addServerOpen, setAddServerOpen] = useState(false);
 
   // ---- Delete dialog state ----
   const [deleteTarget, setDeleteTarget] = useState<SessionInfo | null>(null);
@@ -178,10 +217,15 @@ export function SessionList({
 
   // ---- Create handlers ----
   const openCreateDialog = useCallback(
-    (prefillOrg?: string, prefillProject?: string) => {
+    (
+      prefillOrg?: string,
+      prefillProject?: string,
+      prefillServerId?: string,
+    ) => {
       setNewName("");
       setNewOrg(prefillOrg ?? "");
       setNewProject(prefillProject ?? "");
+      setNewServerId(prefillServerId ?? "local");
       setCreateOpen(true);
     },
     [],
@@ -192,10 +236,14 @@ export function SessionList({
     if (newName.trim()) params.name = newName.trim();
     if (newOrg.trim()) params.org = newOrg.trim();
     if (newProject.trim()) params.project = newProject.trim();
+    // Only carry serverId in multi-server mode so the single-server POST body
+    // stays byte-identical to before.
+    if (multiServer && newServerId) params.serverId = newServerId;
     onCreateSession(Object.keys(params).length > 0 ? params : undefined);
     setNewName("");
     setNewOrg("");
     setNewProject("");
+    setNewServerId("local");
     setCreateOpen(false);
     onDialogClose?.();
   };
@@ -204,6 +252,7 @@ export function SessionList({
     setNewName("");
     setNewOrg("");
     setNewProject("");
+    setNewServerId("local");
     setCreateOpen(false);
     onDialogClose?.();
   };
@@ -261,18 +310,29 @@ export function SessionList({
 
   // ---- Session row renderer ----
   const renderSessionRow = (s: SessionInfo) => {
+    const server = serverById.get(sessionServerId(s));
+    // Grey a row only in multi-server mode when its server can't be reached
+    // ("couldn't ask" != "dead"). An unknown (orphan) serverId is treated the
+    // same — muted, never destructive, never dropped.
+    const unreachable = multiServer && (!server || isServerUnreachable(server));
+    const serverName = server?.name ?? sessionServerId(s);
+
     const tooltipLines: string[] = [s.name];
-    if (collapsed && s.org) {
-      tooltipLines.push(s.project ? `${s.org} / ${s.project}` : s.org);
+    if (collapsed) {
+      if (multiServer) tooltipLines.push(serverName);
+      if (s.org) {
+        tooltipLines.push(s.project ? `${s.org} / ${s.project}` : s.org);
+      }
     }
 
-    return (
+    const row = (
       <Tooltip key={s.id}>
         <TooltipTrigger asChild>
           <div
             className={cn(
               "group relative flex w-full items-center rounded-sm transition-colors",
               collapsed && "justify-center",
+              unreachable && "opacity-60",
               s.id === activeSessionId
                 ? "border-l-primary bg-secondary border-l-2"
                 : "hover:bg-accent border-l-2 border-l-transparent",
@@ -366,6 +426,11 @@ export function SessionList({
                         {formatRelativeTime(s.lastActivity)}
                       </span>
                     ) : null}
+                    {unreachable && (
+                      <span className="text-muted-foreground shrink-0">
+                        unreachable
+                      </span>
+                    )}
                   </span>
                 </div>
               )}
@@ -408,20 +473,96 @@ export function SessionList({
             )}
           </div>
         </TooltipTrigger>
-        {collapsed && (
+        {(collapsed || unreachable) && (
           <TooltipContent side="right">
-            {tooltipLines.map((line, i) => (
-              <div key={i}>{line}</div>
-            ))}
+            {collapsed ? (
+              tooltipLines.map((line, i) => <div key={i}>{line}</div>)
+            ) : (
+              <div className="max-w-56">
+                This server is unreachable. The session is still running there —
+                the gateway just can&apos;t reach {serverName} right now.
+              </div>
+            )}
           </TooltipContent>
         )}
       </Tooltip>
     );
+
+    return row;
+  };
+
+  // ---- Server header renderer (multi-server only) ----
+  const renderServerHeader = (server: ServerInfo, sessionCount: number) => {
+    const key = serverCollapseKey(server.id);
+    const isCollapsed = !!collapsedGroups[key];
+    const status = serverStatus(server);
+    const unreachable = status === "unreachable";
+
+    return (
+      <div
+        key={`server-${server.id}`}
+        className="group/server flex items-center"
+      >
+        <button
+          type="button"
+          className="text-muted-foreground hover:text-secondary-foreground flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium uppercase tracking-wider transition-colors"
+          onClick={() => toggleGroupCollapsed(key)}
+        >
+          {isCollapsed ? (
+            <ChevronRight className="size-3 shrink-0" />
+          ) : (
+            <ChevronDown className="size-3 shrink-0" />
+          )}
+          <Server className="size-3.5 shrink-0" />
+          <span className="min-w-0 truncate">{server.name}</span>
+          {unreachable && (
+            <span className="text-muted-foreground border-border flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px text-[10px] normal-case tracking-wider">
+              <Unplug className="size-3" />
+              unreachable
+            </span>
+          )}
+          <span
+            className={cn(
+              "ml-auto size-[7px] shrink-0 rounded-full",
+              serverDotClass(server),
+            )}
+            title={status}
+          />
+          <span className="text-muted-foreground shrink-0 text-[10px] font-normal tabular-nums">
+            {sessionCount}
+          </span>
+        </button>
+        <button
+          type="button"
+          disabled={unreachable}
+          className={cn(
+            "text-muted-foreground pointer-coarse:opacity-100 mr-1.5 shrink-0 rounded-sm p-0.5 opacity-0 transition-opacity group-hover/server:opacity-100",
+            unreachable
+              ? "cursor-not-allowed opacity-40"
+              : "hover:text-secondary-foreground",
+          )}
+          title={
+            unreachable
+              ? `Can't create a session — ${server.name} is unreachable.`
+              : `New session on ${server.name}`
+          }
+          onClick={() => {
+            if (!unreachable) openCreateDialog(undefined, undefined, server.id);
+          }}
+        >
+          <Plus className="size-3" />
+        </button>
+      </div>
+    );
   };
 
   // ---- Org header renderer ----
-  const renderOrgHeader = (orgName: string | null, sessionCount: number) => {
-    const key = orgName ?? "__ungrouped__";
+  const renderOrgHeader = (
+    orgName: string | null,
+    sessionCount: number,
+    serverId: string | null = null,
+  ) => {
+    const key = orgCollapseKey(serverId, orgName);
     const isCollapsed = !!collapsedGroups[key];
     const label = orgName ?? "Ungrouped";
 
@@ -448,7 +589,9 @@ export function SessionList({
             type="button"
             className="text-muted-foreground hover:text-secondary-foreground pointer-coarse:opacity-100 mr-1.5 shrink-0 rounded-sm p-0.5 opacity-0 transition-opacity group-hover/org:opacity-100"
             title={`New session in ${orgName}`}
-            onClick={() => openCreateDialog(orgName)}
+            onClick={() =>
+              openCreateDialog(orgName, undefined, serverId ?? undefined)
+            }
           >
             <Plus className="size-3" />
           </button>
@@ -462,9 +605,9 @@ export function SessionList({
     orgName: string | null,
     projectName: string,
     sessionCount: number,
+    serverId: string | null = null,
   ) => {
-    const orgKey = orgName ?? "__ungrouped__";
-    const key = `${orgKey}/${projectName}`;
+    const key = projectCollapseKey(serverId, orgName, projectName);
     const isCollapsed = !!collapsedGroups[key];
 
     return (
@@ -490,7 +633,9 @@ export function SessionList({
             type="button"
             className="text-muted-foreground hover:text-secondary-foreground pointer-coarse:opacity-100 mr-1.5 shrink-0 rounded-sm p-0.5 opacity-0 transition-opacity group-hover/proj:opacity-100"
             title={`New session in ${orgName} / ${projectName}`}
-            onClick={() => openCreateDialog(orgName, projectName)}
+            onClick={() =>
+              openCreateDialog(orgName, projectName, serverId ?? undefined)
+            }
           >
             <Plus className="size-3" />
           </button>
@@ -499,20 +644,31 @@ export function SessionList({
     );
   };
 
-  // ---- Grouped list renderer ----
-  const renderGroupedList = () => {
+  // ---- Org tree renderer (reused for single-server and per-server subtrees) ----
+  // `serverId == null` => single-server (bare collapse keys, unchanged);
+  // a non-null serverId namespaces the keys and threads through create prefills.
+  const renderOrgTree = (
+    orgTree: SessionTree,
+    serverId: string | null = null,
+  ): React.ReactNode[] => {
     const elements: React.ReactNode[] = [];
 
-    for (const orgGroup of tree) {
-      const orgKey = orgGroup.org ?? "__ungrouped__";
+    for (const orgGroup of orgTree) {
+      const orgKey = orgCollapseKey(serverId, orgGroup.org);
       const orgCollapsed = !!collapsedGroups[orgKey];
 
-      elements.push(renderOrgHeader(orgGroup.org, orgGroup.sessionCount));
+      elements.push(
+        renderOrgHeader(orgGroup.org, orgGroup.sessionCount, serverId),
+      );
 
       if (!orgCollapsed) {
         for (const projGroup of orgGroup.projects) {
           if (projGroup.project) {
-            const projKey = `${orgKey}/${projGroup.project}`;
+            const projKey = projectCollapseKey(
+              serverId,
+              orgGroup.org,
+              projGroup.project,
+            );
             const projCollapsed = !!collapsedGroups[projKey];
 
             elements.push(
@@ -520,6 +676,7 @@ export function SessionList({
                 orgGroup.org,
                 projGroup.project,
                 projGroup.sessions.length,
+                serverId,
               ),
             );
 
@@ -542,6 +699,37 @@ export function SessionList({
               );
             }
           }
+        }
+      }
+    }
+
+    return elements;
+  };
+
+  // ---- Single-server grouped list (unchanged behavior). ----
+  const renderGroupedList = () => renderOrgTree(tree, null);
+
+  // ---- Multi-server: server -> (org -> project) -> sessions ----
+  const renderServerGroupedList = () => {
+    const elements: React.ReactNode[] = [];
+
+    for (const group of serverGroups) {
+      const { server } = group;
+      elements.push(renderServerHeader(server, group.sessionCount));
+
+      const serverCollapsed = !!collapsedGroups[serverCollapseKey(server.id)];
+      if (serverCollapsed) continue;
+
+      if (group.grouped) {
+        // Per-server org tree (grouped-vs-flat decided per subset, not global).
+        elements.push(...renderOrgTree(group.tree, server.id));
+      } else {
+        for (const s of group.sessions) {
+          elements.push(
+            <div key={s.id} className="pl-4">
+              {renderSessionRow(s)}
+            </div>,
+          );
         }
       }
     }
@@ -593,9 +781,15 @@ export function SessionList({
       {/* Session list */}
       <ScrollArea className="flex-1">
         <div className={cn("space-y-0.5", collapsed ? "p-1" : "p-1.5")}>
-          {grouped && !collapsed ? renderGroupedList() : renderFlatList()}
+          {collapsed
+            ? renderFlatList()
+            : multiServer
+              ? renderServerGroupedList()
+              : grouped
+                ? renderGroupedList()
+                : renderFlatList()}
 
-          {sessions.length === 0 && !collapsed && (
+          {sessions.length === 0 && !collapsed && !multiServer && (
             <div className="flex flex-col items-center gap-3 py-8 text-center">
               <Terminal className="text-muted-foreground size-8" />
               <p className="text-muted-foreground text-sm">No sessions yet.</p>
@@ -609,8 +803,31 @@ export function SessionList({
               </Button>
             </div>
           )}
+
+          {/* "Add server" ghost row — multi-server, expanded sidebar only. */}
+          {multiServer && !collapsed && (
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-secondary-foreground mt-1 flex w-full items-center gap-1.5 rounded-sm px-2.5 py-1.5 text-left text-xs transition-colors"
+              onClick={() => setAddServerOpen(true)}
+            >
+              <Plus className="size-3.5 shrink-0" />
+              Add server
+            </button>
+          )}
         </div>
       </ScrollArea>
+
+      {/* Add-server dialog (shared component; also reachable from Settings).
+          Mounted only in multi-server mode — its query hooks require a
+          QueryClient, and the single-server sidebar has no entry point to it. */}
+      {multiServer && (
+        <AddServerDialog
+          open={addServerOpen}
+          onOpenChange={setAddServerOpen}
+          onDialogClose={onDialogClose}
+        />
+      )}
 
       {/* ---- Create session dialog ---- */}
       <Dialog
@@ -630,6 +847,42 @@ export function SessionList({
             }}
           >
             <div className="space-y-3">
+              {/* Server selector — multi-server only. Hidden (implicit local)
+                  in single-server mode, so the dialog is unchanged there. */}
+              {multiServer && (
+                <div className="space-y-1.5">
+                  <Label
+                    htmlFor="create-server"
+                    className="text-muted-foreground text-xs"
+                  >
+                    Server
+                  </Label>
+                  <div className="border-input flex items-center gap-2 rounded-md border bg-transparent px-3 py-2 text-sm">
+                    <Server className="text-muted-foreground size-3.5 shrink-0" />
+                    <select
+                      id="create-server"
+                      value={newServerId}
+                      onChange={(e) => setNewServerId(e.target.value)}
+                      className="text-foreground w-full bg-transparent outline-none"
+                    >
+                      {serverGroups.map(({ server }) => {
+                        const unreachable =
+                          serverStatus(server) === "unreachable";
+                        return (
+                          <option
+                            key={server.id}
+                            value={server.id}
+                            disabled={unreachable}
+                          >
+                            {server.name}
+                            {unreachable ? " — unreachable" : ""}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                </div>
+              )}
               <Input
                 placeholder="Session name (optional)"
                 value={newName}

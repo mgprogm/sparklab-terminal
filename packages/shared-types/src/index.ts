@@ -1,4 +1,10 @@
 export {
+  // Multi-server: qualified session-id helpers
+  LOCAL_SERVER_ID,
+  parseSessionRef,
+  formatSessionRef,
+  normalizeSessionRef,
+  type SessionRef,
   // REST: POST /api/sessions
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
@@ -16,6 +22,27 @@ export {
   UpdateSessionResponseSchema,
   type UpdateSessionRequest,
   type UpdateSessionResponse,
+  // Multi-server: server registry
+  ServerIdSchema,
+  ServerTypeSchema,
+  ServerReachabilitySchema,
+  ServerAuthMethodSchema,
+  ServerInfoSchema,
+  ListServersResponseSchema,
+  CreateServerRequestSchema,
+  CreateServerResponseSchema,
+  TestServerRequestSchema,
+  TestServerResponseSchema,
+  type ServerId,
+  type ServerType,
+  type ServerReachability,
+  type ServerAuthMethod,
+  type ServerInfo,
+  type ListServersResponse,
+  type CreateServerRequest,
+  type CreateServerResponse,
+  type TestServerRequest,
+  type TestServerResponse,
   // REST: errors
   ApiErrorSchema,
   type ApiError,

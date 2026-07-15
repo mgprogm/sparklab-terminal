@@ -30,11 +30,13 @@ import type {
   CreateSessionParams,
   UpdateSessionParams,
 } from "../hooks/use-sessions";
-import type { SessionInfo } from "@sparklab/shared-types";
+import type { ServerInfo, SessionInfo } from "@sparklab/shared-types";
 
 interface SessionSidebarProps {
   sessions: SessionInfo[];
   activeSessionId: string | null;
+  /** Registry servers; drives the multi-server sidebar grouping. */
+  servers?: ServerInfo[];
   collapsed: boolean;
   onSelectSession: (id: string) => void;
   onCreateSession: (params?: CreateSessionParams) => void;
@@ -53,6 +55,7 @@ interface SessionSidebarProps {
 export function SessionSidebar({
   sessions,
   activeSessionId,
+  servers,
   collapsed,
   onSelectSession,
   onCreateSession,
@@ -91,6 +94,7 @@ export function SessionSidebar({
       <SessionList
         sessions={sessions}
         activeSessionId={activeSessionId}
+        servers={servers}
         collapsed={collapsed}
         onSelectSession={onSelectSession}
         onCreateSession={onCreateSession}

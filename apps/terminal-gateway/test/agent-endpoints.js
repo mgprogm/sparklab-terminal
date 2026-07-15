@@ -91,7 +91,10 @@ async function rest(method, pathname, body) {
 
 async function getScreen(id, history) {
   const q = history !== undefined ? `?history=${history}` : "";
-  const res = await rest("GET", `/api/sessions/${id}/screen${q}`);
+  const res = await rest(
+    "GET",
+    `/api/sessions/${encodeURIComponent(id)}/screen${q}`,
+  );
   if (res.status !== 200)
     fail(`GET /screen returned ${res.status}, expected 200`);
   return res.json();
@@ -108,12 +111,18 @@ async function main() {
   if (resCreate.status !== 201)
     fail(`POST /api/sessions returned ${resCreate.status}, expected 201`);
   const id = (await resCreate.json()).id;
-  createdIds.push(id);
+  // Multi-server: POST now returns the QUALIFIED id `<serverId>/web-<uuid>`.
+  // Real clients (frontend, agent-service) encodeURIComponent it so the "/"
+  // round-trips as ONE path segment; mirror that here. The bare tmux name (last
+  // segment) is what tmux cleanup + listWebSessions (bare `tmux ls`) compare on.
+  const eid = encodeURIComponent(id);
+  const tmuxName = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+  createdIds.push(tmuxName);
   console.log(`created ${id}`);
   await sleep(600); // let the shell finish printing its prompt
 
   // --- 2. POST /keys {text} must type literally and NOT execute ---
-  const resText = await rest("POST", `/api/sessions/${id}/keys`, {
+  const resText = await rest("POST", `/api/sessions/${eid}/keys`, {
     text: "echo hello-agent",
   });
   if (resText.status !== 204)
@@ -149,7 +158,7 @@ async function main() {
   );
 
   // --- 3. POST /keys {keys:["Enter"]} executes the pending command ---
-  const resEnter = await rest("POST", `/api/sessions/${id}/keys`, {
+  const resEnter = await rest("POST", `/api/sessions/${eid}/keys`, {
     keys: ["Enter"],
   });
   if (resEnter.status !== 204)
@@ -170,26 +179,26 @@ async function main() {
   console.log("Enter executed the pending command; output visible via /screen");
 
   // --- 4. Validation: whitelist + malformed bodies ---
-  const resBadKey = await rest("POST", `/api/sessions/${id}/keys`, {
+  const resBadKey = await rest("POST", `/api/sessions/${eid}/keys`, {
     keys: ["kill-session"],
   });
   if (resBadKey.status !== 400)
     fail(`{keys:["kill-session"]} returned ${resBadKey.status}, expected 400`);
-  const resBoth = await rest("POST", `/api/sessions/${id}/keys`, {
+  const resBoth = await rest("POST", `/api/sessions/${eid}/keys`, {
     text: "x",
     keys: ["Enter"],
   });
   if (resBoth.status !== 400)
     fail(`{text+keys} returned ${resBoth.status}, expected 400`);
-  const resNeither = await rest("POST", `/api/sessions/${id}/keys`, {});
+  const resNeither = await rest("POST", `/api/sessions/${eid}/keys`, {});
   if (resNeither.status !== 400)
     fail(`{} returned ${resNeither.status}, expected 400`);
-  const resEmptyText = await rest("POST", `/api/sessions/${id}/keys`, {
+  const resEmptyText = await rest("POST", `/api/sessions/${eid}/keys`, {
     text: "",
   });
   if (resEmptyText.status !== 400)
     fail(`{text:""} returned ${resEmptyText.status}, expected 400`);
-  const resEmptyKeys = await rest("POST", `/api/sessions/${id}/keys`, {
+  const resEmptyKeys = await rest("POST", `/api/sessions/${eid}/keys`, {
     keys: [],
   });
   if (resEmptyKeys.status !== 400)
@@ -216,8 +225,8 @@ async function main() {
 
   // --- 6. history param: scrolled-off content comes back with history>0 ---
   // Scroll hello-agent off the visible screen (pane is 24 rows).
-  await rest("POST", `/api/sessions/${id}/keys`, { text: "seq 1 100" });
-  await rest("POST", `/api/sessions/${id}/keys`, { keys: ["Enter"] });
+  await rest("POST", `/api/sessions/${eid}/keys`, { text: "seq 1 100" });
+  await rest("POST", `/api/sessions/${eid}/keys`, { keys: ["Enter"] });
   let scrolled = false;
   for (let i = 0; i < 20; i++) {
     await sleep(250);
@@ -241,7 +250,7 @@ async function main() {
   );
 
   // --- 7. Clean up, verify no orphans ---
-  const resDel = await rest("DELETE", `/api/sessions/${id}`);
+  const resDel = await rest("DELETE", `/api/sessions/${eid}`);
   if (resDel.status !== 204)
     fail(`DELETE returned ${resDel.status}, expected 204`);
   await sleep(300);

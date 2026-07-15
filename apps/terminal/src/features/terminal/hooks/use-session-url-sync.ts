@@ -1,5 +1,6 @@
 "use client";
 
+import { normalizeSessionRef } from "@sparklab/shared-types";
 import { useEffect } from "react";
 
 /**
@@ -34,7 +35,9 @@ export function useSessionUrlSync(
   // store is the source of truth thereafter.
   useEffect(() => {
     const fromUrl = new URLSearchParams(window.location.search).get(PARAM);
-    if (fromUrl) setActiveSessionId(fromUrl);
+    // Normalize so a bare `?session=web-…` bookmark (pre-multi-server, or a
+    // hand-typed link) matches the now-qualified `local/web-…` list ids.
+    if (fromUrl) setActiveSessionId(normalizeSessionRef(fromUrl));
   }, []);
 
   // Write (store → URL), on change.

@@ -41,4 +41,18 @@ describe("resolveActiveSession", () => {
   it("attaches to the first session when loaded with none selected", () => {
     expect(resolveActiveSession(true, S("web-1", "web-2"), null)).toBe("web-1");
   });
+
+  it("keeps the active id when it exists as a qualified (unreachable) row", () => {
+    // The "never prune unreachable" protection: an unreachable server's
+    // last-known session stays in the list, so its qualified id remains valid
+    // and the resolver must NOT fall it back. (The caller must not filter
+    // reachable:false rows before this runs.)
+    expect(
+      resolveActiveSession(
+        true,
+        S("local/web-1", "build01/web-x"),
+        "build01/web-x",
+      ),
+    ).toBeUndefined();
+  });
 });

@@ -9,6 +9,7 @@
 // `web-` name prefix so the gateway can never see or touch unrelated sessions.
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 import { spawn as ptySpawn } from "node-pty";
 import metadata from "./metadata.js";
+import registry from "./registry.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -267,88 +269,354 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
-async function tmux(args) {
-  return execFileAsync("tmux", args);
+// ---------------------------------------------------------------------------
+// Multi-server ("Connected Servers"): qualified session ids + the exec seam.
+// ---------------------------------------------------------------------------
+// Canonical parse/format lives in packages/shared-types/src/terminal.ts
+// (parseSessionRef / formatSessionRef / LOCAL_SERVER_ID). The gateway is plain
+// dependency-free JS and CANNOT import that module at runtime (same reason it
+// duplicates AGENT_NAMED_KEYS), so we mirror the exact split/join here — KEEP
+// THE TWO IN SYNC.
+const LOCAL_SERVER_ID = "local";
+
+// Split on the FIRST "/": before => serverId, after => tmux name. No "/" means
+// a bare tmux name (old bookmark / single-server client) => serverId "local".
+function parseSessionRef(ref) {
+  const slash = ref.indexOf("/");
+  if (slash < 0) return { serverId: LOCAL_SERVER_ID, tmuxName: ref };
+  return {
+    serverId: ref.slice(0, slash) || LOCAL_SERVER_ID,
+    tmuxName: ref.slice(slash + 1),
+  };
 }
 
-// Run tmux with `input` piped to stdin (used by `load-buffer -`). promisified
-// execFile exposes the underlying ChildProcess as `.child`.
-async function tmuxStdin(args, input) {
-  const promise = execFileAsync("tmux", args);
+// Always emit the canonical qualified form (even for "local") so the target
+// host is never implicit anywhere on the wire.
+function formatSessionRef(serverId, tmuxName) {
+  return `${serverId || LOCAL_SERVER_ID}/${tmuxName}`;
+}
+
+// One control socket per server so every control exec AND the WS attach reuse a
+// single TCP+auth handshake (ControlMaster). Kept short to stay under the
+// ~104-char unix-socket path limit.
+const SSH_CONTROL_DIR = path.join(os.tmpdir(), "gw-ssh-cm");
+try {
+  fs.mkdirSync(SSH_CONTROL_DIR, { recursive: true, mode: 0o700 });
+} catch {}
+
+// Password auth (opt-in per server) uses OpenSSH's askpass helper rather than a
+// prompt: SSH_ASKPASS_REQUIRE=force (OpenSSH >= 8.4) makes ssh read the password
+// from this helper even without a controlling terminal AND even when node-pty
+// gives the attach a pty — so both exec seams work non-interactively. The helper
+// echoes $GW_SSH_PASSWORD, which we pass via the child env (NOT argv), so the
+// secret never appears in `ps`. Key-based servers never touch any of this.
+const SSH_ASKPASS_PATH = path.join(SSH_CONTROL_DIR, "askpass.sh");
+try {
+  fs.writeFileSync(
+    SSH_ASKPASS_PATH,
+    "#!/bin/sh\nprintf '%s\\n' \"$GW_SSH_PASSWORD\"\n",
+    { mode: 0o700 },
+  );
+} catch {}
+
+function sshHost(server) {
+  return server.user ? `${server.user}@${server.host}` : server.host;
+}
+
+// Extra child-process env for a server. For password auth, wire the askpass
+// helper + force it + pass the secret by env (never argv). Empty for local and
+// key-based servers, so their spawn env is unchanged.
+function sshEnvFor(server) {
+  if (server && server.type === "ssh" && server.password) {
+    return {
+      SSH_ASKPASS: SSH_ASKPASS_PATH,
+      SSH_ASKPASS_REQUIRE: "force",
+      GW_SSH_PASSWORD: server.password,
+    };
+  }
+  return {};
+}
+
+// Merge process.env with the server's extra ssh env. Only allocates a new object
+// when there's something to add.
+function childEnvFor(server) {
+  const extra = sshEnvFor(server);
+  return Object.keys(extra).length ? { ...process.env, ...extra } : process.env;
+}
+
+// Shared ssh options for BOTH control execs and the reachability probe. Two
+// modes: key-based (BatchMode=yes => ssh never prompts) or password (askpass;
+// pubkey disabled so we go straight to the password, single attempt).
+function sshOptsFor(server) {
+  const usePassword = !!(server && server.password);
+  const opts = [
+    "-o",
+    usePassword ? "BatchMode=no" : "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "ConnectTimeout=8",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${path.join(SSH_CONTROL_DIR, "cm-%r@%h:%p")}`,
+    "-o",
+    "ControlPersist=60s",
+  ];
+  if (usePassword) {
+    // Go straight to password auth in one attempt; the control socket then
+    // carries every later exec/attach so the password is only used on connect.
+    opts.push(
+      "-o",
+      "PreferredAuthentications=password",
+      "-o",
+      "PubkeyAuthentication=no",
+      "-o",
+      "NumberOfPasswordPrompts=1",
+    );
+  }
+  if (server.port) opts.push("-p", String(server.port));
+  if (!usePassword && server.identityFile) {
+    opts.push("-i", server.identityFile, "-o", "IdentitiesOnly=yes");
+  }
+  return opts;
+}
+
+// POSIX single-quote an argument for the REMOTE shell. Wrap in single quotes
+// and escape any embedded single quote as '\''. Only needed on the ssh path.
+function shellQuote(arg) {
+  return `'${String(arg).replace(/'/g, "'\\''")}'`;
+}
+
+// THE EXEC SEAM. Returns argv for execFile/ptySpawn running `tmux <tmuxArgs>`
+// either locally or over ssh. For type:"local" it returns the bare tmux argv —
+// ZERO behavior change for the single-server path. `tty:true` forces ssh to
+// allocate a pty (the WS-attach seam needs `ssh -tt … tmux attach-session`).
+// `server.tmuxCommand` (file-only config, e.g. ["tmux","-L","sock"]) overrides
+// the tmux invocation so a test/advanced setup can target a separate socket.
+//
+// Local vs remote quoting: locally we execFile tmux directly (no shell), so each
+// argv element is already one literal argument. Over ssh, the remote sshd runs
+// the command through a shell that RE-SPLITS on whitespace and interprets
+// metacharacters — so a `-F "#{a}\t#{b}"` format (spaces/tabs), a `send-keys`
+// text arg, or a cwd path with spaces would break. We therefore shell-quote
+// every token into a single remote command string so the remote tmux receives
+// the exact same argv it would locally.
+function serverExecArgv(server, tmuxArgs, { tty = false } = {}) {
+  const tmuxCmd =
+    Array.isArray(server && server.tmuxCommand) && server.tmuxCommand.length
+      ? server.tmuxCommand
+      : ["tmux"];
+  if (!server || server.type === "local") {
+    return [...tmuxCmd, ...tmuxArgs];
+  }
+  const argv = ["ssh"];
+  if (tty) argv.push("-tt");
+  const remoteCmd = [...tmuxCmd, ...tmuxArgs].map(shellQuote).join(" ");
+  argv.push(...sshOptsFor(server), sshHost(server), remoteCmd);
+  return argv;
+}
+
+// Control-seam exec: run tmux on `server`, await stdout/stderr.
+async function serverExec(server, tmuxArgs) {
+  const argv = serverExecArgv(server, tmuxArgs);
+  return execFileAsync(argv[0], argv.slice(1), { env: childEnvFor(server) });
+}
+
+// Control-seam exec with `input` piped to stdin (used by `load-buffer -`).
+// promisified execFile exposes the underlying ChildProcess as `.child`; the
+// input flows through the ssh child exactly as it did through the tmux child.
+async function serverExecStdin(server, tmuxArgs, input) {
+  const argv = serverExecArgv(server, tmuxArgs);
+  const promise = execFileAsync(argv[0], argv.slice(1), {
+    env: childEnvFor(server),
+  });
   promise.child.stdin.end(input);
   return promise;
 }
 
-async function sessionExists(name) {
+// ---- Cached reachability probe (`ssh <host> true`) ----
+// The 3 s session poll and GET /api/servers must not fire a fresh ssh probe per
+// server per tick, so results are cached with a short TTL. "local" is always
+// "ok" (no ssh). "unreachable" means "couldn't ask" — never "dead".
+const REACHABILITY_TTL_MS = 12_000;
+const reachabilityCache = new Map(); // serverId -> { reachability, lastProbeAt, at }
+
+async function probeServer(server, { force = false } = {}) {
+  if (!server || server.type === "local") {
+    return { reachability: "ok", lastProbeAt: null };
+  }
+  const cached = reachabilityCache.get(server.id);
+  if (!force && cached && Date.now() - cached.at < REACHABILITY_TTL_MS) {
+    return {
+      reachability: cached.reachability,
+      lastProbeAt: cached.lastProbeAt,
+    };
+  }
+  let reachability = "unreachable";
+  let error;
+  try {
+    const argv = ["ssh", ...sshOptsFor(server), sshHost(server), "true"];
+    await execFileAsync(argv[0], argv.slice(1), {
+      timeout: 10_000,
+      env: childEnvFor(server),
+    });
+    reachability = "ok";
+  } catch (err) {
+    error = String(err.stderr || err.message || "")
+      .trim()
+      .slice(0, 300);
+  }
+  const lastProbeAt = Date.now();
+  reachabilityCache.set(server.id, {
+    reachability,
+    lastProbeAt,
+    at: lastProbeAt,
+  });
+  return { reachability, lastProbeAt, error };
+}
+
+async function sessionExists(server, name) {
   if (!ID_RE.test(name)) return false;
   try {
-    await tmux(["has-session", "-t", name]);
+    await serverExec(server, ["has-session", "-t", name]);
     return true;
   } catch {
     return false;
   }
 }
 
-// Create + configure a new session. This is the only path that spawns a tmux
-// session; attach never creates. Options mirror what Phase 1 applied.
-async function createSession(id, cwd) {
+// Create + configure a new session on `server`. This is the only path that
+// spawns a tmux session; attach never creates. Options mirror Phase 1.
+async function createSession(server, id, cwd) {
   const args = ["new-session", "-d", "-s", id];
   if (cwd) args.push("-c", cwd);
-  await tmux(args);
-  await tmux(["set-option", "-t", id, "history-limit", "50000"]).catch((e) =>
-    console.warn(`[tmux] history-limit failed: ${e.message}`),
-  );
+  await serverExec(server, args);
+  await serverExec(server, [
+    "set-option",
+    "-t",
+    id,
+    "history-limit",
+    "50000",
+  ]).catch((e) => console.warn(`[tmux] history-limit failed: ${e.message}`));
   // status off is a server-global nicety; scope with -g and swallow errors.
-  await tmux(["set-option", "-g", "status", "off"]).catch((e) =>
+  await serverExec(server, ["set-option", "-g", "status", "off"]).catch((e) =>
     console.warn(`[tmux] status off failed: ${e.message}`),
   );
   // Prefer the most recently active client's size when multiple viewers attach.
-  await tmux(["set-option", "-t", id, "window-size", "latest"]).catch(() => {});
-  await tmux(["set-option", "-t", id, "aggressive-resize", "on"]).catch(
-    () => {},
-  );
-  console.log(`[tmux] created session "${id}"`);
+  await serverExec(server, [
+    "set-option",
+    "-t",
+    id,
+    "window-size",
+    "latest",
+  ]).catch(() => {});
+  await serverExec(server, [
+    "set-option",
+    "-t",
+    id,
+    "aggressive-resize",
+    "on",
+  ]).catch(() => {});
+  console.log(`[tmux] created session "${id}" on server "${server.id}"`);
 }
 
-// List only web- prefixed sessions, joined with metadata.
+// List only web- prefixed sessions across ALL registered servers, joined with
+// metadata. Per-server error-isolated: one dead host must NEVER fail the whole
+// list. A reachable server contributes live `tmux ls` rows (reachable:true); an
+// UNREACHABLE server contributes last-known rows reconstructed from the sidecar
+// (reachable:false) — never omitted, never pruned.
 async function listSessions() {
-  let out = "";
-  try {
-    const res = await tmux([
-      "list-sessions",
-      "-F",
-      "#{session_name}\t#{session_created}\t#{pane_current_command}\t#{session_attached}\t#{session_activity}",
-    ]);
-    out = res.stdout;
-  } catch {
-    // No server / no sessions => empty list.
-    out = "";
-  }
+  const servers = registry.list();
   const meta = metadata.list();
   const sessions = [];
   const liveIds = [];
-  for (const line of out.split("\n")) {
-    if (!line.trim()) continue;
-    const [name, created, currentCommand, attached, activity] =
-      line.split("\t");
-    if (!name || !name.startsWith(PREFIX)) continue;
-    liveIds.push(name);
-    const m = meta[name] || {};
-    sessions.push({
-      id: name,
-      name: m.name || name,
-      createdAt: m.createdAt || (created ? Number(created) * 1000 : null),
-      tags: m.tags || [],
-      currentCommand: currentCommand || "",
-      attached: Number(attached) > 0,
-      attachedClients: Number(attached) || 0,
-      lastActivity: activity ? Number(activity) : null,
-      org: m.org ?? null,
-      project: m.project ?? null,
-    });
+  const reachableServerIds = new Set();
+
+  await Promise.all(
+    servers.map(async (server) => {
+      let out = "";
+      let ok = false;
+      try {
+        const res = await serverExec(server, [
+          "list-sessions",
+          "-F",
+          "#{session_name}\t#{session_created}\t#{pane_current_command}\t#{session_attached}\t#{session_activity}",
+        ]);
+        out = res.stdout;
+        ok = true;
+      } catch (err) {
+        // Local: "no server running" is normal => reachable with zero sessions.
+        // ssh: a failure means the host couldn't be reached this tick.
+        if (server.type === "local") {
+          ok = true;
+          out = "";
+        } else {
+          ok = false;
+          console.warn(
+            `[api] list on server "${server.id}" failed: ${err.message}`,
+          );
+        }
+      }
+      if (!ok) return; // unreachable: reconstructed from the sidecar below
+      reachableServerIds.add(server.id);
+      for (const line of out.split("\n")) {
+        if (!line.trim()) continue;
+        const [name, created, currentCommand, attached, activity] =
+          line.split("\t");
+        if (!name || !name.startsWith(PREFIX)) continue;
+        const qid = formatSessionRef(server.id, name);
+        liveIds.push(qid);
+        const m = meta[qid] || {};
+        sessions.push({
+          id: qid,
+          name: m.name || name,
+          createdAt: m.createdAt || (created ? Number(created) * 1000 : null),
+          tags: m.tags || [],
+          currentCommand: currentCommand || "",
+          attached: Number(attached) > 0,
+          attachedClients: Number(attached) || 0,
+          lastActivity: activity ? Number(activity) : null,
+          org: m.org ?? null,
+          project: m.project ?? null,
+          serverId: server.id,
+          reachable: true,
+        });
+      }
+    }),
+  );
+
+  // Reconstruct last-known rows for every registered server that did NOT
+  // respond this tick, from the metadata sidecar. reachable:false, and the
+  // unknowable fields are nulled/emptied (the FE greys off `reachable`).
+  for (const server of servers) {
+    if (reachableServerIds.has(server.id)) continue;
+    for (const [qid, m] of Object.entries(meta)) {
+      const { serverId, tmuxName } = parseSessionRef(qid);
+      if (serverId !== server.id) continue;
+      if (!tmuxName.startsWith(PREFIX)) continue;
+      sessions.push({
+        id: qid,
+        name: m.name || tmuxName,
+        createdAt: m.createdAt || null,
+        tags: m.tags || [],
+        currentCommand: "",
+        attached: false,
+        attachedClients: 0,
+        lastActivity: null,
+        org: m.org ?? null,
+        project: m.project ?? null,
+        serverId: server.id,
+        reachable: false,
+      });
+    }
   }
-  // Prune metadata for sessions tmux no longer knows about.
-  metadata.pruneToExisting(liveIds);
+
+  // Prune metadata ONLY within the servers that actually responded, so an
+  // unreachable server's last-known metadata is preserved as the cache.
+  metadata.pruneToExisting(liveIds, reachableServerIds);
   return sessions;
 }
 
@@ -477,6 +745,93 @@ function validateGroupField(raw, fieldName) {
   return { ok: true, value: trimmed };
 }
 
+// ---- Server registry validation ----
+// Mirrors CreateServerRequestSchema in @sparklab/shared-types. `type` is forced
+// to "ssh" — "local" is pre-registered and cannot be added. Key-based by default;
+// an optional `password` enables ssh password auth. Returns { ok, entry } or
+// { ok:false, error }.
+const SERVER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+function validateServerBody(body) {
+  if (typeof body.id !== "string" || !SERVER_ID_RE.test(body.id)) {
+    return {
+      ok: false,
+      error: 'server id must be alphanumeric with - or _ (no "/"), 1-64 chars',
+    };
+  }
+  if (body.id === "local") {
+    return { ok: false, error: '"local" is reserved' };
+  }
+  if (
+    typeof body.name !== "string" ||
+    body.name.trim().length < 1 ||
+    body.name.length > 64
+  ) {
+    return { ok: false, error: "name must be 1-64 characters" };
+  }
+  if (typeof body.host !== "string" || body.host.trim().length < 1) {
+    return { ok: false, error: "host is required" };
+  }
+  const entry = {
+    id: body.id,
+    name: body.name.trim(),
+    type: "ssh",
+    host: body.host.trim(),
+  };
+  if (body.user != null) {
+    if (typeof body.user !== "string") {
+      return { ok: false, error: "user must be a string" };
+    }
+    if (body.user.trim()) entry.user = body.user.trim();
+  }
+  if (body.port != null) {
+    if (
+      typeof body.port !== "number" ||
+      !Number.isInteger(body.port) ||
+      body.port < 1 ||
+      body.port > 65535
+    ) {
+      return { ok: false, error: "port must be an integer 1..65535" };
+    }
+    entry.port = body.port;
+  }
+  if (body.identityFile != null) {
+    if (typeof body.identityFile !== "string") {
+      return { ok: false, error: "identityFile must be a string" };
+    }
+    if (body.identityFile.trim()) entry.identityFile = body.identityFile.trim();
+  }
+  // Optional password auth. Stored (plaintext) in the gitignored servers.json;
+  // never returned over the API (serverInfoOf omits it). When present it takes
+  // precedence over identityFile (sshOptsFor switches to password auth).
+  if (body.password != null) {
+    if (typeof body.password !== "string") {
+      return { ok: false, error: "password must be a string" };
+    }
+    if (body.password.length) entry.password = body.password;
+  }
+  return { ok: true, entry };
+}
+
+// Shape a registry record into the GET /api/servers wire form (ServerInfo).
+// `identityFile` is deliberately omitted (no MVP edit UI). No password exists.
+function serverInfoOf(server, probe) {
+  const info = {
+    id: server.id,
+    name: server.name,
+    type: server.type,
+    reachability: probe.reachability,
+    lastProbeAt: probe.lastProbeAt ?? null,
+  };
+  if (server.type === "ssh") {
+    info.host = server.host;
+    if (server.user) info.user = server.user;
+    info.port = server.port ?? 22;
+    // How this server authenticates — NEVER the password value itself.
+    info.authMethod = server.password ? "password" : "key";
+  }
+  return info;
+}
+
 // ---- REST API ----
 // Returns true if it handled the request.
 async function handleApi(req, res, url) {
@@ -515,6 +870,116 @@ async function handleApi(req, res, url) {
   // A2: All other /api/* routes require a valid session (or open mode).
   if (!isAuthenticated(req)) {
     return sendJson(res, 401, { error: "unauthorized" });
+  }
+
+  // ---- Multi-server: /api/servers ----
+
+  // GET /api/servers — registry + cached reachability probe. local always first.
+  if (req.method === "GET" && parts.length === 2 && parts[1] === "servers") {
+    const servers = registry.list();
+    const out = await Promise.all(
+      servers.map(async (s) => serverInfoOf(s, await probeServer(s))),
+    );
+    return sendJson(res, 200, out);
+  }
+
+  // POST /api/servers/test  — probe WITHOUT saving (add-dialog "Test connection")
+  // POST /api/servers/:id/test — probe an already-saved server
+  if (
+    req.method === "POST" &&
+    parts[1] === "servers" &&
+    ((parts.length === 3 && parts[2] === "test") ||
+      (parts.length === 4 && parts[3] === "test"))
+  ) {
+    // /:id/test — look up the saved server.
+    if (parts.length === 4) {
+      const id = decodeURIComponent(parts[2]);
+      const server = registry.get(id);
+      if (!server) return sendJson(res, 404, { error: "server not found" });
+      const probe = await probeServer(server, { force: true });
+      return sendJson(res, 200, {
+        reachability: probe.reachability,
+        ...(probe.error ? { error: probe.error } : {}),
+      });
+    }
+    // /test — probe ad-hoc params (not persisted).
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    const v = validateServerBody(body);
+    if (!v.ok) return sendJson(res, 400, { error: v.error });
+    const probe = await probeServer(v.entry, { force: true });
+    // Do not pollute the cache with an unsaved server id.
+    reachabilityCache.delete(v.entry.id);
+    return sendJson(res, 200, {
+      reachability: probe.reachability,
+      ...(probe.error ? { error: probe.error } : {}),
+    });
+  }
+
+  // POST /api/servers — register an ssh server.
+  if (req.method === "POST" && parts.length === 2 && parts[1] === "servers") {
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    const v = validateServerBody(body);
+    if (!v.ok) return sendJson(res, 400, { error: v.error });
+    if (registry.get(v.entry.id)) {
+      return sendJson(res, 400, { error: "server id already exists" });
+    }
+    let stored;
+    try {
+      stored = registry.add(v.entry);
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+    const probe = await probeServer(stored, { force: true });
+    return sendJson(res, 201, serverInfoOf(stored, probe));
+  }
+
+  // DELETE /api/servers/:id — 204. "local" is undeletable (400).
+  if (req.method === "DELETE" && parts.length === 3 && parts[1] === "servers") {
+    const id = decodeURIComponent(parts[2]);
+    if (id === "local") {
+      return sendJson(res, 400, { error: '"local" cannot be deleted' });
+    }
+    if (!registry.get(id)) {
+      return sendJson(res, 404, { error: "server not found" });
+    }
+    registry.remove(id);
+    reachabilityCache.delete(id);
+    console.log(`[api] deleted server "${id}"`);
+    res.writeHead(204);
+    res.end();
+    return true;
   }
 
   // POST /api/sessions
@@ -573,10 +1038,22 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, { error: "project requires org" });
     }
 
+    // Target server: absent/omitted => "local" (backward-compatible).
+    const serverId =
+      body.serverId != null ? String(body.serverId) : LOCAL_SERVER_ID;
+    if (body.serverId != null && typeof body.serverId !== "string") {
+      return sendJson(res, 400, { error: "serverId must be a string" });
+    }
+    const server = registry.get(serverId);
+    if (!server) {
+      return sendJson(res, 400, { error: `unknown server "${serverId}"` });
+    }
+
     // crypto.randomUUID() is already hyphen-safe (no dots/colons).
-    const id = `${PREFIX}${crypto.randomUUID()}`;
+    const tmuxName = `${PREFIX}${crypto.randomUUID()}`;
+    const id = formatSessionRef(serverId, tmuxName);
     try {
-      await createSession(id, cwd);
+      await createSession(server, tmuxName, cwd);
     } catch (err) {
       console.error(`[api] create failed: ${err.message}`);
       return sendJson(res, 500, {
@@ -584,9 +1061,9 @@ async function handleApi(req, res, url) {
       });
     }
     const createdAt = Date.now();
-    const name = body.name || id;
+    const name = body.name || tmuxName;
     metadata.upsert(id, { name, createdAt, org, project });
-    return sendJson(res, 201, { id, name, createdAt, org, project });
+    return sendJson(res, 201, { id, name, createdAt, org, project, serverId });
   }
 
   // GET /api/sessions
@@ -609,11 +1086,17 @@ async function handleApi(req, res, url) {
     parts[1] === "sessions" &&
     parts[3] === "scrollback"
   ) {
-    const id = decodeURIComponent(parts[2]);
-    if (!ID_RE.test(id)) {
+    const { serverId, tmuxName } = parseSessionRef(
+      decodeURIComponent(parts[2]),
+    );
+    if (!ID_RE.test(tmuxName)) {
       return sendJson(res, 404, { error: "session not found" });
     }
-    if (!(await sessionExists(id))) {
+    const server = registry.get(serverId);
+    if (!server) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    if (!(await sessionExists(server, tmuxName))) {
       return sendJson(res, 404, { error: "session not found" });
     }
     // Parse lines param: integer 1..10000, default 2000.
@@ -629,7 +1112,7 @@ async function handleApi(req, res, url) {
     try {
       // -p: stdout  -e: ANSI escapes  -J: join wrapped lines
       // -S -<N>: start N lines back  -E -1: stop before last visible line
-      const result = await tmux([
+      const result = await serverExec(server, [
         "capture-pane",
         "-p",
         "-e",
@@ -639,7 +1122,7 @@ async function handleApi(req, res, url) {
         "-E",
         "-1",
         "-t",
-        id,
+        tmuxName,
       ]);
       return sendJson(res, 200, { lines: result.stdout });
     } catch (err) {
@@ -658,11 +1141,17 @@ async function handleApi(req, res, url) {
     parts[1] === "sessions" &&
     parts[3] === "screen"
   ) {
-    const id = decodeURIComponent(parts[2]);
-    if (!ID_RE.test(id)) {
+    const { serverId, tmuxName } = parseSessionRef(
+      decodeURIComponent(parts[2]),
+    );
+    if (!ID_RE.test(tmuxName)) {
       return sendJson(res, 404, { error: "session not found" });
     }
-    if (!(await sessionExists(id))) {
+    const server = registry.get(serverId);
+    if (!server) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    if (!(await sessionExists(server, tmuxName))) {
       return sendJson(res, 404, { error: "session not found" });
     }
     // Parse history param: integer 0..2000, default 0 (visible screen only).
@@ -680,14 +1169,14 @@ async function handleApi(req, res, url) {
       // -S -<N>: include N lines of history above the visible screen
       const captureArgs = ["capture-pane", "-p", "-J"];
       if (history > 0) captureArgs.push("-S", `-${history}`);
-      captureArgs.push("-t", id);
+      captureArgs.push("-t", tmuxName);
       const [capture, meta] = await Promise.all([
-        tmux(captureArgs),
-        tmux([
+        serverExec(server, captureArgs),
+        serverExec(server, [
           "display-message",
           "-p",
           "-t",
-          id,
+          tmuxName,
           "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{alternate_on} #{pane_current_command}",
         ]),
       ]);
@@ -719,11 +1208,17 @@ async function handleApi(req, res, url) {
     parts[1] === "sessions" &&
     parts[3] === "keys"
   ) {
-    const id = decodeURIComponent(parts[2]);
-    if (!ID_RE.test(id)) {
+    const { serverId, tmuxName } = parseSessionRef(
+      decodeURIComponent(parts[2]),
+    );
+    if (!ID_RE.test(tmuxName)) {
       return sendJson(res, 404, { error: "session not found" });
     }
-    if (!(await sessionExists(id))) {
+    const server = registry.get(serverId);
+    if (!server) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    if (!(await sessionExists(server, tmuxName))) {
       return sendJson(res, 404, { error: "session not found" });
     }
     let body = {};
@@ -766,15 +1261,30 @@ async function handleApi(req, res, url) {
       try {
         if (singleLine && text.length <= SEND_KEYS_LITERAL_MAX) {
           // -l: literal (no key-name lookup); -- guards a leading "-" in text.
-          await tmux(["send-keys", "-t", id, "-l", "--", text]);
+          await serverExec(server, [
+            "send-keys",
+            "-t",
+            tmuxName,
+            "-l",
+            "--",
+            text,
+          ]);
         } else {
           // Long/multiline text: stage in a tmux buffer and bracketed-paste it
           // (-p), so a shell/editor receives it as a paste, not as typed
           // commands — newlines inside the paste never execute.
           const buf = `gw-agent-${crypto.randomUUID()}`;
-          await tmuxStdin(["load-buffer", "-b", buf, "-"], text);
+          await serverExecStdin(server, ["load-buffer", "-b", buf, "-"], text);
           // -d deletes the buffer after pasting.
-          await tmux(["paste-buffer", "-d", "-p", "-b", buf, "-t", id]);
+          await serverExec(server, [
+            "paste-buffer",
+            "-d",
+            "-p",
+            "-b",
+            buf,
+            "-t",
+            tmuxName,
+          ]);
         }
       } catch (err) {
         console.error(`[api] keys(text) failed: ${err.message}`);
@@ -800,7 +1310,7 @@ async function handleApi(req, res, url) {
     }
     try {
       // No -l: these are tmux key names. Every item passed the whitelist.
-      await tmux(["send-keys", "-t", id, ...body.keys]);
+      await serverExec(server, ["send-keys", "-t", tmuxName, ...body.keys]);
     } catch (err) {
       console.error(`[api] keys(keys) failed: ${err.message}`);
       return sendJson(res, 500, { error: "failed to send keys" });
@@ -813,11 +1323,18 @@ async function handleApi(req, res, url) {
   // PATCH /api/sessions/:id — metadata-only update (name, org, project).
   // Never touches tmux; safe on a live attached session.
   if (req.method === "PATCH" && parts.length === 3 && parts[1] === "sessions") {
-    const id = decodeURIComponent(parts[2]);
-    if (!ID_RE.test(id)) {
+    const { serverId, tmuxName } = parseSessionRef(
+      decodeURIComponent(parts[2]),
+    );
+    if (!ID_RE.test(tmuxName)) {
       return sendJson(res, 400, { error: "invalid session id" });
     }
-    if (!(await sessionExists(id))) {
+    const server = registry.get(serverId);
+    if (!server) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    const id = formatSessionRef(serverId, tmuxName);
+    if (!(await sessionExists(server, tmuxName))) {
       return sendJson(res, 404, { error: "session not found" });
     }
     let body = {};
@@ -846,7 +1363,7 @@ async function handleApi(req, res, url) {
       if (typeof body.name !== "string") {
         return sendJson(res, 400, { error: "name must be a string" });
       }
-      patch.name = body.name.trim() || existing.name || id;
+      patch.name = body.name.trim() || existing.name || tmuxName;
     }
 
     // Org
@@ -891,7 +1408,7 @@ async function handleApi(req, res, url) {
     const updated = metadata.get(id) || {};
     return sendJson(res, 200, {
       id,
-      name: updated.name || id,
+      name: updated.name || tmuxName,
       org: updated.org ?? null,
       project: updated.project ?? null,
     });
@@ -903,18 +1420,25 @@ async function handleApi(req, res, url) {
     parts.length === 3 &&
     parts[1] === "sessions"
   ) {
-    const id = decodeURIComponent(parts[2]);
-    if (!ID_RE.test(id)) {
+    const { serverId, tmuxName } = parseSessionRef(
+      decodeURIComponent(parts[2]),
+    );
+    if (!ID_RE.test(tmuxName)) {
       return sendJson(res, 400, { error: "invalid session id" });
     }
-    if (!(await sessionExists(id))) {
+    const server = registry.get(serverId);
+    if (!server) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    const id = formatSessionRef(serverId, tmuxName);
+    if (!(await sessionExists(server, tmuxName))) {
       return sendJson(res, 404, { error: "session not found" });
     }
     try {
       // THE ONE INTENTIONAL KILL. This is the only place the gateway terminates
       // a tmux session; it actually kills the running job, so the UI confirms
       // first. Everywhere else we only detach (pty.kill).
-      await tmux(["kill-session", "-t", id]);
+      await serverExec(server, ["kill-session", "-t", tmuxName]);
     } catch (err) {
       console.error(`[api] delete failed: ${err.message}`);
       return sendJson(res, 500, { error: "failed to kill session" });
@@ -1024,29 +1548,46 @@ wss.on("connection", async (ws, req) => {
   }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const sessionName = url.searchParams.get("session") || "";
+  // The `session` param carries the QUALIFIED id (`<serverId>/web-<uuid>`);
+  // encodeURIComponent on the client turns "/" into "%2F", which searchParams
+  // decodes back cleanly. A bare `web-<uuid>` (old client) => serverId "local".
+  const sessionRef = url.searchParams.get("session") || "";
+  const { serverId, tmuxName } = parseSessionRef(sessionRef);
 
   // Attach only ever attaches to an EXISTING web- session. It never creates.
   // A bad prefix or missing session is a client error, not a reason to spawn a
   // new tmux session (that would bypass POST and leak sessions on typos).
-  if (!ID_RE.test(sessionName)) {
+  if (!ID_RE.test(tmuxName)) {
     if (ws.readyState === ws.OPEN) {
       ws.send(
         JSON.stringify({
           type: "error",
-          message: `invalid session id "${sessionName}"`,
+          message: `invalid session id "${sessionRef}"`,
         }),
       );
     }
     ws.close();
     return;
   }
-  if (!(await sessionExists(sessionName))) {
+  const server = registry.get(serverId);
+  if (!server) {
     if (ws.readyState === ws.OPEN) {
       ws.send(
         JSON.stringify({
           type: "error",
-          message: `session "${sessionName}" does not exist`,
+          message: `unknown server "${serverId}"`,
+        }),
+      );
+    }
+    ws.close();
+    return;
+  }
+  if (!(await sessionExists(server, tmuxName))) {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          message: `session "${sessionRef}" does not exist`,
         }),
       );
     }
@@ -1055,15 +1596,37 @@ wss.on("connection", async (ws, req) => {
   }
 
   // Spawn the pty that attaches to tmux. encoding: null => onData yields raw
-  // Buffers, so multibyte UTF-8 is never decoded/corrupted mid-pipeline.
-  const pty = ptySpawn("tmux", ["attach-session", "-t", sessionName], {
-    name: "xterm-256color",
-    cols: 80,
-    rows: 24,
-    encoding: null,
-  });
+  // Buffers, so multibyte UTF-8 is never decoded/corrupted mid-pipeline. For an
+  // ssh server this becomes `ssh -tt <host> tmux attach-session …` (the SECOND
+  // exec seam) — node-pty gives ssh a pty so the remote attach gets a tty.
+  const attachArgv = serverExecArgv(
+    server,
+    ["attach-session", "-t", tmuxName],
+    { tty: true },
+  );
+  let pty;
+  try {
+    pty = ptySpawn(attachArgv[0], attachArgv.slice(1), {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      encoding: null,
+      env: childEnvFor(server),
+    });
+  } catch (err) {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          message: `failed to attach: ${err.message}`,
+        }),
+      );
+    }
+    ws.close();
+    return;
+  }
   console.log(
-    `[attach] session="${sessionName}" pty=${pty.pid} client attached`,
+    `[attach] session="${formatSessionRef(serverId, tmuxName)}" pty=${pty.pid} client attached`,
   );
 
   let torndown = false;
@@ -1076,7 +1639,7 @@ wss.on("connection", async (ws, req) => {
       pty.kill();
     } catch {}
     console.log(
-      `[teardown] session="${sessionName}" pty=${pty.pid} killed (${why}); tmux session left running`,
+      `[teardown] session="${formatSessionRef(serverId, tmuxName)}" pty=${pty.pid} killed (${why}); tmux session left running`,
     );
   };
 

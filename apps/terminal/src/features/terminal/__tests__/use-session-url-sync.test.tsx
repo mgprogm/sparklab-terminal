@@ -13,12 +13,21 @@ beforeEach(() => {
 });
 
 describe("useSessionUrlSync", () => {
-  it("reads ?session on mount and overrides the current id", () => {
+  it("reads ?session on mount and overrides the current id (normalized)", () => {
     window.history.replaceState(null, "", "/?session=web-B");
     const setActive = vi.fn();
-    // Store starts on a different (persisted) id — the URL should win.
-    renderHook(() => useSessionUrlSync("web-A", setActive));
-    expect(setActive).toHaveBeenCalledWith("web-B");
+    // Store starts on a different (persisted) id — the URL should win. A bare
+    // `web-B` bookmark is normalized to the qualified `local/web-B` so it
+    // matches the now-qualified list ids.
+    renderHook(() => useSessionUrlSync("local/web-A", setActive));
+    expect(setActive).toHaveBeenCalledWith("local/web-B");
+  });
+
+  it("leaves an already-qualified ?session id unchanged on read", () => {
+    window.history.replaceState(null, "", "/?session=build01%2Fweb-B");
+    const setActive = vi.fn();
+    renderHook(() => useSessionUrlSync("local/web-A", setActive));
+    expect(setActive).toHaveBeenCalledWith("build01/web-B");
   });
 
   it("does not call the setter when there is no ?session param", () => {

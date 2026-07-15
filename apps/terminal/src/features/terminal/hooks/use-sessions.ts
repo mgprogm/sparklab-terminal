@@ -31,6 +31,9 @@ export interface CreateSessionParams {
   name?: string;
   org?: string;
   project?: string;
+  /** Target server id from the registry. Omitted => "local" (single-server).
+   *  Only sent in multi-server mode so the local-only POST body is unchanged. */
+  serverId?: string;
 }
 
 async function createSessionApi(
@@ -44,6 +47,7 @@ async function createSessionApi(
     if (params.name?.trim()) body.name = params.name.trim();
     if (params.org?.trim()) body.org = params.org.trim();
     if (params.project?.trim()) body.project = params.project.trim();
+    if (params.serverId?.trim()) body.serverId = params.serverId.trim();
   }
 
   const res = await fetch("/api/sessions", {

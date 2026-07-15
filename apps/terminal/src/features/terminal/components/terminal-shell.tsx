@@ -14,8 +14,8 @@
  * bar renders below the terminal on coarse-pointer devices.
  */
 
+import { parseSessionRef } from "@sparklab/shared-types";
 import { Button } from "@sparklab/ui/components/ui/button";
-import { useQueryClient } from "@tanstack/react-query";
 import {
   Sheet,
   SheetContent,
@@ -23,16 +23,9 @@ import {
   SheetTitle,
 } from "@sparklab/ui/components/ui/sheet";
 import { cn } from "@sparklab/ui/lib/utils";
-import { Menu } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Menu, Unplug } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-
-import { authKeys, useAuthStatus, useLogout } from "@/features/auth";
-import {
-  AgentActivityOverlay,
-  AgentChatPanel,
-  AgentFab,
-  useAgentStore,
-} from "@/features/agent-chat";
 
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
@@ -40,6 +33,7 @@ import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
 import { useMediaQuery } from "../hooks/use-media-query";
+import { useServers } from "../hooks/use-servers";
 import { useSessionUrlSync } from "../hooks/use-session-url-sync";
 import {
   useCreateSession,
@@ -47,19 +41,28 @@ import {
   useSessions,
   useUpdateSession,
 } from "../hooks/use-sessions";
-import type {
-  CreateSessionParams,
-  UpdateSessionParams,
-} from "../hooks/use-sessions";
 import { useSettingsUrlSync } from "../hooks/use-settings-url-sync";
 import { useUrlFlagSync } from "../hooks/use-url-flag-sync";
 import { useVisualViewport } from "../hooks/use-visual-viewport";
+import { serverStatus, sessionServerId } from "../server-grouping";
 import { resolveActiveSession } from "../session-fallback";
 import { useTerminalStore } from "../store";
 
 import type { TerminalHandle } from "./xterm";
 import type { ConnectionStatus } from "../connection";
+import type {
+  CreateSessionParams,
+  UpdateSessionParams,
+} from "../hooks/use-sessions";
 import type { ModifierSnapshot } from "../keys";
+
+import {
+  AgentActivityOverlay,
+  AgentChatPanel,
+  AgentFab,
+  useAgentStore,
+} from "@/features/agent-chat";
+import { authKeys, useAuthStatus, useLogout } from "@/features/auth";
 
 export function TerminalShell() {
   const queryClient = useQueryClient();
@@ -85,6 +88,7 @@ export function TerminalShell() {
   const setAgentPanelOpen = useAgentStore((s) => s.setPanelOpen);
 
   const { data: sessions = [], isSuccess: sessionsLoaded } = useSessions();
+  const { data: servers = [] } = useServers();
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
   const updateSession = useUpdateSession();
@@ -140,14 +144,35 @@ export function TerminalShell() {
   // org/project go null -> real value when the list arrives). The 3s poll
   // does not re-fire because the same primitive strings are unchanged.
   const expandAncestors = useTerminalStore((s) => s.expandAncestors);
+  const multiServer = servers.length > 1;
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const activeOrg = activeSession?.org ?? null;
   const activeProject = activeSession?.project ?? null;
+  // In multi-server mode collapse keys are namespaced by serverId and the
+  // server ancestor is expanded too; in single-server mode pass null (bare
+  // keys — unchanged). Derive the serverId from the session, or the qualified
+  // active id when the session isn't in the list yet (deep-link path).
+  const activeServerId = activeSession
+    ? sessionServerId(activeSession)
+    : activeSessionId
+      ? parseSessionRef(activeSessionId).serverId
+      : null;
   useEffect(() => {
     if (activeSessionId) {
-      expandAncestors(activeOrg, activeProject);
+      expandAncestors(
+        activeOrg,
+        activeProject,
+        multiServer ? activeServerId : undefined,
+      );
     }
-  }, [activeSessionId, activeOrg, activeProject, expandAncestors]);
+  }, [
+    activeSessionId,
+    activeOrg,
+    activeProject,
+    activeServerId,
+    multiServer,
+    expandAncestors,
+  ]);
 
   // ---- Callbacks ----
   const handleStatusChange = useCallback(
@@ -252,6 +277,16 @@ export function TerminalShell() {
 
   const activeMeta = sessions.find((s) => s.id === activeSessionId);
 
+  // Surface 5: when the active session lives on an unreachable server, overlay
+  // a muted (NOT destructive) "still running there" reassurance on the pane —
+  // visually distinct from an ordinary gateway disconnect.
+  const activeServer = activeServerId
+    ? servers.find((s) => s.id === activeServerId)
+    : undefined;
+  const activeServerUnreachable =
+    !!activeServer && serverStatus(activeServer) === "unreachable";
+  const activeServerName = activeServer?.name ?? activeServerId ?? "the server";
+
   // Status dot color classes matching the original design.
   const dotClass = cn(
     "size-[7px] rounded-full",
@@ -267,6 +302,7 @@ export function TerminalShell() {
         <SessionSidebar
           sessions={sessions}
           activeSessionId={activeSessionId}
+          servers={servers}
           collapsed={sidebarCollapsed}
           onSelectSession={handleSelectSession}
           onCreateSession={handleCreateSession}
@@ -294,6 +330,7 @@ export function TerminalShell() {
             <SessionList
               sessions={sessions}
               activeSessionId={activeSessionId}
+              servers={servers}
               variant="drawer"
               onSelectSession={handleMobileSelectSession}
               onCreateSession={handleMobileCreateSession}
@@ -350,6 +387,20 @@ export function TerminalShell() {
           ) : (
             <div className="flex h-full items-center justify-center">
               <p className="text-muted-foreground">No session selected.</p>
+            </div>
+          )}
+
+          {/* Unreachable-server overlay (§7.2): muted reassurance that the job
+              is safe. Distinct from the transient gateway-disconnect state. */}
+          {activeSessionId && activeServerUnreachable && (
+            <div className="bg-background/80 absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-center backdrop-blur-sm">
+              <Unplug className="text-muted-foreground size-8" />
+              <p className="text-foreground text-sm">
+                Can&apos;t reach {activeServerName}.
+              </p>
+              <p className="text-muted-foreground text-xs">
+                The session is still running there. Reconnecting…
+              </p>
             </div>
           )}
 

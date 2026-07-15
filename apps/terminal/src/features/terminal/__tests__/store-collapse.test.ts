@@ -121,4 +121,33 @@ describe("expandAncestors", () => {
       Beta: true,
     });
   });
+
+  // ---- Multi-server namespacing (serverId provided) ----
+
+  it("expands the server, org, and project ancestors with namespaced keys", () => {
+    useTerminalStore.setState({
+      collapsedGroups: {
+        "server:build01": true,
+        "build01::Acme": true,
+        "build01::Acme/checkout": true,
+        // A same-named org on a DIFFERENT server must be left untouched.
+        "local::Acme": true,
+      },
+    });
+    useTerminalStore.getState().expandAncestors("Acme", "checkout", "build01");
+    expect(useTerminalStore.getState().collapsedGroups).toEqual({
+      "local::Acme": true,
+    });
+  });
+
+  it("expands the server key even for an ungrouped session", () => {
+    useTerminalStore.setState({
+      collapsedGroups: {
+        "server:build01": true,
+        "build01::__ungrouped__": true,
+      },
+    });
+    useTerminalStore.getState().expandAncestors(null, null, "build01");
+    expect(useTerminalStore.getState().collapsedGroups).toEqual({});
+  });
 });

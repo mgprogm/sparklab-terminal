@@ -1,5 +1,12 @@
+import { normalizeSessionRef } from "@sparklab/shared-types";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+
+import {
+  orgCollapseKey,
+  projectCollapseKey,
+  serverCollapseKey,
+} from "./server-grouping";
 
 /** Terminal font-size preference: "auto" tracks the responsive default
  * (13/14 by breakpoint); a number overrides it with a fixed size. */
@@ -11,6 +18,7 @@ export const SETTINGS_SECTIONS = [
   "agent",
   "account",
   "connection",
+  "servers",
 ] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
@@ -53,9 +61,15 @@ interface TerminalState {
    *  collapsed. Default (absent) = expanded. Persisted. */
   collapsedGroups: Record<string, boolean>;
   toggleGroupCollapsed: (key: string) => void;
-  /** Expand the ancestors of a session (its org key and org/project key).
-   *  Called when a session becomes active so it is never hidden. */
-  expandAncestors: (org: string | null, project: string | null) => void;
+  /** Expand the ancestors of a session (its org key and org/project key, and
+   *  in multi-server mode its server key) so it is never hidden when it becomes
+   *  active. Pass `serverId` in multi-server mode (namespaced keys); omit it in
+   *  single-server mode (bare keys — unchanged legacy behavior). */
+  expandAncestors: (
+    org: string | null,
+    project: string | null,
+    serverId?: string | null,
+  ) => void;
 }
 
 export const useTerminalStore = create<TerminalState>()(
@@ -94,23 +108,25 @@ export const useTerminalStore = create<TerminalState>()(
           }
           return { collapsedGroups: next };
         }),
-      expandAncestors: (org, project) =>
+      expandAncestors: (org, project, serverId) =>
         set((state) => {
           const next = { ...state.collapsedGroups };
           let changed = false;
-          // The sidebar keys the ungrouped bucket under "__ungrouped__".
-          const orgKey = org ?? "__ungrouped__";
-          if (next[orgKey]) {
-            delete next[orgKey];
-            changed = true;
-          }
-          // Expand the project level (only meaningful when org is set).
-          if (org != null && project != null) {
-            const projKey = `${org}/${project}`;
-            if (next[projKey]) {
-              delete next[projKey];
+          // In multi-server mode (serverId provided) keys are namespaced by
+          // server; the server ancestor is also expanded. In single-server
+          // mode (serverId == null) keys stay bare — unchanged legacy behavior.
+          const ns = serverId ?? null;
+          const expand = (key: string) => {
+            if (next[key]) {
+              delete next[key];
               changed = true;
             }
+          };
+          if (ns != null) expand(serverCollapseKey(ns));
+          expand(orgCollapseKey(ns, org));
+          // Expand the project level (only meaningful when org is set).
+          if (org != null && project != null) {
+            expand(projectCollapseKey(ns, org, project));
           }
           return changed ? { collapsedGroups: next } : state;
         }),
@@ -124,6 +140,14 @@ export const useTerminalStore = create<TerminalState>()(
         terminalFontSize: state.terminalFontSize,
         collapsedGroups: state.collapsedGroups,
       }),
+      // A pre-multi-server persisted id is bare (`web-…`); normalize it to the
+      // qualified form (`local/web-…`) on load so it matches the now-qualified
+      // list ids and doesn't trigger a one-render vanish-fallback.
+      onRehydrateStorage: () => (state) => {
+        if (state?.activeSessionId) {
+          state.activeSessionId = normalizeSessionRef(state.activeSessionId);
+        }
+      },
     },
   ),
 );

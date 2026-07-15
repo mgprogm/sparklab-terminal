@@ -37,7 +37,7 @@ describe("SettingsDialog", () => {
     });
   });
 
-  it("renders the four section tabs", () => {
+  it("renders the five section tabs", () => {
     renderDialog();
     expect(
       screen.getByRole("heading", { name: /settings/i }),
@@ -46,6 +46,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("tab", { name: "Agent" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Account" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Connection" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Servers" })).toBeInTheDocument();
   });
 
   it("shows the appearance tab by default and sets font size on click", async () => {

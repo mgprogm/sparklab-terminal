@@ -16,6 +16,16 @@
  * hardcoded hex, lucide-react icons at size-3.5/size-4, @sparklab/ui primitives.
  */
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@sparklab/ui/components/ui/alert-dialog";
 import { Button } from "@sparklab/ui/components/ui/button";
 import {
   Dialog,
@@ -25,15 +35,35 @@ import {
   DialogTitle,
 } from "@sparklab/ui/components/ui/dialog";
 import { cn } from "@sparklab/ui/lib/utils";
-import { Bot, CircleUser, LogOut, Plug, ShieldCheck, Type } from "lucide-react";
+import {
+  Bot,
+  CircleUser,
+  LogOut,
+  Plug,
+  Plus,
+  Server,
+  ShieldCheck,
+  Trash2,
+  Type,
+  Unplug,
+} from "lucide-react";
+import { useState } from "react";
 
+import { useServers, useDeleteServer } from "../hooks/use-servers";
+import {
+  isServerUnreachable,
+  serverDotClass,
+  serverStatus,
+} from "../server-grouping";
 import {
   useTerminalStore,
   type SettingsSection,
   type TerminalFontSize,
 } from "../store";
+import { AddServerDialog } from "./add-server-dialog";
 
 import type { ConnectionStatus } from "../connection";
+import type { ServerInfo } from "@sparklab/shared-types";
 import type { ComponentType, ReactNode } from "react";
 
 // Gateway URL: same env + fallback the WS Connection uses (connection.ts).
@@ -63,11 +93,154 @@ const TABS: {
   { key: "agent", label: "Agent", icon: Bot },
   { key: "account", label: "Account", icon: CircleUser },
   { key: "connection", label: "Connection", icon: Plug },
+  { key: "servers", label: "Servers", icon: Server },
 ];
 
 /** Body wrapper for one section (the active tab). */
 function Section({ children }: { children: ReactNode }) {
   return <section className="px-4 py-3.5">{children}</section>;
+}
+
+/** The "unreachable" text chip reused across server surfaces (§3.3). */
+function UnreachableChip() {
+  return (
+    <span className="text-muted-foreground border-border inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] uppercase tracking-wider">
+      <Unplug className="size-3" />
+      unreachable
+    </span>
+  );
+}
+
+/** Servers settings section — list registry servers, add, and remove. Its own
+ *  component so `useServers()` only runs when this tab is open (existing
+ *  settings tests render without a QueryClientProvider). */
+function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
+  const { data: servers, isLoading, isError, refetch } = useServers();
+  const deleteServer = useDeleteServer();
+  const [addOpen, setAddOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<ServerInfo | null>(null);
+
+  const sshServers = (servers ?? []).filter((s) => s.type !== "local");
+
+  return (
+    <Section>
+      <div className="flex items-center justify-between">
+        <span className="text-foreground text-sm">Servers</span>
+        <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
+          <Plus className="size-3.5" />
+          Add server
+        </Button>
+      </div>
+
+      <div className="border-border divide-border mt-2 divide-y border-t">
+        {isLoading && (
+          <p className="text-muted-foreground py-3 text-sm">Loading servers…</p>
+        )}
+        {isError && !isLoading && (
+          <div className="flex items-center gap-2 py-3">
+            <span className="text-muted-foreground text-sm">
+              Couldn&apos;t load servers.
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => void refetch()}>
+              Retry
+            </Button>
+          </div>
+        )}
+        {!isLoading &&
+          !isError &&
+          (servers ?? []).map((s) => {
+            const unreachable = isServerUnreachable(s);
+            const detail =
+              s.type === "local"
+                ? "local"
+                : `${s.user ? `${s.user}@` : ""}${s.host ?? ""}${
+                    s.port && s.port !== 22 ? `:${String(s.port)}` : ""
+                  }`;
+            return (
+              <div
+                key={s.id}
+                className="flex items-center justify-between gap-3 py-1.5"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={cn(
+                      "size-[7px] shrink-0 rounded-full",
+                      serverDotClass(s),
+                    )}
+                    title={serverStatus(s)}
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-foreground truncate text-sm">
+                        {s.name}
+                      </span>
+                      {unreachable && <UnreachableChip />}
+                    </div>
+                    <span className="text-muted-foreground block truncate text-xs">
+                      {detail}
+                    </span>
+                  </div>
+                </div>
+                {s.type !== "local" && (
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-destructive shrink-0 rounded-sm p-1 transition-colors"
+                    title="Remove server"
+                    onClick={() => setRemoveTarget(s)}
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+      </div>
+
+      {!isLoading && !isError && sshServers.length === 0 && (
+        <p className="text-muted-foreground mt-2.5 text-xs">
+          Add a server to run sessions on another machine over SSH.
+        </p>
+      )}
+
+      <AddServerDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onDialogClose={onDialogClose}
+      />
+
+      <AlertDialog
+        open={!!removeTarget}
+        onOpenChange={(o) => {
+          if (!o) setRemoveTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove server</AlertDialogTitle>
+            <AlertDialogDescription>
+              Remove &quot;{removeTarget?.name}&quot;? This only removes it from
+              your list. Any sessions running on it keep running — you just
+              won&apos;t see them here until you add the server back.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setRemoveTarget(null)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (removeTarget) deleteServer.mutate(removeTarget.id);
+                setRemoveTarget(null);
+              }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Section>
+  );
 }
 
 /** A read-only "label: value" row used by the informational sections. */
@@ -137,7 +310,7 @@ export function SettingsDialog({
                 aria-selected={active}
                 onClick={() => setSection(t.key)}
                 className={cn(
-                  "flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-xs font-medium transition-colors",
+                  "flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors",
                   active
                     ? "text-foreground border-foreground -mb-px border-b-2"
                     : "text-muted-foreground hover:text-foreground hover:bg-accent/40",
@@ -263,6 +436,9 @@ export function SettingsDialog({
               <InfoRow label="Active sessions" value={sessionCount} />
             </Section>
           )}
+
+          {/* Servers — the always-visible multi-server surface. */}
+          {section === "servers" && <ServersSection />}
         </div>
       </DialogContent>
     </Dialog>

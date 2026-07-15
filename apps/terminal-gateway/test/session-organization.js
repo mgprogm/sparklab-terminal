@@ -44,6 +44,9 @@ function listWebSessions() {
 
 let server;
 const createdIds = [];
+// Multi-server: ids are QUALIFIED (`<serverId>/web-<uuid>`). Direct tmux CLI
+// needs the bare tmux name; REST paths need the "/" encoded to one segment.
+const bare = (id) => (id.includes("/") ? id.slice(id.indexOf("/") + 1) : id);
 
 function startServer() {
   return new Promise((resolve, reject) => {
@@ -65,7 +68,9 @@ function startServer() {
 function cleanup() {
   for (const id of createdIds) {
     try {
-      execFileSync("tmux", ["kill-session", "-t", id], { stdio: "ignore" });
+      execFileSync("tmux", ["kill-session", "-t", bare(id)], {
+        stdio: "ignore",
+      });
     } catch {}
   }
   if (server && !server.killed) server.kill("SIGTERM");
@@ -154,7 +159,7 @@ async function main() {
   console.log("   GET /api/sessions returns org+project OK");
 
   // --- 4. PATCH rename -> 200 ---
-  const r4 = await rest("PATCH", `/api/sessions/${s3.id}`, {
+  const r4 = await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
     name: "renamed-session",
   });
   if (r4.status !== 200)
@@ -166,7 +171,7 @@ async function main() {
   console.log("4. PATCH rename -> 200 OK");
 
   // --- 5. PATCH move to different org/project -> 200 ---
-  const r5 = await rest("PATCH", `/api/sessions/${s3.id}`, {
+  const r5 = await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
     org: "NewOrg",
     project: "payments",
   });
@@ -178,7 +183,7 @@ async function main() {
   console.log("5. PATCH move org/project -> 200 OK");
 
   // --- 6. PATCH project:null clears project only ---
-  const r6 = await rest("PATCH", `/api/sessions/${s3.id}`, {
+  const r6 = await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
     project: null,
   });
   if (r6.status !== 200)
@@ -190,8 +195,12 @@ async function main() {
 
   // --- 7. PATCH org:null clears org AND project ---
   // First restore a project so we can verify both clear.
-  await rest("PATCH", `/api/sessions/${s3.id}`, { project: "temp" });
-  const r7 = await rest("PATCH", `/api/sessions/${s3.id}`, { org: null });
+  await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
+    project: "temp",
+  });
+  const r7 = await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
+    org: null,
+  });
   if (r7.status !== 200)
     fail(`PATCH clear org returned ${r7.status}, expected 200`);
   const s7 = await r7.json();
@@ -202,7 +211,7 @@ async function main() {
 
   // --- 8. PATCH project-without-org on merged result -> 400 ---
   // Session currently has no org. Setting project without org should fail.
-  const r8 = await rest("PATCH", `/api/sessions/${s3.id}`, {
+  const r8 = await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
     project: "orphan",
   });
   if (r8.status !== 400)
@@ -218,19 +227,30 @@ async function main() {
 
   // --- 10. PATCH invalid org -> 400 ---
   // Restore org first.
-  await rest("PATCH", `/api/sessions/${s3.id}`, { org: "Valid" });
-  const r10 = await rest("PATCH", `/api/sessions/${s3.id}`, {
-    org: "bad/org",
+  await rest("PATCH", `/api/sessions/${encodeURIComponent(s3.id)}`, {
+    org: "Valid",
   });
+  const r10 = await rest(
+    "PATCH",
+    `/api/sessions/${encodeURIComponent(s3.id)}`,
+    {
+      org: "bad/org",
+    },
+  );
   if (r10.status !== 400)
     fail(`PATCH invalid org returned ${r10.status}, expected 400`);
   console.log("10. PATCH invalid org -> 400 OK");
 
   // --- 11. DELETE, verify no orphans ---
-  const rDel = await rest("DELETE", `/api/sessions/${s3.id}`);
+  const rDel = await rest(
+    "DELETE",
+    `/api/sessions/${encodeURIComponent(s3.id)}`,
+  );
   if (rDel.status !== 204) fail(`DELETE returned ${rDel.status}, expected 204`);
   await sleep(300);
-  const orphans = listWebSessions().filter((s) => createdIds.includes(s));
+  const orphans = listWebSessions().filter((s) =>
+    createdIds.map(bare).includes(s),
+  );
   if (orphans.length)
     fail(`orphan web- sessions remain: ${orphans.join(", ")}`);
   console.log("11. DELETE + cleanup OK");

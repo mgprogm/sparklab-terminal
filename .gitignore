@@ -17,6 +17,10 @@ apps/terminal-gateway/public/vendor/
 # Gateway session metadata (runtime data, not checked in)
 data/
 
+# Gateway server registry (config next to .env, key-based ssh; never checked in)
+servers.json
+apps/terminal-gateway/servers.json
+
 # Playwright
 test-results/
 playwright-report/
