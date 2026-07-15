@@ -52,8 +52,8 @@ export function LoginScreen() {
             : "pointer-events-none invisible translate-y-2 opacity-0"
         }`}
       >
-        <h1 className="relative mb-6 text-3xl font-semibold tracking-tight">
-          Sparklab Terminal
+        <h1 className="brand-shimmer relative mb-6 text-3xl font-semibold uppercase tracking-tight">
+          SPARKLAB TERMINAL
         </h1>
         <section className="bg-background relative w-full max-w-sm rounded-lg border border-[#4a443f] p-6 shadow-xl">
           <form className="space-y-5" onSubmit={form.handleSubmit(onSubmit)}>
