@@ -12,6 +12,7 @@
 | [FRONTEND-PLATFORM-PLAN.md](FRONTEND-PLATFORM-PLAN.md) | The implementation plan that produced the current monorepo (executed 2026-07-14; kept as a decision record)                         |
 | [DEPLOYMENT.md](DEPLOYMENT.md)                         | Production deployment: reverse-proxy topology, environment variables, Caddyfile, systemd, safety checklist                          |
 | [PHASE-3-HARDENING-PLAN.md](PHASE-3-HARDENING-PLAN.md) | Workstreams A (auth/hardening) + B (scrollback, session status) shipped 2026-07-14                                                  |
+| [MULTI-SERVER-PLAN.md](MULTI-SERVER-PLAN.md)           | Design proposal (not implemented): "Connected Servers" — create sessions on any registered server via SSH + remote tmux             |
 
 ## Quick orientation
 
