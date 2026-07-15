@@ -3,6 +3,8 @@
 This document covers how to deploy the web terminal safely on a real network.
 The security model: **TLS and the public surface live in the reverse proxy (Caddy); the gateway and the Next.js app bind to loopback only.**
 
+> **Just want to test a production build locally?** See [`LOCAL-PROD.md`](./LOCAL-PROD.md) — it runs the same three services on loopback ports 3100/3107/3109 (+100 offset from dev) with no reverse proxy or TLS required, via PM2 or a plain script. This document covers internet-facing, reverse-proxied deployment only.
+
 ## Topology
 
 ```

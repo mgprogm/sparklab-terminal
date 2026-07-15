@@ -38,6 +38,8 @@ pnpm --filter @sparklab/agent-service smoke   # live: agent creates a session vi
 pnpm --filter @sparklab/e2e e2e       # Playwright gates (needs a production build with NEXT_DIST_DIR=.next-e2e NEXT_PUBLIC_GATEWAY_URL=http://localhost:3907)
 ```
 
+**Local production** (ports 3100/3107/3109 — +100 offset from dev, runs alongside it with no collision): build the frontend first, then start all three services via PM2 (`pm2 start ecosystem.config.cjs`) or the plain foreground script (`./run-prod-local.sh`; `--no-build` skips the build step). Full workflow in `docs/LOCAL-PROD.md`.
+
 The gateway "tests" are standalone node scripts under `apps/terminal-gateway/test/` that spawn real tmux sessions and a real gateway, assert with plain `throw`, and print `PASS`/`FAIL`. They clean up their tmux sessions; if one is interrupted, check for orphans with `tmux ls` and `tmux kill-session -t <name>`.
 
 ## Architecture: three independent lifetimes
@@ -75,6 +77,9 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 - `packages/shared-types/` — Zod schemas for REST, WS, and auth (`src/terminal.ts`, `src/auth.ts`, `src/agent.ts`).
 - `test/` (in `apps/terminal-gateway/`) — smoke + acceptance scripts.
 - `deploy/Caddyfile` — reverse-proxy example for production.
+- `ecosystem.config.cjs` (repo root) — PM2 ecosystem for the local production stack; manages three processes (`prod-gateway` :3107, `prod-agent` :3109, `prod-terminal` :3100).
+- `run-prod-local.sh` (repo root) — plain foreground launcher for the same local production stack; builds the frontend then starts all three. Pass `--no-build` to skip the build.
+- `docs/LOCAL-PROD.md` — full manual for building and running a production build locally (PM2 and script paths, port map, auth, verify steps, troubleshooting).
 - `docs/DESIGN-SYSTEM.md` — design and phased plan.
 
 ## Status & what's deliberately absent
