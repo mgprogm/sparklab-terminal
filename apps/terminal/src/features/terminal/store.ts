@@ -5,6 +5,20 @@ import { persist } from "zustand/middleware";
  * (13/14 by breakpoint); a number overrides it with a fixed size. */
 export type TerminalFontSize = number | "auto";
 
+/** The selectable sections of the settings dialog. Order = tab order. */
+export const SETTINGS_SECTIONS = [
+  "appearance",
+  "agent",
+  "account",
+  "connection",
+] as const;
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
+
+/** Runtime guard for a `?settings=<section>` value from the URL. */
+export function isSettingsSection(value: string): value is SettingsSection {
+  return (SETTINGS_SECTIONS as readonly string[]).includes(value);
+}
+
 interface TerminalState {
   /** Currently active session id, or null for empty state. */
   activeSessionId: string | null;
@@ -29,6 +43,11 @@ interface TerminalState {
    * drawer, a persisted-open modal would flash on reload. */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+
+  /** Active settings section (tab). NOT persisted — deep-linked via
+   * `?settings=<section>`, otherwise defaults to the first tab. */
+  settingsSection: SettingsSection;
+  setSettingsSection: (section: SettingsSection) => void;
 }
 
 export const useTerminalStore = create<TerminalState>()(
@@ -52,6 +71,9 @@ export const useTerminalStore = create<TerminalState>()(
 
       settingsOpen: false,
       setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+      settingsSection: "appearance",
+      setSettingsSection: (section) => set({ settingsSection: section }),
     }),
     {
       name: "terminal-store",

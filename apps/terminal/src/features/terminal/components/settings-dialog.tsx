@@ -2,11 +2,14 @@
 
 /**
  * Settings modal — a read-mostly preferences panel opened from the sidebar's
- * account row (gear icon). Four sections: Appearance (the only one with real
- * behavior — a persisted terminal font-size preference wired into XTerm),
+ * account row (gear icon). Four tabbed sections: Appearance (the only one with
+ * real behavior — a persisted terminal font-size preference wired into XTerm),
  * Agent chat (informational: fixed model + approval policy), Account (identity
  * + sign out, or an "auth disabled" note in open mode), and Connection
  * (read-only gateway URL, live status, active session count).
+ *
+ * The active tab lives in the terminal store (`settingsSection`) so it can be
+ * deep-linked via `?settings=<section>` (see use-settings-url-sync).
  *
  * Styling mirrors chat-history-dialog.tsx: DESIGN.md theme tokens only
  * (border-border / text-muted-foreground / bg-accent / text-foreground), no
@@ -24,10 +27,14 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import { Bot, CircleUser, LogOut, Plug, ShieldCheck, Type } from "lucide-react";
 
-import { useTerminalStore, type TerminalFontSize } from "../store";
+import {
+  useTerminalStore,
+  type SettingsSection,
+  type TerminalFontSize,
+} from "../store";
 
 import type { ConnectionStatus } from "../connection";
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 
 // Gateway URL: same env + fallback the WS Connection uses (connection.ts).
 const GATEWAY_URL =
@@ -46,25 +53,21 @@ const FONT_SIZE_OPTIONS: { label: string; value: TerminalFontSize }[] = [
   { label: "18", value: 18 },
 ];
 
-/** One labelled section with a heading (icon + title) and body. */
-function Section({
-  icon,
-  title,
-  children,
-}: {
-  icon: ReactNode;
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="px-4 py-3.5">
-      <div className="text-muted-foreground mb-2.5 flex items-center gap-2 text-xs font-medium uppercase tracking-wider">
-        {icon}
-        {title}
-      </div>
-      {children}
-    </section>
-  );
+/** Tab definitions — order matches SETTINGS_SECTIONS (the URL/tab order). */
+const TABS: {
+  key: SettingsSection;
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+}[] = [
+  { key: "appearance", label: "Appearance", icon: Type },
+  { key: "agent", label: "Agent", icon: Bot },
+  { key: "account", label: "Account", icon: CircleUser },
+  { key: "connection", label: "Connection", icon: Plug },
+];
+
+/** Body wrapper for one section (the active tab). */
+function Section({ children }: { children: ReactNode }) {
+  return <section className="px-4 py-3.5">{children}</section>;
 }
 
 /** A read-only "label: value" row used by the informational sections. */
@@ -99,6 +102,8 @@ export function SettingsDialog({
 }) {
   const fontSize = useTerminalStore((s) => s.terminalFontSize);
   const setFontSize = useTerminalStore((s) => s.setTerminalFontSize);
+  const section = useTerminalStore((s) => s.settingsSection);
+  const setSection = useTerminalStore((s) => s.setSettingsSection);
 
   const dotClass = cn(
     "size-[7px] rounded-full",
@@ -118,111 +123,146 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="[&::-webkit-scrollbar-thumb]:bg-border divide-border max-h-[min(70dvh,560px)] divide-y overflow-y-auto [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar]:w-1.5">
-          {/* 1. Appearance — the only section with behavior. */}
-          <Section icon={<Type className="size-3.5" />} title="Appearance">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-foreground text-sm">
-                Terminal font size
-              </span>
-              <div className="border-border flex overflow-hidden rounded-md border">
-                {FONT_SIZE_OPTIONS.map((opt) => {
-                  const active = opt.value === fontSize;
-                  return (
-                    <button
-                      key={String(opt.value)}
-                      type="button"
-                      onClick={() => setFontSize(opt.value)}
-                      aria-pressed={active}
-                      className={cn(
-                        "border-border min-w-9 border-l px-2.5 py-1 text-xs transition-colors first:border-l-0",
-                        active
-                          ? "bg-accent text-foreground"
-                          : "text-muted-foreground hover:bg-accent/50",
-                      )}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            <p className="text-muted-foreground mt-2.5 text-xs">
-              The terminal theme is dark by design (per DESIGN.md); there is no
-              theme toggle.
-            </p>
-          </Section>
+        {/* Tab nav — the active tab is stored in `settingsSection` so it can be
+            deep-linked with `?settings=<section>`. */}
+        <div className="border-border flex border-b" role="tablist">
+          {TABS.map((t) => {
+            const active = t.key === section;
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setSection(t.key)}
+                className={cn(
+                  "flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-xs font-medium transition-colors",
+                  active
+                    ? "text-foreground border-foreground -mb-px border-b-2"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent/40",
+                )}
+              >
+                <Icon className="size-3.5" />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
 
-          {/* 2. Agent chat — informational only. */}
-          <Section icon={<Bot className="size-3.5" />} title="Agent chat">
-            <InfoRow
-              label="Model"
-              value={<span className="font-mono text-xs">{AGENT_MODEL}</span>}
-            />
-            <div className="text-muted-foreground mt-2 flex gap-2 text-xs leading-relaxed">
-              <ShieldCheck className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />
-              <p>
-                Reads (list sessions, read screen, wait) run automatically.
-                Every write — type text, press keys, run command, create session
-                — requires per-write approval. Auto-approve is scoped to the
-                current chat only and is never persisted.
-              </p>
-            </div>
-          </Section>
-
-          {/* 3. Account — display + existing actions only. */}
-          <Section icon={<CircleUser className="size-3.5" />} title="Account">
-            {onLogout ? (
-              <>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <CircleUser className="text-muted-foreground size-4 shrink-0" />
-                    <span className="text-foreground truncate text-sm font-medium">
-                      {username ?? "Signed in"}
-                    </span>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={onLogout}
-                    className="shrink-0"
-                  >
-                    <LogOut className="size-3.5" />
-                    Sign out
-                  </Button>
-                </div>
-                <p className="text-muted-foreground mt-2.5 text-xs">
-                  Password is set via the server environment
-                  (GATEWAY_AUTH_PASSWORD_HASH).
-                </p>
-              </>
-            ) : (
-              <p className="text-muted-foreground text-sm">
-                Auth disabled — the gateway is running in open mode (no
-                credentials configured).
-              </p>
-            )}
-          </Section>
-
-          {/* 4. Connection — read-only display. */}
-          <Section icon={<Plug className="size-3.5" />} title="Connection">
-            <InfoRow
-              label="Gateway URL"
-              value={<span className="font-mono text-xs">{GATEWAY_URL}</span>}
-            />
-            <InfoRow
-              label="Status"
-              value={
-                <span className="inline-flex items-center gap-1.5">
-                  <span className={dotClass} />
-                  <span className="text-xs uppercase tracking-wider">
-                    {statusText}
-                  </span>
+        <div className="[&::-webkit-scrollbar-thumb]:bg-border max-h-[min(70dvh,560px)] overflow-y-auto [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar]:w-1.5">
+          {/* Appearance — the only section with behavior. */}
+          {section === "appearance" && (
+            <Section>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-foreground text-sm">
+                  Terminal font size
                 </span>
-              }
-            />
-            <InfoRow label="Active sessions" value={sessionCount} />
-          </Section>
+                <div className="border-border flex overflow-hidden rounded-md border">
+                  {FONT_SIZE_OPTIONS.map((opt) => {
+                    const active = opt.value === fontSize;
+                    return (
+                      <button
+                        key={String(opt.value)}
+                        type="button"
+                        onClick={() => setFontSize(opt.value)}
+                        aria-pressed={active}
+                        className={cn(
+                          "border-border min-w-9 border-l px-2.5 py-1 text-xs transition-colors first:border-l-0",
+                          active
+                            ? "bg-accent text-foreground"
+                            : "text-muted-foreground hover:bg-accent/50",
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <p className="text-muted-foreground mt-2.5 text-xs">
+                The terminal theme is dark by design (per DESIGN.md); there is
+                no theme toggle.
+              </p>
+            </Section>
+          )}
+
+          {/* Agent chat — informational only. */}
+          {section === "agent" && (
+            <Section>
+              <InfoRow
+                label="Model"
+                value={<span className="font-mono text-xs">{AGENT_MODEL}</span>}
+              />
+              <div className="text-muted-foreground mt-2 flex gap-2 text-xs leading-relaxed">
+                <ShieldCheck className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />
+                <p>
+                  Reads (list sessions, read screen, wait) run automatically.
+                  Every write — type text, press keys, run command, create
+                  session — requires per-write approval. Auto-approve is scoped
+                  to the current chat only and is never persisted.
+                </p>
+              </div>
+            </Section>
+          )}
+
+          {/* Account — display + existing actions only. */}
+          {section === "account" && (
+            <Section>
+              {onLogout ? (
+                <>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <CircleUser className="text-muted-foreground size-4 shrink-0" />
+                      <span className="text-foreground truncate text-sm font-medium">
+                        {username ?? "Signed in"}
+                      </span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={onLogout}
+                      className="shrink-0"
+                    >
+                      <LogOut className="size-3.5" />
+                      Sign out
+                    </Button>
+                  </div>
+                  <p className="text-muted-foreground mt-2.5 text-xs">
+                    Password is set via the server environment
+                    (GATEWAY_AUTH_PASSWORD_HASH).
+                  </p>
+                </>
+              ) : (
+                <p className="text-muted-foreground text-sm">
+                  Auth disabled — the gateway is running in open mode (no
+                  credentials configured).
+                </p>
+              )}
+            </Section>
+          )}
+
+          {/* Connection — read-only display. */}
+          {section === "connection" && (
+            <Section>
+              <InfoRow
+                label="Gateway URL"
+                value={<span className="font-mono text-xs">{GATEWAY_URL}</span>}
+              />
+              <InfoRow
+                label="Status"
+                value={
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className={dotClass} />
+                    <span className="text-xs uppercase tracking-wider">
+                      {statusText}
+                    </span>
+                  </span>
+                }
+              />
+              <InfoRow label="Active sessions" value={sessionCount} />
+            </Section>
+          )}
         </div>
       </DialogContent>
     </Dialog>

@@ -46,6 +46,7 @@ import {
   useDeleteSession,
   useSessions,
 } from "../hooks/use-sessions";
+import { useSettingsUrlSync } from "../hooks/use-settings-url-sync";
 import { useUrlFlagSync } from "../hooks/use-url-flag-sync";
 import { useVisualViewport } from "../hooks/use-visual-viewport";
 import { resolveActiveSession } from "../session-fallback";
@@ -70,6 +71,8 @@ export function TerminalShell() {
     setMobileSidebarOpen,
     settingsOpen,
     setSettingsOpen,
+    settingsSection,
+    setSettingsSection,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -103,8 +106,13 @@ export function TerminalShell() {
   // against the loaded list. Routes only through setActiveSessionId — never
   // touches XTerm props, so the no-remount invariant holds.
   useSessionUrlSync(activeSessionId, setActiveSessionId);
-  // `?settings` and `?agent` open the settings dialog / agent panel on load.
-  useUrlFlagSync("settings", settingsOpen, setSettingsOpen);
+  // `?settings=<section>` opens the dialog to a tab; `?agent` opens the panel.
+  useSettingsUrlSync(
+    settingsOpen,
+    settingsSection,
+    setSettingsOpen,
+    setSettingsSection,
+  );
   useUrlFlagSync("agent", agentPanelOpen, setAgentPanelOpen);
 
   // ---- "Active session vanished → fall back" ----

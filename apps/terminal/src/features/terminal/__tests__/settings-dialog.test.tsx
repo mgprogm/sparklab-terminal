@@ -1,7 +1,7 @@
 /**
- * RTL tests for SettingsDialog: renders the four sections, reflects the
- * open-vs-auth-disabled account state, and drives the font-size preference
- * through the real terminal store.
+ * RTL tests for SettingsDialog: the four section tabs, switching between them,
+ * the open-vs-auth-disabled account state, and driving the font-size
+ * preference through the real terminal store.
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -25,33 +25,30 @@ function renderDialog(overrides = {}) {
 
 describe("SettingsDialog", () => {
   beforeEach(() => {
-    useTerminalStore.setState({ terminalFontSize: "auto" });
+    useTerminalStore.setState({
+      terminalFontSize: "auto",
+      settingsSection: "appearance",
+    });
   });
   afterEach(() => {
-    useTerminalStore.setState({ terminalFontSize: "auto" });
+    useTerminalStore.setState({
+      terminalFontSize: "auto",
+      settingsSection: "appearance",
+    });
   });
 
-  it("renders all four section headings", () => {
+  it("renders the four section tabs", () => {
     renderDialog();
     expect(
       screen.getByRole("heading", { name: /settings/i }),
     ).toBeInTheDocument();
-    // Exact case — the sr-only DialogDescription mentions these words in
-    // lowercase, so case-insensitive regexes would match twice.
-    expect(screen.getByText("Appearance")).toBeInTheDocument();
-    expect(screen.getByText("Agent chat")).toBeInTheDocument();
-    expect(screen.getByText("Account")).toBeInTheDocument();
-    expect(screen.getByText("Connection")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Appearance" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Agent" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Account" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Connection" })).toBeInTheDocument();
   });
 
-  it("shows the fixed agent model and connection details", () => {
-    renderDialog();
-    expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
-    expect(screen.getByText("live")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-  });
-
-  it("sets the terminal font size preference in the store on click", async () => {
+  it("shows the appearance tab by default and sets font size on click", async () => {
     const user = userEvent.setup();
     renderDialog();
 
@@ -62,16 +59,40 @@ describe("SettingsDialog", () => {
     expect(useTerminalStore.getState().terminalFontSize).toBe("auto");
   });
 
-  it("shows sign out with a username when authenticated", () => {
+  it("reveals the fixed agent model only on the Agent tab", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    expect(screen.queryByText("gpt-5.6-sol")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Agent" }));
+    expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
+  });
+
+  it("shows connection details on the Connection tab", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("tab", { name: "Connection" }));
+    expect(screen.getByText("live")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("shows sign out with a username on the Account tab", async () => {
+    const user = userEvent.setup();
     renderDialog({ username: "ada", onLogout: vi.fn() });
+
+    await user.click(screen.getByRole("tab", { name: "Account" }));
     expect(screen.getByText("ada")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /sign out/i }),
     ).toBeInTheDocument();
   });
 
-  it("shows an auth-disabled note in open mode (no onLogout)", () => {
+  it("shows an auth-disabled note in open mode on the Account tab", async () => {
+    const user = userEvent.setup();
     renderDialog();
+
+    await user.click(screen.getByRole("tab", { name: "Account" }));
     expect(screen.getByText(/auth disabled/i)).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /sign out/i }),
