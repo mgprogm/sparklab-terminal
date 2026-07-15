@@ -26,16 +26,20 @@ interface SessionSidebarProps {
   /** Registry servers; drives the multi-server sidebar grouping. */
   servers?: ServerInfo[];
   collapsed: boolean;
+  /** True while the very first session-list fetch is in flight. */
+  loading?: boolean;
   onSelectSession: (id: string) => void;
-  onCreateSession: (params?: CreateSessionParams) => void;
-  onDeleteSession: (id: string) => void;
-  onUpdateSession?: (params: UpdateSessionParams) => void;
+  onCreateSession: (params?: CreateSessionParams) => void | Promise<unknown>;
+  onDeleteSession: (id: string) => void | Promise<unknown>;
+  onUpdateSession?: (params: UpdateSessionParams) => void | Promise<unknown>;
   onToggleCollapse: () => void;
   /** Called after any dialog closes so the terminal can reclaim focus. */
   onDialogClose?: () => void;
   /** Signed-in username; absent in open mode (dev, auth disabled). */
   username?: string;
   onLogout?: () => void;
+  /** True while the sign-out request is in flight. */
+  logoutPending?: boolean;
   /** Opens the settings dialog (owned by the shell). */
   onOpenSettings?: () => void;
 }
@@ -45,6 +49,7 @@ export function SessionSidebar({
   activeSessionId,
   servers,
   collapsed,
+  loading,
   onSelectSession,
   onCreateSession,
   onDeleteSession,
@@ -53,6 +58,7 @@ export function SessionSidebar({
   onDialogClose,
   username,
   onLogout,
+  logoutPending,
   onOpenSettings,
 }: SessionSidebarProps) {
   return (
@@ -84,6 +90,7 @@ export function SessionSidebar({
         activeSessionId={activeSessionId}
         servers={servers}
         collapsed={collapsed}
+        loading={loading}
         onSelectSession={onSelectSession}
         onCreateSession={onCreateSession}
         onDeleteSession={onDeleteSession}
@@ -91,6 +98,7 @@ export function SessionSidebar({
         onDialogClose={onDialogClose}
         username={username}
         onLogout={onLogout}
+        logoutPending={logoutPending}
         onOpenSettings={onOpenSettings}
       />
     </aside>

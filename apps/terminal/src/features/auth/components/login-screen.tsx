@@ -5,6 +5,7 @@ import { LoginBodySchema, type LoginBody } from "@sparklab/shared-types";
 import { Button } from "@sparklab/ui/components/ui/button";
 import { Input } from "@sparklab/ui/components/ui/input";
 import { Label } from "@sparklab/ui/components/ui/label";
+import { Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 
@@ -106,7 +107,10 @@ export function LoginScreen() {
               className="min-h-[44px] w-full"
               disabled={loginMutation.isPending || isRateLimited}
             >
-              Sign in
+              {loginMutation.isPending && (
+                <Loader2 className="size-3.5 animate-spin" />
+              )}
+              {loginMutation.isPending ? "Signing in…" : "Sign in"}
             </Button>
           </form>
         </section>

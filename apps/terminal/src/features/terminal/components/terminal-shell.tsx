@@ -24,7 +24,7 @@ import {
 } from "@sparklab/ui/components/ui/sheet";
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
-import { Menu, Unplug } from "lucide-react";
+import { Loader2, Menu, Unplug } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DynamicXTerm } from "./dynamic-xterm";
@@ -88,7 +88,11 @@ export function TerminalShell() {
   const agentPanelOpen = useAgentStore((s) => s.panelOpen);
   const setAgentPanelOpen = useAgentStore((s) => s.setPanelOpen);
 
-  const { data: sessions = [], isSuccess: sessionsLoaded } = useSessions();
+  const {
+    data: sessions = [],
+    isSuccess: sessionsLoaded,
+    isLoading: sessionsLoading,
+  } = useSessions();
   const { data: servers = [] } = useServers();
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
@@ -199,36 +203,29 @@ export function TerminalShell() {
     [setActiveSessionId],
   );
 
+  // These return the mutation promise so dialogs in SessionList can keep a
+  // pending spinner visible until the gateway responds before closing.
   const handleCreateSession = useCallback(
-    (params?: CreateSessionParams) => {
-      createSession.mutate(params, {
-        onSuccess: (created) => {
-          setActiveSessionId(created.id);
-        },
-      });
-    },
+    (params?: CreateSessionParams) =>
+      createSession.mutateAsync(params).then((created) => {
+        setActiveSessionId(created.id);
+      }),
     [createSession, setActiveSessionId],
   );
 
   const handleUpdateSession = useCallback(
-    (params: UpdateSessionParams) => {
-      updateSession.mutate(params);
-    },
+    (params: UpdateSessionParams) => updateSession.mutateAsync(params),
     [updateSession],
   );
 
   const handleDeleteSession = useCallback(
-    (id: string) => {
-      deleteSession.mutate(id, {
-        onSuccess: () => {
-          // Don't null activeSessionId here — mirroring the original app.js
-          // behavior: leave it set so the vanish-fallback effect sees the id
-          // disappear from the refreshed list and routes to the next session
-          // (or empty state). Nulling here would cause a brief XTerm remount
-          // flash and a frozen terminal on last-delete.
-        },
-      });
-    },
+    (id: string) =>
+      // Don't null activeSessionId here — mirroring the original app.js
+      // behavior: leave it set so the vanish-fallback effect sees the id
+      // disappear from the refreshed list and routes to the next session
+      // (or empty state). Nulling here would cause a brief XTerm remount
+      // flash and a frozen terminal on last-delete.
+      deleteSession.mutateAsync(id),
     [deleteSession],
   );
 
@@ -262,16 +259,18 @@ export function TerminalShell() {
 
   const handleMobileCreateSession = useCallback(
     (params?: CreateSessionParams) => {
-      handleCreateSession(params);
+      const result = handleCreateSession(params);
       setMobileSidebarOpen(false);
+      return result;
     },
     [handleCreateSession, setMobileSidebarOpen],
   );
 
   const handleMobileDeleteSession = useCallback(
     (id: string) => {
-      handleDeleteSession(id);
+      const result = handleDeleteSession(id);
       setMobileSidebarOpen(false);
+      return result;
     },
     [handleDeleteSession, setMobileSidebarOpen],
   );
@@ -305,6 +304,7 @@ export function TerminalShell() {
           activeSessionId={activeSessionId}
           servers={servers}
           collapsed={sidebarCollapsed}
+          loading={sessionsLoading}
           onSelectSession={handleSelectSession}
           onCreateSession={handleCreateSession}
           onDeleteSession={handleDeleteSession}
@@ -313,6 +313,7 @@ export function TerminalShell() {
           onDialogClose={handleDialogClose}
           username={me?.username}
           onLogout={me?.username ? () => logoutMutation.mutate() : undefined}
+          logoutPending={logoutMutation.isPending}
           onOpenSettings={() => setSettingsOpen(true)}
         />
       )}
@@ -333,6 +334,7 @@ export function TerminalShell() {
               activeSessionId={activeSessionId}
               servers={servers}
               variant="drawer"
+              loading={sessionsLoading}
               onSelectSession={handleMobileSelectSession}
               onCreateSession={handleMobileCreateSession}
               onDeleteSession={handleMobileDeleteSession}
@@ -391,6 +393,20 @@ export function TerminalShell() {
             </div>
           )}
 
+          {/* Connect/reconnect overlay: the header badge alone is easy to miss,
+              so surface the wait on the pane itself. Removed reactively when
+              onStatus("connected") fires at ws.onopen — before the first binary
+              frame triggers tmux's attach redraw, so it never covers live
+              output. The unreachable-server overlay below takes precedence. */}
+          {activeSessionId &&
+            !activeServerUnreachable &&
+            status.state === "reconnecting" && (
+              <div className="bg-background/80 absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-center backdrop-blur-sm">
+                <Loader2 className="text-muted-foreground size-6 animate-spin" />
+                <p className="text-muted-foreground text-xs">{status.text}</p>
+              </div>
+            )}
+
           {/* Unreachable-server overlay (§7.2): muted reassurance that the job
               is safe. Distinct from the transient gateway-disconnect state. */}
           {activeSessionId && activeServerUnreachable && (
@@ -434,6 +450,7 @@ export function TerminalShell() {
         onOpenChange={setSettingsOpen}
         username={me?.username}
         onLogout={me?.username ? () => logoutMutation.mutate() : undefined}
+        logoutPending={logoutMutation.isPending}
         statusState={status.state}
         statusText={status.text}
         sessionCount={sessions.length}

@@ -67,6 +67,9 @@ export function useAgentChat() {
   }, []);
 
   const listChats = useCallback(() => {
+    // chat_list clears this flag when the response arrives; until then the
+    // history modal shows a loading row instead of "no conversations".
+    useAgentStore.setState({ chatsLoading: true });
     conn?.listChats();
   }, []);
 
@@ -81,8 +84,10 @@ export function useAgentChat() {
     (chatId: string) => {
       if (chatId === useAgentStore.getState().chatId) return;
       // Clear now; chat_history will replace with the reconstructed transcript.
+      // loadingChat keeps the panel on "Loading chat…" (not the new-chat empty
+      // state) until that replay arrives.
       useAgentStore.getState().resetForNewChat();
-      useAgentStore.setState({ chatId });
+      useAgentStore.setState({ chatId, loadingChat: true });
       openConnection(chatId);
     },
     [openConnection],
@@ -92,8 +97,13 @@ export function useAgentChat() {
   const deleteChat = useCallback(
     (chatId: string) => {
       // Delete on the currently-open socket first (guaranteed to send), then,
-      // if we just deleted the active chat, reconnect to a fresh one.
+      // if we just deleted the active chat, reconnect to a fresh one. Remove
+      // the row optimistically — the frame is fire-and-forget, so waiting for
+      // the next list_chats would leave a stale row (and allow double-clicks).
       conn?.deleteChat(chatId);
+      useAgentStore.setState((s) => ({
+        chats: s.chats.filter((c) => c.id !== chatId),
+      }));
       if (chatId === useAgentStore.getState().chatId) newChat();
     },
     [newChat],

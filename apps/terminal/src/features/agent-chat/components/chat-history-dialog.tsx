@@ -6,7 +6,7 @@
  * clicking a row resumes it (the service replays its transcript). The current
  * chat is marked and kept at the top of mind; delete removes it for good.
  */
-import { MessagesSquare, Plus, Trash2 } from "lucide-react";
+import { Loader2, MessagesSquare, Plus, Trash2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -33,6 +33,7 @@ export function ChatHistoryDialog({
   open,
   onOpenChange,
   chats,
+  loading = false,
   activeChatId,
   onSelect,
   onDelete,
@@ -41,6 +42,9 @@ export function ChatHistoryDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   chats: AgentChatSummary[];
+  /** True while the list_chats request is in flight — suppresses the
+   *  "no conversations" empty state so it can't flash before the list. */
+  loading?: boolean;
   activeChatId: string | null;
   onSelect: (chatId: string) => void;
   onDelete: (chatId: string) => void;
@@ -71,7 +75,12 @@ export function ChatHistoryDialog({
         </button>
 
         <div className="[&::-webkit-scrollbar-thumb]:bg-border max-h-[min(60dvh,420px)] overflow-y-auto [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar]:w-1.5">
-          {chats.length === 0 ? (
+          {chats.length === 0 && loading ? (
+            <div className="text-muted-foreground flex flex-col items-center gap-2 px-6 py-10 text-center text-xs">
+              <Loader2 className="size-5 animate-spin" />
+              Loading conversations…
+            </div>
+          ) : chats.length === 0 ? (
             <div className="text-muted-foreground flex flex-col items-center gap-2 px-6 py-10 text-center text-xs">
               <MessagesSquare className="size-5 opacity-60" />
               No past conversations yet.

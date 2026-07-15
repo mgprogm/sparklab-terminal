@@ -46,6 +46,7 @@ import {
   ChevronRight,
   CircleUser,
   Folder,
+  Loader2,
   LogOut,
   MoreHorizontal,
   Plus,
@@ -140,10 +141,15 @@ export interface SessionListProps {
   collapsed?: boolean;
   /** "drawer" enlarges touch targets for the mobile Sheet. */
   variant?: "sidebar" | "drawer";
+  /** True while the very first session-list fetch is in flight — shows a
+   *  loading row instead of flashing the "No sessions yet" empty state. */
+  loading?: boolean;
   onSelectSession: (id: string) => void;
-  onCreateSession: (params?: CreateSessionParams) => void;
-  onDeleteSession: (id: string) => void;
-  onUpdateSession?: (params: UpdateSessionParams) => void;
+  /** May return the mutation promise; when it does, the create/delete/move
+   *  dialogs stay open with a pending spinner until it settles. */
+  onCreateSession: (params?: CreateSessionParams) => void | Promise<unknown>;
+  onDeleteSession: (id: string) => void | Promise<unknown>;
+  onUpdateSession?: (params: UpdateSessionParams) => void | Promise<unknown>;
   /** Called after any dialog closes so the terminal can reclaim focus. */
   onDialogClose?: () => void;
   /** Signed-in username; absent in open mode (dev, auth disabled). When any of
@@ -151,6 +157,8 @@ export interface SessionListProps {
    *  the "New" action; otherwise (mobile drawer) "New" stays in the header. */
   username?: string;
   onLogout?: () => void;
+  /** True while the sign-out request is in flight. */
+  logoutPending?: boolean;
   /** Opens the settings dialog (owned by the shell). */
   onOpenSettings?: () => void;
 }
@@ -161,6 +169,7 @@ export function SessionList({
   servers,
   collapsed = false,
   variant = "sidebar",
+  loading = false,
   onSelectSession,
   onCreateSession,
   onDeleteSession,
@@ -168,6 +177,7 @@ export function SessionList({
   onDialogClose,
   username,
   onLogout,
+  logoutPending = false,
   onOpenSettings,
 }: SessionListProps) {
   const drawer = variant === "drawer";
@@ -201,18 +211,23 @@ export function SessionList({
   const [newOrg, setNewOrg] = useState("");
   const [newProject, setNewProject] = useState("");
   const [newServerId, setNewServerId] = useState("local");
+  // True while the create request is in flight (callback returned a promise);
+  // keeps the dialog open with a spinner until the gateway responds.
+  const [createBusy, setCreateBusy] = useState(false);
 
   // ---- Add-server dialog state (multi-server sidebar row) ----
   const [addServerOpen, setAddServerOpen] = useState(false);
 
   // ---- Delete dialog state ----
   const [deleteTarget, setDeleteTarget] = useState<SessionInfo | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   // ---- Move/rename dialog state ----
   const [moveTarget, setMoveTarget] = useState<SessionInfo | null>(null);
   const [moveName, setMoveName] = useState("");
   const [moveOrg, setMoveOrg] = useState("");
   const [moveProject, setMoveProject] = useState("");
+  const [moveBusy, setMoveBusy] = useState(false);
 
   // Compute tree and grouping flag.
   const grouped = useMemo(() => hasAnyGrouping(sessions), [sessions]);
@@ -250,6 +265,7 @@ export function SessionList({
   );
 
   const handleCreate = () => {
+    if (createBusy) return;
     const params: CreateSessionParams = {};
     if (newName.trim()) params.name = newName.trim();
     if (newOrg.trim()) params.org = newOrg.trim();
@@ -257,13 +273,23 @@ export function SessionList({
     // Only carry serverId in multi-server mode so the single-server POST body
     // stays byte-identical to before.
     if (multiServer && newServerId) params.serverId = newServerId;
-    onCreateSession(Object.keys(params).length > 0 ? params : undefined);
-    setNewName("");
-    setNewOrg("");
-    setNewProject("");
-    setNewServerId("local");
-    setCreateOpen(false);
-    onDialogClose?.();
+    setCreateBusy(true);
+    void Promise.resolve(
+      onCreateSession(Object.keys(params).length > 0 ? params : undefined),
+    )
+      .catch(() => {
+        // Errors already surface via the sessions query refetch; the dialog
+        // still closes below, matching the previous fire-and-forget behavior.
+      })
+      .finally(() => {
+        setCreateBusy(false);
+        setNewName("");
+        setNewOrg("");
+        setNewProject("");
+        setNewServerId("local");
+        setCreateOpen(false);
+        onDialogClose?.();
+      });
   };
 
   const handleCreateCancel = () => {
@@ -277,11 +303,20 @@ export function SessionList({
 
   // ---- Delete handlers ----
   const handleDelete = () => {
-    if (deleteTarget) {
-      onDeleteSession(deleteTarget.id);
+    if (deleteBusy) return;
+    if (!deleteTarget) {
+      setDeleteTarget(null);
+      onDialogClose?.();
+      return;
     }
-    setDeleteTarget(null);
-    onDialogClose?.();
+    setDeleteBusy(true);
+    void Promise.resolve(onDeleteSession(deleteTarget.id))
+      .catch(() => {})
+      .finally(() => {
+        setDeleteBusy(false);
+        setDeleteTarget(null);
+        onDialogClose?.();
+      });
   };
 
   const handleDeleteCancel = () => {
@@ -298,6 +333,7 @@ export function SessionList({
   }, []);
 
   const handleMove = () => {
+    if (moveBusy) return;
     if (moveTarget && onUpdateSession) {
       const params: UpdateSessionParams = { id: moveTarget.id };
       const trimmedName = moveName.trim();
@@ -314,7 +350,15 @@ export function SessionList({
       }
       // Only call if something changed.
       if (Object.keys(params).length > 1) {
-        onUpdateSession(params);
+        setMoveBusy(true);
+        void Promise.resolve(onUpdateSession(params))
+          .catch(() => {})
+          .finally(() => {
+            setMoveBusy(false);
+            setMoveTarget(null);
+            onDialogClose?.();
+          });
+        return;
       }
     }
     setMoveTarget(null);
@@ -817,7 +861,20 @@ export function SessionList({
                 ? renderGroupedList()
                 : renderFlatList()}
 
-          {sessions.length === 0 && !collapsed && !multiServer && (
+          {/* Initial-load indicator: shown only before the first successful
+              fetch so the "No sessions yet" empty state can't flash early. */}
+          {loading && sessions.length === 0 && (
+            <div className="flex items-center justify-center gap-2 py-8">
+              <Loader2 className="text-muted-foreground size-4 animate-spin" />
+              {!collapsed && (
+                <span className="text-muted-foreground text-xs">
+                  Loading sessions…
+                </span>
+              )}
+            </div>
+          )}
+
+          {!loading && sessions.length === 0 && !collapsed && !multiServer && (
             <div className="flex flex-col items-center gap-3 py-8 text-center">
               <Terminal className="text-muted-foreground size-8" />
               <p className="text-muted-foreground text-sm">No sessions yet.</p>
@@ -911,9 +968,14 @@ export function SessionList({
                       size="icon-xs"
                       aria-label="Sign out"
                       onClick={onLogout}
+                      disabled={logoutPending}
                       className="text-muted-foreground hover:text-secondary-foreground shrink-0"
                     >
-                      <LogOut className="size-3.5" />
+                      {logoutPending ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <LogOut className="size-3.5" />
+                      )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="right">
@@ -941,7 +1003,7 @@ export function SessionList({
       <Dialog
         open={createOpen}
         onOpenChange={(open) => {
-          if (!open) handleCreateCancel();
+          if (!open && !createBusy) handleCreateCancel();
         }}
       >
         <DialogContent>
@@ -1056,10 +1118,14 @@ export function SessionList({
                 type="button"
                 variant="outline"
                 onClick={handleCreateCancel}
+                disabled={createBusy}
               >
                 Cancel
               </Button>
-              <Button type="submit">Create</Button>
+              <Button type="submit" disabled={createBusy}>
+                {createBusy && <Loader2 className="size-3.5 animate-spin" />}
+                {createBusy ? "Creating…" : "Create"}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -1069,7 +1135,7 @@ export function SessionList({
       <AlertDialog
         open={!!deleteTarget}
         onOpenChange={(open) => {
-          if (!open) handleDeleteCancel();
+          if (!open && !deleteBusy) handleDeleteCancel();
         }}
       >
         <AlertDialogContent>
@@ -1081,14 +1147,24 @@ export function SessionList({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={handleDeleteCancel}>
+            <AlertDialogCancel
+              onClick={handleDeleteCancel}
+              disabled={deleteBusy}
+            >
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
-              onClick={handleDelete}
+              onClick={(e) => {
+                // Radix closes the dialog on Action click by default; keep it
+                // open so the pending spinner is visible until DELETE settles.
+                e.preventDefault();
+                handleDelete();
+              }}
+              disabled={deleteBusy}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Delete
+              {deleteBusy && <Loader2 className="size-3.5 animate-spin" />}
+              {deleteBusy ? "Deleting…" : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1098,7 +1174,7 @@ export function SessionList({
       <Dialog
         open={!!moveTarget}
         onOpenChange={(open) => {
-          if (!open) handleMoveCancel();
+          if (!open && !moveBusy) handleMoveCancel();
         }}
       >
         <DialogContent>
@@ -1185,10 +1261,14 @@ export function SessionList({
                 type="button"
                 variant="outline"
                 onClick={handleMoveCancel}
+                disabled={moveBusy}
               >
                 Cancel
               </Button>
-              <Button type="submit">Save</Button>
+              <Button type="submit" disabled={moveBusy}>
+                {moveBusy && <Loader2 className="size-3.5 animate-spin" />}
+                {moveBusy ? "Saving…" : "Save"}
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>

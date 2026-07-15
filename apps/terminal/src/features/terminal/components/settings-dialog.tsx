@@ -38,6 +38,7 @@ import { cn } from "@sparklab/ui/lib/utils";
 import {
   Bot,
   CircleUser,
+  Loader2,
   LogOut,
   Plug,
   Plus,
@@ -115,7 +116,13 @@ function UnreachableChip() {
  *  component so `useServers()` only runs when this tab is open (existing
  *  settings tests render without a QueryClientProvider). */
 function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
-  const { data: servers, isLoading, isError, refetch } = useServers();
+  const {
+    data: servers,
+    isLoading,
+    isError,
+    isFetching,
+    refetch,
+  } = useServers();
   const deleteServer = useDeleteServer();
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<ServerInfo | null>(null);
@@ -134,15 +141,26 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
 
       <div className="border-border divide-border mt-2 divide-y border-t">
         {isLoading && (
-          <p className="text-muted-foreground py-3 text-sm">Loading servers…</p>
+          <p className="text-muted-foreground flex items-center gap-2 py-3 text-sm">
+            <Loader2 className="size-3.5 animate-spin" />
+            Loading servers…
+          </p>
         )}
         {isError && !isLoading && (
           <div className="flex items-center gap-2 py-3">
             <span className="text-muted-foreground text-sm">
               Couldn&apos;t load servers.
             </span>
-            <Button variant="ghost" size="sm" onClick={() => void refetch()}>
-              Retry
+            {/* isFetching (not isLoading) is what's true during a background
+                retry — react-query keeps the stale error data meanwhile. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void refetch()}
+              disabled={isFetching}
+            >
+              {isFetching && <Loader2 className="size-3.5 animate-spin" />}
+              {isFetching ? "Retrying…" : "Retry"}
             </Button>
           </div>
         )}
@@ -211,7 +229,7 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
       <AlertDialog
         open={!!removeTarget}
         onOpenChange={(o) => {
-          if (!o) setRemoveTarget(null);
+          if (!o && !deleteServer.isPending) setRemoveTarget(null);
         }}
       >
         <AlertDialogContent>
@@ -224,17 +242,29 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setRemoveTarget(null)}>
+            <AlertDialogCancel
+              onClick={() => setRemoveTarget(null)}
+              disabled={deleteServer.isPending}
+            >
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => {
-                if (removeTarget) deleteServer.mutate(removeTarget.id);
-                setRemoveTarget(null);
+              disabled={deleteServer.isPending}
+              onClick={(e) => {
+                // Radix closes on Action click by default; keep the dialog
+                // open so the pending spinner is visible until DELETE settles.
+                e.preventDefault();
+                if (!removeTarget || deleteServer.isPending) return;
+                deleteServer.mutate(removeTarget.id, {
+                  onSettled: () => setRemoveTarget(null),
+                });
               }}
             >
-              Remove
+              {deleteServer.isPending && (
+                <Loader2 className="size-3.5 animate-spin" />
+              )}
+              {deleteServer.isPending ? "Removing…" : "Remove"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -260,6 +290,7 @@ export function SettingsDialog({
   onOpenChange,
   username,
   onLogout,
+  logoutPending = false,
   statusState,
   statusText,
   sessionCount,
@@ -269,6 +300,8 @@ export function SettingsDialog({
   /** Signed-in username; absent in open mode (dev, auth disabled). */
   username?: string;
   onLogout?: () => void;
+  /** True while the sign-out request is in flight. */
+  logoutPending?: boolean;
   statusState: ConnectionStatus;
   statusText: string;
   sessionCount: number;
@@ -395,10 +428,15 @@ export function SettingsDialog({
                       variant="outline"
                       size="sm"
                       onClick={onLogout}
+                      disabled={logoutPending}
                       className="shrink-0"
                     >
-                      <LogOut className="size-3.5" />
-                      Sign out
+                      {logoutPending ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <LogOut className="size-3.5" />
+                      )}
+                      {logoutPending ? "Signing out…" : "Sign out"}
                     </Button>
                   </div>
                   <p className="text-muted-foreground mt-2.5 text-xs">

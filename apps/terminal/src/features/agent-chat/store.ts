@@ -62,6 +62,12 @@ interface AgentState {
 
   /** Past chats for the history modal (populated by `list_chats`). */
   chats: AgentChatSummary[];
+  /** True between a `list_chats` request and its `chat_list` response — the
+   *  history modal shows a loading row instead of "no conversations". */
+  chatsLoading: boolean;
+  /** True between a loadChat() reconnect and its `chat_history` replay — the
+   *  panel shows "Loading chat…" instead of the new-chat empty state. */
+  loadingChat: boolean;
 
   /** Session the composer targets; null = follow the focused terminal ("Auto"). */
   pinnedTargetId: string | null;
@@ -124,6 +130,8 @@ export const useAgentStore = create<AgentState>()(
       entries: [],
       unreadCount: 0,
       chats: [],
+      chatsLoading: false,
+      loadingChat: false,
 
       pinnedTargetId: null,
       setPinnedTargetId: (id) => set({ pinnedTargetId: id }),
@@ -147,7 +155,7 @@ export const useAgentStore = create<AgentState>()(
             break;
 
           case "chat_list":
-            set({ chats: frame.chats });
+            set({ chats: frame.chats, chatsLoading: false });
             break;
 
           case "chat_history":
@@ -159,6 +167,7 @@ export const useAgentStore = create<AgentState>()(
               entries: frame.entries.map(replayToEntry),
               unreadCount: 0,
               status: "idle",
+              loadingChat: false,
               agentActiveSessionIds: [],
               _writeActive: {},
             });
@@ -331,6 +340,7 @@ export const useAgentStore = create<AgentState>()(
           entries: [],
           unreadCount: 0,
           status: "idle",
+          loadingChat: false,
           agentActiveSessionIds: [],
           _writeActive: {},
         }),

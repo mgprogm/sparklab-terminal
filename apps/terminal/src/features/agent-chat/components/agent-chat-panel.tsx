@@ -6,7 +6,14 @@
  * Sheet on mobile. Closed = nothing visible but the FAB.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { EllipsisVertical, History, Plus, Sparkles, X } from "lucide-react";
+import {
+  EllipsisVertical,
+  History,
+  Loader2,
+  Plus,
+  Sparkles,
+  X,
+} from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,6 +29,7 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import type {
   AgentApprovalBehavior,
+  AgentStatusState,
   SessionInfo,
 } from "@sparklab/shared-types";
 
@@ -51,6 +59,9 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   const connected = useAgentStore((s) => s.connected);
   const chatId = useAgentStore((s) => s.chatId);
   const chats = useAgentStore((s) => s.chats);
+  const status = useAgentStore((s) => s.status);
+  const loadingChat = useAgentStore((s) => s.loadingChat);
+  const chatsLoading = useAgentStore((s) => s.chatsLoading);
   const resolveApproval = useAgentStore((s) => s.resolveApproval);
   const setAutoApprove = useAgentStore((s) => s.setAutoApprove);
   const addUserMessage = useAgentStore((s) => s.addUserMessage);
@@ -130,6 +141,8 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
       />
       <MessageStream
         entries={entries}
+        status={status}
+        loadingChat={loadingChat}
         sessionName={sessionName}
         onRespond={handleRespond}
         onSuggest={handleSend}
@@ -144,6 +157,7 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
         open={historyOpen}
         onOpenChange={setHistoryOpen}
         chats={chats}
+        loading={chatsLoading}
         activeChatId={chatId}
         onSelect={loadChat}
         onDelete={deleteChat}
@@ -193,12 +207,14 @@ function Header({
     <div className="border-border flex h-[42px] shrink-0 items-center gap-2 border-b px-3.5">
       <Sparkles className="text-chart-2 size-4" />
       <span className="text-foreground text-sm font-medium">Agent</span>
+      {/* While the panel is open and the socket is down, the connection is
+          always retrying — pulse amber so the wait is visible. */}
       <span
         className={cn(
           "size-[6px] rounded-full",
-          connected ? "bg-chart-1" : "bg-muted-foreground/50",
+          connected ? "bg-chart-1" : "bg-chart-2 animate-pulse",
         )}
-        title={connected ? "connected" : "disconnected"}
+        title={connected ? "connected" : "connecting…"}
       />
       <div className="ml-auto flex items-center gap-0.5">
         <DropdownMenu>
@@ -237,11 +253,15 @@ function Header({
 
 function MessageStream({
   entries,
+  status,
+  loadingChat,
   sessionName,
   onRespond,
   onSuggest,
 }: {
   entries: TranscriptEntry[];
+  status: AgentStatusState;
+  loadingChat: boolean;
   sessionName: (id?: string) => string | undefined;
   onRespond: (
     requestId: string,
@@ -253,10 +273,20 @@ function MessageStream({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
 
+  // The agent is busy but nothing in the stream shows it yet: no streaming
+  // assistant bubble, no running tool row, no pending approval card. This
+  // covers the send→first-token wait and the post-approval dead zone.
+  const last = entries[entries.length - 1];
+  const showThinking =
+    (status === "thinking" || status === "acting") &&
+    !(last?.kind === "assistant" && last.streaming) &&
+    !(last?.kind === "tool" && last.state === "running") &&
+    !(last?.kind === "approval" && last.state === "pending");
+
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [entries]);
+  }, [entries, showThinking]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -265,6 +295,16 @@ function MessageStream({
   };
 
   if (entries.length === 0) {
+    // A resumed chat's transcript is in flight — don't flash the new-chat
+    // empty state while waiting for the chat_history replay.
+    if (loadingChat) {
+      return (
+        <div className="text-muted-foreground flex flex-1 flex-col items-center justify-center gap-2 text-xs">
+          <Loader2 className="size-4 animate-spin" />
+          Loading chat…
+        </div>
+      );
+    }
     return <EmptyState onSuggest={onSuggest} />;
   }
 
@@ -324,6 +364,12 @@ function MessageStream({
             );
         }
       })}
+      {showThinking && (
+        <div className="text-muted-foreground flex items-center gap-2 py-1 text-xs">
+          <Loader2 className="size-3.5 animate-spin" />
+          {status === "acting" ? "Working…" : "Thinking…"}
+        </div>
+      )}
     </div>
   );
 }
