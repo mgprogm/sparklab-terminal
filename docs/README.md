@@ -1,18 +1,19 @@
 # Documentation index
 
-| Document                                               | What it covers                                                                                                                      |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| [GETTING-STARTED.md](GETTING-STARTED.md)               | Prerequisites, install, starting dev, ports, environment variables                                                                  |
-| [ARCHITECTURE.md](ARCHITECTURE.md)                     | Monorepo layout, the three-lifetimes design, every app and package                                                                  |
-| [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)           | REST API + WebSocket wire protocol, load-bearing invariants                                                                         |
-| [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                 | Agent Chat: the `/agent` WebSocket, auth, the 7 tools, approval + safety model, conversation history (browse/resume/delete), config |
-| [TESTING.md](TESTING.md)                               | Unit tests, Playwright E2E, the eight gates (six cut-over + auth + scrollback), CI pipeline                                         |
-| [CONTRIBUTING.md](CONTRIBUTING.md)                     | Code conventions: feature folders, imports, state rules, commits                                                                    |
-| [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                   | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior)             |
-| [FRONTEND-PLATFORM-PLAN.md](FRONTEND-PLATFORM-PLAN.md) | The implementation plan that produced the current monorepo (executed 2026-07-14; kept as a decision record)                         |
-| [DEPLOYMENT.md](DEPLOYMENT.md)                         | Production deployment: reverse-proxy topology, environment variables, Caddyfile, systemd, safety checklist                          |
-| [PHASE-3-HARDENING-PLAN.md](PHASE-3-HARDENING-PLAN.md) | Workstreams A (auth/hardening) + B (scrollback, session status) shipped 2026-07-14                                                  |
-| [MULTI-SERVER-PLAN.md](MULTI-SERVER-PLAN.md)           | Design proposal (not implemented): "Connected Servers" — create sessions on any registered server via SSH + remote tmux             |
+| Document                                                     | What it covers                                                                                                                      |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| [GETTING-STARTED.md](GETTING-STARTED.md)                     | Prerequisites, install, starting dev, ports, environment variables                                                                  |
+| [ARCHITECTURE.md](ARCHITECTURE.md)                           | Monorepo layout, the three-lifetimes design, every app and package                                                                  |
+| [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)                 | REST API + WebSocket wire protocol, load-bearing invariants                                                                         |
+| [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                       | Agent Chat: the `/agent` WebSocket, auth, the 7 tools, approval + safety model, conversation history (browse/resume/delete), config |
+| [TESTING.md](TESTING.md)                                     | Unit tests, Playwright E2E, the eight gates (six cut-over + auth + scrollback), CI pipeline                                         |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                           | Code conventions: feature folders, imports, state rules, commits                                                                    |
+| [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                         | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior)             |
+| [FRONTEND-PLATFORM-PLAN.md](FRONTEND-PLATFORM-PLAN.md)       | The implementation plan that produced the current monorepo (executed 2026-07-14; kept as a decision record)                         |
+| [DEPLOYMENT.md](DEPLOYMENT.md)                               | Production deployment: reverse-proxy topology, environment variables, Caddyfile, systemd, safety checklist                          |
+| [PHASE-3-HARDENING-PLAN.md](PHASE-3-HARDENING-PLAN.md)       | Workstreams A (auth/hardening) + B (scrollback, session status) shipped 2026-07-14                                                  |
+| [MULTI-SERVER-PLAN.md](MULTI-SERVER-PLAN.md)                 | Design proposal (not implemented): "Connected Servers" — create sessions on any registered server via SSH + remote tmux             |
+| [SESSION-ORGANIZATION-PLAN.md](SESSION-ORGANIZATION-PLAN.md) | Org → Project session grouping: metadata fields, PATCH endpoint, two-level collapsible sidebar tree                                 |
 
 ## Quick orientation
 
