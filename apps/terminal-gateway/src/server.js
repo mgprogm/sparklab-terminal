@@ -343,6 +343,8 @@ async function listSessions() {
       attached: Number(attached) > 0,
       attachedClients: Number(attached) || 0,
       lastActivity: activity ? Number(activity) : null,
+      org: m.org ?? null,
+      project: m.project ?? null,
     });
   }
   // Prune metadata for sessions tmux no longer knows about.
@@ -455,6 +457,26 @@ function handleMe(req, res) {
   return sendJson(res, 401, { error: "unauthorized" });
 }
 
+// ---- Org/project validation ----
+// Shared by POST /api/sessions and PATCH /api/sessions/:id.
+// Returns { ok: true, value: trimmedString } or { ok: false, error: string }.
+function validateGroupField(raw, fieldName) {
+  if (raw === null) return { ok: true, value: null };
+  if (typeof raw !== "string")
+    return { ok: false, error: `${fieldName} must be a string` };
+  const trimmed = raw.trim();
+  if (trimmed.length < 1 || trimmed.length > 32) {
+    return {
+      ok: false,
+      error: `${fieldName} must be 1-32 characters after trimming`,
+    };
+  }
+  if (trimmed.includes("/")) {
+    return { ok: false, error: `${fieldName} must not contain "/"` };
+  }
+  return { ok: true, value: trimmed };
+}
+
 // ---- REST API ----
 // Returns true if it handled the request.
 async function handleApi(req, res, url) {
@@ -462,7 +484,9 @@ async function handleApi(req, res, url) {
 
   // A1: Origin check for state-changing REST when Origin header is present (CSRF guard).
   if (
-    (req.method === "POST" || req.method === "DELETE") &&
+    (req.method === "POST" ||
+      req.method === "DELETE" ||
+      req.method === "PATCH") &&
     req.headers.origin
   ) {
     if (!isOriginAllowed(req.headers.origin)) {
@@ -532,6 +556,23 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, { error: "name must be a string" });
     }
 
+    // Org/project validation (both optional on create).
+    let org = null;
+    let project = null;
+    if (body.org != null) {
+      const v = validateGroupField(body.org, "org");
+      if (!v.ok) return sendJson(res, 400, { error: v.error });
+      org = v.value;
+    }
+    if (body.project != null) {
+      const v = validateGroupField(body.project, "project");
+      if (!v.ok) return sendJson(res, 400, { error: v.error });
+      project = v.value;
+    }
+    if (project && !org) {
+      return sendJson(res, 400, { error: "project requires org" });
+    }
+
     // crypto.randomUUID() is already hyphen-safe (no dots/colons).
     const id = `${PREFIX}${crypto.randomUUID()}`;
     try {
@@ -544,8 +585,8 @@ async function handleApi(req, res, url) {
     }
     const createdAt = Date.now();
     const name = body.name || id;
-    metadata.upsert(id, { name, createdAt });
-    return sendJson(res, 201, { id, name, createdAt });
+    metadata.upsert(id, { name, createdAt, org, project });
+    return sendJson(res, 201, { id, name, createdAt, org, project });
   }
 
   // GET /api/sessions
@@ -767,6 +808,93 @@ async function handleApi(req, res, url) {
     res.writeHead(204);
     res.end();
     return true;
+  }
+
+  // PATCH /api/sessions/:id — metadata-only update (name, org, project).
+  // Never touches tmux; safe on a live attached session.
+  if (req.method === "PATCH" && parts.length === 3 && parts[1] === "sessions") {
+    const id = decodeURIComponent(parts[2]);
+    if (!ID_RE.test(id)) {
+      return sendJson(res, 400, { error: "invalid session id" });
+    }
+    if (!(await sessionExists(id))) {
+      return sendJson(res, 404, { error: "session not found" });
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+
+    const existing = metadata.get(id) || {};
+    const patch = {};
+
+    // Name
+    if (body.name !== undefined) {
+      if (typeof body.name !== "string") {
+        return sendJson(res, 400, { error: "name must be a string" });
+      }
+      patch.name = body.name.trim() || existing.name || id;
+    }
+
+    // Org
+    let mergedOrg = existing.org ?? null;
+    if (body.org !== undefined) {
+      if (body.org === null) {
+        // Clearing org clears project too.
+        patch.org = null;
+        patch.project = null;
+        mergedOrg = null;
+      } else {
+        const v = validateGroupField(body.org, "org");
+        if (!v.ok) return sendJson(res, 400, { error: v.error });
+        patch.org = v.value;
+        mergedOrg = v.value;
+      }
+    }
+
+    // Project
+    let mergedProject =
+      patch.project !== undefined ? patch.project : (existing.project ?? null);
+    if (body.project !== undefined && patch.project === undefined) {
+      // Only process if we didn't already force-clear project via org:null above.
+      if (body.project === null) {
+        patch.project = null;
+        mergedProject = null;
+      } else {
+        const v = validateGroupField(body.project, "project");
+        if (!v.ok) return sendJson(res, 400, { error: v.error });
+        patch.project = v.value;
+        mergedProject = v.value;
+      }
+    }
+
+    // Invariant: project requires org (on the merged result).
+    if (mergedProject && !mergedOrg) {
+      return sendJson(res, 400, { error: "project requires org" });
+    }
+
+    metadata.upsert(id, patch);
+
+    const updated = metadata.get(id) || {};
+    return sendJson(res, 200, {
+      id,
+      name: updated.name || id,
+      org: updated.org ?? null,
+      project: updated.project ?? null,
+    });
   }
 
   // DELETE /api/sessions/:id

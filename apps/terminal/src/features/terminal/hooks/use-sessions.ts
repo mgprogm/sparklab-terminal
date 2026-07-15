@@ -3,6 +3,8 @@ import {
   CreateSessionResponseSchema,
   type ListSessionsResponse,
   ListSessionsResponseSchema,
+  type UpdateSessionResponse,
+  UpdateSessionResponseSchema,
 } from "@sparklab/shared-types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -25,11 +27,29 @@ async function fetchSessions(): Promise<ListSessionsResponse> {
   return ListSessionsResponseSchema.parse(data);
 }
 
-async function createSessionApi(name?: string): Promise<CreateSessionResponse> {
+export interface CreateSessionParams {
+  name?: string;
+  org?: string;
+  project?: string;
+}
+
+async function createSessionApi(
+  params?: CreateSessionParams | string,
+): Promise<CreateSessionResponse> {
+  // Accept legacy string (name-only) or an object with optional org/project.
+  const body: Record<string, string> = {};
+  if (typeof params === "string") {
+    if (params.trim()) body.name = params.trim();
+  } else if (params) {
+    if (params.name?.trim()) body.name = params.name.trim();
+    if (params.org?.trim()) body.org = params.org.trim();
+    if (params.project?.trim()) body.project = params.project.trim();
+  }
+
   const res = await fetch("/api/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
+    body: JSON.stringify(body),
   });
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
@@ -53,6 +73,33 @@ async function deleteSessionApi(id: string): Promise<void> {
       .catch(() => ({ error: String(res.status) }))) as { error?: string };
     throw new Error(err.error ?? String(res.status));
   }
+}
+
+export interface UpdateSessionParams {
+  id: string;
+  name?: string;
+  org?: string | null;
+  project?: string | null;
+}
+
+async function updateSessionApi(
+  params: UpdateSessionParams,
+): Promise<UpdateSessionResponse> {
+  const { id, ...body } = params;
+  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    const err = (await res
+      .json()
+      .catch(() => ({ error: String(res.status) }))) as { error?: string };
+    throw new Error(err.error ?? String(res.status));
+  }
+  const data: unknown = await res.json();
+  return UpdateSessionResponseSchema.parse(data);
 }
 
 // ---- Hooks ----
@@ -79,6 +126,16 @@ export function useDeleteSession() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: deleteSessionApi,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: sessionKeys.list() });
+    },
+  });
+}
+
+export function useUpdateSession() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateSessionApi,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: sessionKeys.list() });
     },

@@ -45,6 +45,11 @@ import {
   useCreateSession,
   useDeleteSession,
   useSessions,
+  useUpdateSession,
+} from "../hooks/use-sessions";
+import type {
+  CreateSessionParams,
+  UpdateSessionParams,
 } from "../hooks/use-sessions";
 import { useSettingsUrlSync } from "../hooks/use-settings-url-sync";
 import { useUrlFlagSync } from "../hooks/use-url-flag-sync";
@@ -82,6 +87,7 @@ export function TerminalShell() {
   const { data: sessions = [], isSuccess: sessionsLoaded } = useSessions();
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
+  const updateSession = useUpdateSession();
 
   const [status, setStatus] = useState<{
     state: ConnectionStatus;
@@ -128,6 +134,21 @@ export function TerminalShell() {
     if (next !== undefined) setActiveSessionId(next);
   }, [sessionsLoaded, sessions, activeSessionId, setActiveSessionId]);
 
+  // ---- Auto-expand ancestors of the active session ----
+  // Keyed on the active session's org/project primitives so it fires both
+  // when the id changes AND when sessions load (deep-link / reload path:
+  // org/project go null -> real value when the list arrives). The 3s poll
+  // does not re-fire because the same primitive strings are unchanged.
+  const expandAncestors = useTerminalStore((s) => s.expandAncestors);
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const activeOrg = activeSession?.org ?? null;
+  const activeProject = activeSession?.project ?? null;
+  useEffect(() => {
+    if (activeSessionId) {
+      expandAncestors(activeOrg, activeProject);
+    }
+  }, [activeSessionId, activeOrg, activeProject, expandAncestors]);
+
   // ---- Callbacks ----
   const handleStatusChange = useCallback(
     (state: ConnectionStatus, text: string) => {
@@ -153,14 +174,21 @@ export function TerminalShell() {
   );
 
   const handleCreateSession = useCallback(
-    (name?: string) => {
-      createSession.mutate(name, {
+    (params?: CreateSessionParams) => {
+      createSession.mutate(params, {
         onSuccess: (created) => {
           setActiveSessionId(created.id);
         },
       });
     },
     [createSession, setActiveSessionId],
+  );
+
+  const handleUpdateSession = useCallback(
+    (params: UpdateSessionParams) => {
+      updateSession.mutate(params);
+    },
+    [updateSession],
   );
 
   const handleDeleteSession = useCallback(
@@ -207,8 +235,8 @@ export function TerminalShell() {
   );
 
   const handleMobileCreateSession = useCallback(
-    (name?: string) => {
-      handleCreateSession(name);
+    (params?: CreateSessionParams) => {
+      handleCreateSession(params);
       setMobileSidebarOpen(false);
     },
     [handleCreateSession, setMobileSidebarOpen],
@@ -243,6 +271,7 @@ export function TerminalShell() {
           onSelectSession={handleSelectSession}
           onCreateSession={handleCreateSession}
           onDeleteSession={handleDeleteSession}
+          onUpdateSession={handleUpdateSession}
           onToggleCollapse={toggleSidebar}
           onDialogClose={handleDialogClose}
           username={me?.username}
@@ -269,6 +298,7 @@ export function TerminalShell() {
               onSelectSession={handleMobileSelectSession}
               onCreateSession={handleMobileCreateSession}
               onDeleteSession={handleMobileDeleteSession}
+              onUpdateSession={handleUpdateSession}
             />
           </SheetContent>
         </Sheet>

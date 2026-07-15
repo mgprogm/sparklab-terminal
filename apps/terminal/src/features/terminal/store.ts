@@ -48,6 +48,14 @@ interface TerminalState {
    * `?settings=<section>`, otherwise defaults to the first tab. */
   settingsSection: SettingsSection;
   setSettingsSection: (section: SettingsSection) => void;
+
+  /** Set of collapsed group keys ("org" or "org/project"). Keys present =
+   *  collapsed. Default (absent) = expanded. Persisted. */
+  collapsedGroups: Record<string, boolean>;
+  toggleGroupCollapsed: (key: string) => void;
+  /** Expand the ancestors of a session (its org key and org/project key).
+   *  Called when a session becomes active so it is never hidden. */
+  expandAncestors: (org: string | null, project: string | null) => void;
 }
 
 export const useTerminalStore = create<TerminalState>()(
@@ -74,6 +82,38 @@ export const useTerminalStore = create<TerminalState>()(
 
       settingsSection: "appearance",
       setSettingsSection: (section) => set({ settingsSection: section }),
+
+      collapsedGroups: {},
+      toggleGroupCollapsed: (key) =>
+        set((state) => {
+          const next = { ...state.collapsedGroups };
+          if (next[key]) {
+            delete next[key];
+          } else {
+            next[key] = true;
+          }
+          return { collapsedGroups: next };
+        }),
+      expandAncestors: (org, project) =>
+        set((state) => {
+          const next = { ...state.collapsedGroups };
+          let changed = false;
+          // The sidebar keys the ungrouped bucket under "__ungrouped__".
+          const orgKey = org ?? "__ungrouped__";
+          if (next[orgKey]) {
+            delete next[orgKey];
+            changed = true;
+          }
+          // Expand the project level (only meaningful when org is set).
+          if (org != null && project != null) {
+            const projKey = `${org}/${project}`;
+            if (next[projKey]) {
+              delete next[projKey];
+              changed = true;
+            }
+          }
+          return changed ? { collapsedGroups: next } : state;
+        }),
     }),
     {
       name: "terminal-store",
@@ -82,6 +122,7 @@ export const useTerminalStore = create<TerminalState>()(
         activeSessionId: state.activeSessionId,
         sidebarCollapsed: state.sidebarCollapsed,
         terminalFontSize: state.terminalFontSize,
+        collapsedGroups: state.collapsedGroups,
       }),
     },
   ),

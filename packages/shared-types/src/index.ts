@@ -11,6 +11,11 @@ export {
   type SessionInfo,
   type ListSessionsResponse,
   type ScrollbackResponse,
+  // REST: PATCH /api/sessions/:id
+  UpdateSessionRequestSchema,
+  UpdateSessionResponseSchema,
+  type UpdateSessionRequest,
+  type UpdateSessionResponse,
   // REST: errors
   ApiErrorSchema,
   type ApiError,

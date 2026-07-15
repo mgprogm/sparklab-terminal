@@ -24,6 +24,7 @@ describe("useTerminalStore persistence", () => {
       activeSessionId: "web-abc",
       sidebarCollapsed: true,
       terminalFontSize: 16,
+      collapsedGroups: {},
     });
     expect(persisted).not.toHaveProperty("mobileSidebarOpen");
   });

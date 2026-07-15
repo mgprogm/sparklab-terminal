@@ -94,7 +94,9 @@ describe("SessionSidebar", () => {
       await user.type(input, "my-session");
       await user.click(screen.getByRole("button", { name: /^create$/i }));
 
-      expect(props.onCreateSession).toHaveBeenCalledWith("my-session");
+      expect(props.onCreateSession).toHaveBeenCalledWith({
+        name: "my-session",
+      });
     });
 
     it("calls onCreateSession with undefined for empty name", async () => {

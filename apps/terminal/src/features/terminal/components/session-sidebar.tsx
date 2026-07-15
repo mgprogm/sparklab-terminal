@@ -26,6 +26,10 @@ import {
 
 import { SessionList } from "./session-list";
 
+import type {
+  CreateSessionParams,
+  UpdateSessionParams,
+} from "../hooks/use-sessions";
 import type { SessionInfo } from "@sparklab/shared-types";
 
 interface SessionSidebarProps {
@@ -33,8 +37,9 @@ interface SessionSidebarProps {
   activeSessionId: string | null;
   collapsed: boolean;
   onSelectSession: (id: string) => void;
-  onCreateSession: (name?: string) => void;
+  onCreateSession: (params?: CreateSessionParams) => void;
   onDeleteSession: (id: string) => void;
+  onUpdateSession?: (params: UpdateSessionParams) => void;
   onToggleCollapse: () => void;
   /** Called after any dialog closes so the terminal can reclaim focus. */
   onDialogClose?: () => void;
@@ -52,6 +57,7 @@ export function SessionSidebar({
   onSelectSession,
   onCreateSession,
   onDeleteSession,
+  onUpdateSession,
   onToggleCollapse,
   onDialogClose,
   username,
@@ -89,6 +95,7 @@ export function SessionSidebar({
         onSelectSession={onSelectSession}
         onCreateSession={onCreateSession}
         onDeleteSession={onDeleteSession}
+        onUpdateSession={onUpdateSession}
         onDialogClose={onDialogClose}
       />
 

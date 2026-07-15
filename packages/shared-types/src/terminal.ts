@@ -25,6 +25,10 @@ export const CreateSessionRequestSchema = z.object({
   name: z.string().optional(),
   /** Working directory for the tmux session. Must be an existing directory. */
   cwd: z.string().optional(),
+  /** Organization label for grouping (1-32 chars, no "/"). */
+  org: z.string().optional(),
+  /** Project label within an org (1-32 chars, no "/"). Requires org. */
+  project: z.string().optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>;
 
@@ -65,12 +69,41 @@ export const SessionInfoSchema = z.object({
   /** Unix epoch seconds when the session was last active. The gateway sends
    * null when tmux reports no activity timestamp; older gateways omit it. */
   lastActivity: z.number().nullable().optional(),
+  /** Organization label. Null when unset; optional for older-gateway compat. */
+  org: z.string().nullable().optional(),
+  /** Project label within an org. Null when unset; optional for older-gateway compat. */
+  project: z.string().nullable().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfoSchema>;
 
 /** Response body for GET /api/sessions (200 OK). */
 export const ListSessionsResponseSchema = z.array(SessionInfoSchema);
 export type ListSessionsResponse = z.infer<typeof ListSessionsResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: PATCH /api/sessions/:id  (update session metadata)
+// ---------------------------------------------------------------------------
+
+/** Request body for PATCH /api/sessions/:id. All fields optional; absent =
+ *  unchanged. `null` clears the field (org:null also clears project). */
+export const UpdateSessionRequestSchema = z.object({
+  /** New display name. */
+  name: z.string().optional(),
+  /** Organization label; null clears org AND project. */
+  org: z.string().nullable().optional(),
+  /** Project label; null clears project. Requires org on the merged result. */
+  project: z.string().nullable().optional(),
+});
+export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequestSchema>;
+
+/** Response body for PATCH /api/sessions/:id (200 OK). */
+export const UpdateSessionResponseSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  org: z.string().nullable(),
+  project: z.string().nullable(),
+});
+export type UpdateSessionResponse = z.infer<typeof UpdateSessionResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // REST: DELETE /api/sessions/:id  (kill a session)
