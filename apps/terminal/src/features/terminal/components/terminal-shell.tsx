@@ -32,6 +32,7 @@ import { ExtraKeysBar } from "./extra-keys-bar";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
+import { TerminalFooter } from "./terminal-footer";
 import { useMediaQuery } from "../hooks/use-media-query";
 import { useServers } from "../hooks/use-servers";
 import { useSessionUrlSync } from "../hooks/use-session-url-sync";
@@ -409,6 +410,11 @@ export function TerminalShell() {
           <AgentActivityOverlay activeSessionId={activeSessionId} />
           <AgentFab />
         </div>
+
+        {/* Mini footer bar below the xterm frame: server + current command. */}
+        {activeSessionId && activeMeta && (
+          <TerminalFooter session={activeMeta} server={activeServer} />
+        )}
 
         {/* Extra keys — coarse-pointer devices only (CSS-gated, §3.2). */}
         <ExtraKeysBar
