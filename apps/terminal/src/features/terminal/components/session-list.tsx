@@ -903,20 +903,24 @@ export function SessionList({
         </div>
       </ScrollArea>
 
-      {/* Account footer — one 42px line mirroring the header: identity (glyph +
-          username) on the left, a compact icon-action group on the right. The
+      {/* Account footer — expanded: one 42px line mirroring the header, identity
+          (glyph + username) on the left and a compact icon-action group on the
+          right. Collapsed rail: the identity text is dropped and the icon group
+          stacks VERTICALLY (three 24px icons won't fit side-by-side in the 52px
+          rail — horizontal would overflow/clip), matching the vertical icon-rail
+          pattern; tooltips are side="right", already correct for the rail. The
           primary "New" action leads the group as a filled button so it reads as
-          primary while sharing the row's icon geometry; the settings gear and
-          sign-out follow as ghost icons. Collapsed rail centers the icons. */}
+          primary while sharing the row's icon geometry; settings gear and
+          sign-out follow as ghost icons. */}
       {showAccountFooter && (
         <>
           <Separator />
           <div
             className={cn(
-              "flex h-[42px] shrink-0 items-center",
+              "flex shrink-0 items-center",
               collapsed
-                ? "justify-center px-0"
-                : "justify-between gap-2 px-2.5",
+                ? "flex-col justify-center gap-1 px-0 py-2"
+                : "h-[42px] justify-between gap-2 px-2.5",
             )}
           >
             {!collapsed && onLogout && (
@@ -927,7 +931,12 @@ export function SessionList({
                 </span>
               </div>
             )}
-            <div className="flex shrink-0 items-center gap-0.5">
+            <div
+              className={cn(
+                "flex shrink-0 items-center gap-0.5",
+                collapsed && "flex-col gap-1",
+              )}
+            >
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
