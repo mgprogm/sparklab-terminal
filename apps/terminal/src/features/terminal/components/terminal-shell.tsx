@@ -22,13 +22,19 @@ import {
   SheetDescription,
   SheetTitle,
 } from "@sparklab/ui/components/ui/sheet";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
-import { Loader2, Menu, Unplug } from "lucide-react";
+import { FolderTree, Loader2, Menu, Unplug } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
+import { FileExplorerDialog } from "./file-explorer-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
@@ -82,6 +88,8 @@ export function TerminalShell() {
     setSettingsOpen,
     settingsSection,
     setSettingsSection,
+    explorerOpen,
+    setExplorerOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -129,6 +137,7 @@ export function TerminalShell() {
     setSettingsSection,
   );
   useUrlFlagSync("agent", agentPanelOpen, setAgentPanelOpen);
+  useUrlFlagSync("explorer", explorerOpen, setExplorerOpen);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
@@ -365,6 +374,21 @@ export function TerminalShell() {
             {activeMeta?.name ??
               (activeSessionId ? activeSessionId : "no session")}
           </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Browse files"
+                disabled={!activeSessionId || activeServerUnreachable}
+                onClick={() => setExplorerOpen(true)}
+              >
+                <FolderTree className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Browse files</TooltipContent>
+          </Tooltip>
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
             <span className={dotClass} />
             <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">
@@ -454,6 +478,16 @@ export function TerminalShell() {
         statusState={status.state}
         statusText={status.text}
         sessionCount={sessions.length}
+      />
+
+      {/* File explorer modal — scoped to the active session's server. Mounted
+          once; open state lives in the store (deep-linked via `?explorer`). */}
+      <FileExplorerDialog
+        open={explorerOpen}
+        onOpenChange={setExplorerOpen}
+        sessionId={activeSessionId}
+        serverName={activeServer?.name}
+        unreachable={activeServerUnreachable}
       />
     </div>
   );

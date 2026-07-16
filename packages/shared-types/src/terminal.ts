@@ -269,6 +269,161 @@ export const ScrollbackResponseSchema = z.object({ lines: z.string() });
 export type ScrollbackResponse = z.infer<typeof ScrollbackResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// REST: GET /api/sessions/:id/git  (VCS summary for the mini footer)
+// ---------------------------------------------------------------------------
+//
+// A read-only git summary of the session's current working directory. Scoped to
+// the ACTIVE session only (polled by the footer) — deliberately NOT part of GET
+// /api/sessions. When the cwd is not inside a git work tree the gateway returns
+// just `{ isRepo: false }`; all other fields are present only when isRepo.
+
+/** Response body for GET /api/sessions/:id/git (200 OK). Derived from
+ *  `git status --porcelain=v2 --branch`. When `isRepo` is false the footer
+ *  renders nothing and every other field is absent. */
+export const GitStatusResponseSchema = z.object({
+  /** Whether the session's cwd is inside a git work tree. */
+  isRepo: z.boolean(),
+  /** Current branch name. Null on a detached HEAD with no resolvable short oid,
+   *  or when isRepo is false. On a detached HEAD this holds the short commit. */
+  branch: z.string().nullable().optional(),
+  /** True when HEAD is detached (branch holds the short oid, not a name). */
+  detached: z.boolean().optional(),
+  /** Commits ahead of the upstream (0 when no upstream is configured). */
+  ahead: z.number().int().optional(),
+  /** Commits behind the upstream (0 when no upstream is configured). */
+  behind: z.number().int().optional(),
+  /** Files with staged (index) changes. May overlap with `unstaged`. */
+  staged: z.number().int().optional(),
+  /** Files with unstaged (worktree) changes. May overlap with `staged`. */
+  unstaged: z.number().int().optional(),
+  /** Untracked files. */
+  untracked: z.number().int().optional(),
+  /** Unmerged (conflicted) files. */
+  conflicted: z.number().int().optional(),
+  /** Distinct changed files (each entry counted once; the buckets above may
+   *  overlap, so this is <= staged + unstaged + untracked + conflicted). */
+  changed: z.number().int().optional(),
+});
+export type GitStatusResponse = z.infer<typeof GitStatusResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// File Explorer: /api/sessions/:id/fs/*
+// ---------------------------------------------------------------------------
+//
+// The explorer browses the filesystem of the server a session lives on
+// (local or ssh), keyed by the qualified session id. The gateway is
+// dependency-free JS and CANNOT import this module — the JSON it emits from
+// server.js is kept in lockstep with these schemas by hand. Every field here
+// matches the actual JSON; invent nothing.
+
+/** Kind of a directory entry, derived from GNU `find`'s `%y` type char:
+ *  `d`->dir, `f`->file, `l`->symlink, anything else (block/char/socket/fifo)
+ *  ->other. */
+export const FsEntryTypeSchema = z.enum(["file", "dir", "symlink", "other"]);
+export type FsEntryType = z.infer<typeof FsEntryTypeSchema>;
+
+/** One entry in a directory listing (GET /fs/list). */
+export const FsEntrySchema = z.object({
+  /** Basename only (not a full path). May contain spaces/quotes/tabs. */
+  name: z.string(),
+  /** Entry kind. */
+  type: FsEntryTypeSchema,
+  /** Size in bytes (find `%s`). For directories this is the dir's own size. */
+  size: z.number(),
+  /** Last-modified time in Unix epoch MILLISECONDS (find `%T@` seconds * 1000,
+   *  rounded). Null when find reported an unparseable timestamp. */
+  mtime: z.number().nullable(),
+  /** Permission bits in octal as a string (find `%m`, e.g. "755", "644"). */
+  mode: z.string(),
+  /** For symlinks only: the raw link target (find `%l`). Absent otherwise. */
+  symlinkTarget: z.string().optional(),
+});
+export type FsEntry = z.infer<typeof FsEntrySchema>;
+
+/** Response body for GET /api/sessions/:id/fs/list (200 OK). */
+export const FsListResponseSchema = z.object({
+  /** The absolute directory that was listed (the resolved cwd when `path` was
+   *  omitted from the request). */
+  path: z.string(),
+  /** Directory entries (dotfiles excluded unless `showHidden` was set). */
+  entries: z.array(FsEntrySchema),
+  /** Present and true only when the listing was capped (5000 entries). */
+  truncated: z.boolean().optional(),
+});
+export type FsListResponse = z.infer<typeof FsListResponseSchema>;
+
+/** Response body for GET /api/sessions/:id/fs/read (200 OK). Text preview,
+ *  capped at 256 KB. Binary files (a NUL byte in the buffer) omit `content`
+ *  and set `encoding: null` — the client offers Download instead. */
+export const FsReadResponseSchema = z.object({
+  /** The absolute file path that was read. */
+  path: z.string(),
+  /** True size of the file in bytes (may exceed the returned `content`). */
+  size: z.number(),
+  /** Whether the file was detected as binary (a NUL byte in the read buffer). */
+  binary: z.boolean(),
+  /** Whether the file exceeded the 256 KB read cap (content is the first cap
+   *  bytes). Always false for binary files (no content is returned). */
+  truncated: z.boolean(),
+  /** "utf-8" for text, `null` for binary. */
+  encoding: z.enum(["utf-8"]).nullable(),
+  /** The file text (first cap bytes, utf-8). Present only for non-binary
+   *  files; omitted when `binary` is true. */
+  content: z.string().optional(),
+});
+export type FsReadResponse = z.infer<typeof FsReadResponseSchema>;
+
+// GET /api/sessions/:id/fs/download?path=<abs> — streams the raw file bytes
+// with Content-Type application/octet-stream and a Content-Disposition
+// attachment header. Not JSON; no schema.
+
+/** Request body for POST /api/sessions/:id/fs/mkdir. */
+export const FsMkdirRequestSchema = z.object({
+  /** Absolute path of the directory to create (fails if it already exists). */
+  path: z.string(),
+});
+export type FsMkdirRequest = z.infer<typeof FsMkdirRequestSchema>;
+
+/** Response body for POST /api/sessions/:id/fs/mkdir (201 Created). */
+export const FsMkdirResponseSchema = z.object({ path: z.string() });
+export type FsMkdirResponse = z.infer<typeof FsMkdirResponseSchema>;
+
+/** Request body for PATCH /api/sessions/:id/fs/entry (rename/move). */
+export const FsRenameRequestSchema = z.object({
+  /** Absolute source path. */
+  from: z.string(),
+  /** Absolute destination path. */
+  to: z.string(),
+  /** When absent/false the gateway refuses to clobber an existing `to` (409). */
+  overwrite: z.boolean().optional(),
+});
+export type FsRenameRequest = z.infer<typeof FsRenameRequestSchema>;
+
+/** Response body for PATCH /api/sessions/:id/fs/entry (200 OK). */
+export const FsRenameResponseSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+});
+export type FsRenameResponse = z.infer<typeof FsRenameResponseSchema>;
+
+// DELETE /api/sessions/:id/fs/entry?path=<abs>&recursive=0 — 200 OK with
+// { path }. A non-empty directory requires recursive=1 (else 409).
+/** Response body for DELETE /api/sessions/:id/fs/entry (200 OK). */
+export const FsDeleteResponseSchema = z.object({ path: z.string() });
+export type FsDeleteResponse = z.infer<typeof FsDeleteResponseSchema>;
+
+/** Response body for POST /api/sessions/:id/fs/upload (200 OK). The request
+ *  body is the RAW file bytes (not JSON); the destination is the `path` query
+ *  param. Capped at 8 MB (413 past it). */
+export const FsUploadResponseSchema = z.object({
+  /** Absolute destination path written. */
+  path: z.string(),
+  /** Number of bytes written. */
+  size: z.number(),
+});
+export type FsUploadResponse = z.infer<typeof FsUploadResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // Multi-server ("Connected Servers"): server registry
 // ---------------------------------------------------------------------------
 //

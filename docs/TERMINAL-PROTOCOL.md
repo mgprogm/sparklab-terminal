@@ -45,6 +45,12 @@ Response: `{ "lines": "<ANSI-colored text>" }` (`ScrollbackResponseSchema`). Unk
 
 **Client sequencing contract** (`connection.ts`): the fetch starts before the WS opens. On the first binary frame after (re)connect the client calls `term.reset()`, writes the fetched history (trimmed by the last `term.rows` lines to reduce duplication with the redraw), **then** writes the frame — tmux's attach redraw stays the single painter of the visible screen and pushes the injected history into xterm's scrollback buffer. If the first frame beats the fetch, attach proceeds without history (accepted race).
 
+### `GET /api/sessions/:id/git` → 200
+
+Read-only VCS summary of the session's **current working directory**, for the mini footer below the terminal. Resolves the cwd via `tmux display-message -p '#{pane_current_path}'` (same as fs/list), then runs one `git -C <cwd> status --porcelain=v2 --branch` through the non-tmux exec seam (`serverCmd`, local or ssh — reusing the ControlMaster socket). An 8s timeout guards against a slow/huge repo stalling the poll. Scoped to the **active session only** — deliberately NOT folded into `GET /api/sessions`, which would run `git status` for every session on every server every 3s. Read-only; no state. Auth-guarded like all `/api/*`; GET is origin-exempt (matching scrollback).
+
+Response: `GitStatusResponseSchema`. When the cwd is not inside a git work tree (git exits 128, "not a git repository") the body is just `{ "isRepo": false }` and the footer renders nothing. Otherwise: `{ isRepo:true, branch, detached, ahead, behind, staged, unstaged, untracked, conflicted, changed }`. `branch` is the branch name, or the short oid on a detached HEAD (`detached:true`). `ahead`/`behind` come from `# branch.ab` (0 with no upstream). The per-bucket counts classify porcelain-v2 entry lines (`1`/`2` by the two-char XY field, `u` = conflicted, `?` = untracked) and **may overlap** (a file both staged and unstaged increments both); `changed` counts each entry line once (distinct changed files). Unknown/malformed id → 404. Tested by `test/git-endpoints.js` (`pnpm --filter @sparklab/terminal-gateway test:git`).
+
 ### `GET /api/sessions/:id/screen?history=N` → 200
 
 Agent-facing, read-only **plain-text** capture of the visible screen (deliberately no `-e` — this feeds an LLM, not a terminal) via `tmux capture-pane -p -J`, plus cursor/size/mode metadata from one `tmux display-message` call. `history` clamps to 0–2000, default 0 (visible screen only; non-numeric values fall back to the default); when > 0 the capture also includes up to N lines of scrollback above the visible screen (`-S -N`). Auth-guarded like all `/api/*`.
@@ -75,6 +81,90 @@ Executing a command is therefore always two explicit calls: `{text}` then `{keys
 ### `DELETE /api/sessions/:id` → 204
 
 Kills the tmux session (the **only** place `tmux kill-session` is ever run). No body either way.
+
+### File-explorer endpoints: `GET|POST|PATCH|DELETE /api/sessions/:id/fs/*`
+
+Six routes that browse and manage the filesystem of whichever server the session lives on (local or a registered remote over SSH). Every route runs the standard `parseSessionRef` + `ID_RE` + `registry.get` + `sessionExists` guard — unknown or malformed session id → `404` on all of them. The underlying commands go through the non-tmux exec seam `serverCmdArgv`/`serverCmd`/`serverCmdStdin` (siblings of `serverExecArgv`, added alongside these routes). Schemas for all request/response shapes live in `packages/shared-types/src/terminal.ts` (`FsEntry`, `FsListResponse`, `FsReadResponse`, `FsMkdirRequest/Response`, `FsRenameRequest/Response`, `FsDeleteResponse`, `FsUploadResponse`).
+
+**Origin/CSRF gating** follows the same split as all other `/api/*` routes: GET requests are origin-exempt (matching scrollback); POST, PATCH, and DELETE get the Origin check automatically via `handleApi`.
+
+**Load-bearing safety invariant:** every path is **one shell-quoted argv token** — never string-concatenated into a command. Every command terminates option parsing with `--`. Directory listings use NUL-delimited `find -printf` records so filenames containing spaces, quotes, or newlines survive the round trip intact.
+
+#### `GET /api/sessions/:id/fs/list?path=<abs>&showHidden=0` → 200
+
+Lists one directory. `path` omitted → gateway resolves the session cwd via `tmux display-message -p '#{pane_current_path}'` and lists that. `path` must be an absolute string if supplied, else `400`. `showHidden=1` includes dotfiles (default omits them). Listing is capped at 5000 entries; `truncated: true` when exceeded.
+
+Response (`FsListResponse`):
+
+```json
+{
+  "path": "/home/me/project",
+  "entries": [
+    {
+      "name": "src",
+      "type": "dir",
+      "size": 4096,
+      "mtime": 1752444000000,
+      "mode": "755"
+    },
+    {
+      "name": "README.md",
+      "type": "file",
+      "size": 1234,
+      "mtime": 1752444000000,
+      "mode": "644"
+    }
+  ],
+  "truncated": false
+}
+```
+
+`mtime` is Unix epoch **milliseconds** (find's `%T@` seconds × 1000). `type` is one of `"file" | "dir" | "symlink" | "other"`; symlinks carry an additional `symlinkTarget` string. `size` is the entry's own byte size. Not-a-dir or nonexistent `path` → `404`; permission denied → `403`; else `502`.
+
+#### `GET /api/sessions/:id/fs/read?path=<abs>` → 200
+
+Text preview of a file, capped at **256 KB**. Binary detection: a NUL byte anywhere in the read buffer → `binary: true`, `content` omitted (client should offer Download instead). Bytes read > cap → `truncated: true`, content is the first 256 KB.
+
+Response (`FsReadResponse`):
+
+```json
+{
+  "path": "/home/me/project/README.md",
+  "size": 1234,
+  "binary": false,
+  "truncated": false,
+  "encoding": "utf-8",
+  "content": "# Project…"
+}
+```
+
+Binary files: `{ "path": "…", "size": 4096000, "binary": true, "truncated": false, "encoding": null }` (no `content`). Not found → `404`; permission denied → `403`.
+
+#### `GET /api/sessions/:id/fs/download?path=<abs>` → 200
+
+Streams the file as raw bytes — no 256 KB cap. Response headers: `Content-Type: application/octet-stream`, `Content-Disposition: attachment; filename="<basename>"`. The gateway pipes the child-process (or SSH) stdout directly to the HTTP response without buffering, so large binaries and remote files are safe. Not found → `404`.
+
+#### `POST /api/sessions/:id/fs/upload?path=<abs-dest-file>` → 200
+
+Streams the **raw request body** to the destination path via `tee -- <path>` (overwrites). Bypasses the normal 64 KB body cap; enforces a separate **8 MB upload cap** — excess → `413`. Response (`FsUploadResponse`):
+
+```json
+{ "path": "/home/me/project/data.bin", "size": 4096000 }
+```
+
+Permission denied → `403`; else `502`.
+
+#### `POST /api/sessions/:id/fs/mkdir` → 201
+
+Creates a single directory (no `-p`; parent must exist). Body (`FsMkdirRequest`): `{ "path": "/home/me/project/newdir" }`. Directory already exists → `409`. Response (`FsMkdirResponse`): `{ "path": "…" }`. Permission denied → `403`.
+
+#### `PATCH /api/sessions/:id/fs/entry` → 200
+
+Rename or move an entry. Body (`FsRenameRequest`): `{ "from": "/home/me/a", "to": "/home/me/b", "overwrite": false }`. `to` already exists and `overwrite` is falsy → `409`. Response (`FsRenameResponse`): `{ "from": "…", "to": "…" }`. Source not found → `404`; permission denied → `403`.
+
+#### `DELETE /api/sessions/:id/fs/entry?path=<abs>&recursive=0` → 200
+
+Deletes a file or directory. A non-empty directory requires `recursive=1` (client must show a strong confirm before setting this). Response (`FsDeleteResponse`): `{ "path": "…" }`. Not found → `404`; permission denied → `403`; non-empty dir without `recursive=1` → `502`.
 
 ### Errors (400 / 404 / 500)
 

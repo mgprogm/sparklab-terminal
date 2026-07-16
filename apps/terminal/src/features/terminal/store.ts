@@ -57,6 +57,11 @@ interface TerminalState {
   settingsSection: SettingsSection;
   setSettingsSection: (section: SettingsSection) => void;
 
+  /** Whether the file explorer dialog is open. NOT persisted — like the
+   * settings modal, a persisted-open dialog would flash on reload. */
+  explorerOpen: boolean;
+  setExplorerOpen: (open: boolean) => void;
+
   /** Set of collapsed group keys ("org" or "org/project"). Keys present =
    *  collapsed. Default (absent) = expanded. Persisted. */
   collapsedGroups: Record<string, boolean>;
@@ -96,6 +101,9 @@ export const useTerminalStore = create<TerminalState>()(
 
       settingsSection: "appearance",
       setSettingsSection: (section) => set({ settingsSection: section }),
+
+      explorerOpen: false,
+      setExplorerOpen: (open) => set({ explorerOpen: open }),
 
       collapsedGroups: {},
       toggleGroupCollapsed: (key) =>

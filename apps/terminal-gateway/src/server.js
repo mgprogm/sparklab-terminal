@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 import { spawn as ptySpawn } from "node-pty";
@@ -437,6 +437,61 @@ async function serverExecStdin(server, tmuxArgs, input) {
   return promise;
 }
 
+// ---------------------------------------------------------------------------
+// Non-tmux exec seam: serverCmdArgv / serverCmd / serverCmdStdin
+// ---------------------------------------------------------------------------
+// Identical to serverExecArgv/serverExec/serverExecStdin but WITHOUT the tmux
+// prefix — they run an ARBITRARY argv (find/head/cat/mkdir/mv/rm/tee) locally
+// or over ssh. Used by the File Explorer fs/* routes. Same quoting contract:
+// locally we execFile argv[0] directly (no shell, each element one literal
+// argument); over ssh the remote sshd re-splits on whitespace, so every token
+// is shellQuote'd into one remote command string. Reuse childEnvFor so the
+// password-auth askpass env is present. Callers MUST pass paths as a single
+// argv element and terminate options with `--`; never concatenate a path into
+// a command string.
+
+// Default child maxBuffer: the fs listing (up to ~5000 entries) and a 256 KB
+// read must fit. execFile's default is only 1 MB.
+const FS_CMD_MAX_BUFFER = 16 * 1024 * 1024;
+const FS_CMD_TIMEOUT_MS = 15_000;
+
+function serverCmdArgv(server, argv, { tty = false } = {}) {
+  if (!server || server.type === "local") {
+    return argv;
+  }
+  const ssh = ["ssh"];
+  if (tty) ssh.push("-tt");
+  const remoteCmd = argv.map(shellQuote).join(" ");
+  ssh.push(...sshOptsFor(server), sshHost(server), remoteCmd);
+  return ssh;
+}
+
+// Run an arbitrary argv on `server`, await stdout/stderr. Mirrors serverExec.
+async function serverCmd(server, argv, opts = {}) {
+  const a = serverCmdArgv(server, argv);
+  return execFileAsync(a[0], a.slice(1), {
+    env: childEnvFor(server),
+    timeout: FS_CMD_TIMEOUT_MS,
+    maxBuffer: FS_CMD_MAX_BUFFER,
+    ...opts,
+  });
+}
+
+// Run an arbitrary argv on `server` with `input` piped to stdin. Mirrors
+// serverExecStdin; used by fs/upload (`tee -- <dest>`). `input` is a Buffer or
+// string already buffered under the route-local upload cap.
+async function serverCmdStdin(server, argv, input, opts = {}) {
+  const a = serverCmdArgv(server, argv);
+  const promise = execFileAsync(a[0], a.slice(1), {
+    env: childEnvFor(server),
+    timeout: FS_CMD_TIMEOUT_MS,
+    maxBuffer: FS_CMD_MAX_BUFFER,
+    ...opts,
+  });
+  promise.child.stdin.end(input);
+  return promise;
+}
+
 // ---- Cached reachability probe (`ssh <host> true`) ----
 // The 3 s session poll and GET /api/servers must not fire a fresh ssh probe per
 // server per tick, so results are cached with a short TTL. "local" is always
@@ -645,6 +700,156 @@ function readBody(req) {
     req.on("end", () => resolve(data));
     req.on("error", reject);
   });
+}
+
+// ---- File Explorer (fs/*) helpers ----
+// Read cap for text preview (bytes). Binary/oversized files are downloaded.
+const FS_READ_CAP = 256 * 1024;
+// Max directory entries returned before `truncated:true`.
+const FS_LIST_CAP = 5000;
+// Route-local upload cap (bytes). This is SEPARATE from the 64 KB BODY_LIMIT —
+// only the fs/upload route bypasses BODY_LIMIT, and only up to this cap.
+const FS_UPLOAD_CAP = 8 * 1024 * 1024;
+// Hard stop for a hung download stream.
+const FS_DOWNLOAD_TIMEOUT_MS = 120_000;
+
+// A path arg must be a non-empty absolute string. This is the user's own shell
+// (full-fs access is the feature); we only require absolute for predictability.
+function isAbsPath(p) {
+  return typeof p === "string" && p.length > 0 && p.startsWith("/");
+}
+
+// Map a child-process error (execFile rejection) to an HTTP status by sniffing
+// stderr/message. permission -> 403, missing/not-a-dir -> 404, exists/not-empty
+// -> 409, everything else -> 502.
+function fsErrorStatus(err) {
+  const s = String((err && (err.stderr || err.message)) || "").toLowerCase();
+  if (/permission denied|operation not permitted/.test(s)) return 403;
+  if (/not empty|file exists|already exists|exists/.test(s)) return 409;
+  if (/no such file|not found|not a directory|cannot stat/.test(s)) return 404;
+  return 502;
+}
+
+// A short, sanitized single-line message from a child error's stderr.
+function fsErrorMessage(err, fallback) {
+  const raw = String((err && err.stderr) || "").trim();
+  if (!raw) return fallback;
+  const line = raw.split("\n")[0].trim();
+  return line || fallback;
+}
+
+// find's %y type char -> our FsEntry type.
+function fsTypeOf(y) {
+  if (y === "d") return "dir";
+  if (y === "f") return "file";
+  if (y === "l") return "symlink";
+  return "other";
+}
+
+// The current type of a single path via `find <path> -maxdepth 0 -printf '%y'`.
+// Returns the type char ('d'/'f'/'l'/...) or throws (mapped to 404/403/502).
+async function fsStatType(server, p) {
+  const { stdout } = await serverCmd(server, [
+    "find",
+    p,
+    "-maxdepth",
+    "0",
+    "-printf",
+    "%y",
+  ]);
+  return stdout.trim();
+}
+
+// Parse `git status --porcelain=v2 --branch` output into the footer summary.
+// v2 headers are `# branch.<key> <value>`; entry lines start with 1/2/u/?/!.
+// For 1 & 2 lines the XY field is two chars: X = index/staged, Y = worktree/
+// unstaged; '.' means unchanged. `changed` counts DISTINCT files (each entry
+// line once); the per-bucket counts may overlap (a file both staged & unstaged
+// increments both). Matches the classification used by shell git prompts.
+function parseGitPorcelain(out) {
+  let branch = null;
+  let detached = false;
+  let oid = null;
+  let ahead = 0;
+  let behind = 0;
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  let conflicted = 0;
+  let changed = 0;
+
+  for (const line of out.split("\n")) {
+    if (!line) continue;
+    if (line.startsWith("# ")) {
+      const rest = line.slice(2);
+      if (rest.startsWith("branch.oid ")) {
+        oid = rest.slice("branch.oid ".length).trim();
+      } else if (rest.startsWith("branch.head ")) {
+        const v = rest.slice("branch.head ".length).trim();
+        if (v === "(detached)") detached = true;
+        else branch = v;
+      } else if (rest.startsWith("branch.ab ")) {
+        const m = /\+(-?\d+)\s+-(-?\d+)/.exec(rest);
+        if (m) {
+          ahead = Number(m[1]) || 0;
+          behind = Number(m[2]) || 0;
+        }
+      }
+      continue;
+    }
+    const kind = line[0];
+    if (kind === "1" || kind === "2") {
+      const xy = line.slice(2, 4);
+      if (xy[0] && xy[0] !== ".") staged++;
+      if (xy[1] && xy[1] !== ".") unstaged++;
+      changed++;
+    } else if (kind === "u") {
+      conflicted++;
+      changed++;
+    } else if (kind === "?") {
+      untracked++;
+      changed++;
+    }
+    // '!' (ignored) lines aren't emitted without --ignored; skip if present.
+  }
+
+  // Detached HEAD: no branch name — surface the short oid instead.
+  if (detached && !branch && oid && oid !== "(initial)") {
+    branch = oid.slice(0, 7);
+  }
+
+  return {
+    isRepo: true,
+    branch,
+    detached,
+    ahead,
+    behind,
+    staged,
+    unstaged,
+    untracked,
+    conflicted,
+    changed,
+  };
+}
+
+// The exact guard chain every /api/sessions/:id/* route runs. Sends the 404 and
+// returns null on any miss; returns { server, tmuxName } on success.
+async function fsResolveSession(res, rawRef) {
+  const { serverId, tmuxName } = parseSessionRef(decodeURIComponent(rawRef));
+  if (!ID_RE.test(tmuxName)) {
+    sendJson(res, 404, { error: "session not found" });
+    return null;
+  }
+  const server = registry.get(serverId);
+  if (!server) {
+    sendJson(res, 404, { error: "session not found" });
+    return null;
+  }
+  if (!(await sessionExists(server, tmuxName))) {
+    sendJson(res, 404, { error: "session not found" });
+    return null;
+  }
+  return { server, tmuxName };
 }
 
 // ---- A2: Auth route handlers ----
@@ -1129,6 +1334,539 @@ async function handleApi(req, res, url) {
       console.error(`[api] scrollback failed: ${err.message}`);
       return sendJson(res, 500, { error: "failed to capture scrollback" });
     }
+  }
+
+  // GET /api/sessions/:id/git
+  // Read-only VCS summary for the session's current working directory: branch,
+  // upstream ahead/behind, and staged/unstaged/untracked/conflicted file counts.
+  // Scoped to the ACTIVE session only (the mini footer) — deliberately NOT part
+  // of GET /api/sessions, which would run `git status` for every session on
+  // every server every 3s. GET is exempt from the Origin check (like scrollback
+  // /screen). Runs one `git status --porcelain=v2 --branch` through the non-tmux
+  // exec seam (local or ssh, reusing the ControlMaster socket).
+  if (
+    req.method === "GET" &&
+    parts.length === 4 &&
+    parts[1] === "sessions" &&
+    parts[3] === "git"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server, tmuxName } = s;
+
+    // Resolve the session's cwd (same mechanism as fs/list).
+    let dir;
+    try {
+      const r = await serverExec(server, [
+        "display-message",
+        "-p",
+        "-t",
+        tmuxName,
+        "#{pane_current_path}",
+      ]);
+      dir = r.stdout.trim();
+    } catch (err) {
+      console.error(`[api] git cwd failed: ${err.message}`);
+      return sendJson(res, 502, { error: "failed to resolve session cwd" });
+    }
+    if (!isAbsPath(dir)) {
+      return sendJson(res, 502, { error: "failed to resolve session cwd" });
+    }
+
+    let out;
+    try {
+      // `dir` flows as a single argv token (never concatenated). 8s timeout so
+      // a slow/huge repo can't stall the 5s footer poll indefinitely.
+      const r = await serverCmd(
+        server,
+        ["git", "-C", dir, "status", "--porcelain=v2", "--branch"],
+        { timeout: 8000 },
+      );
+      out = r.stdout;
+    } catch (err) {
+      const stderr = String(err.stderr || err.message || "");
+      // Exit 128 with this message => the cwd isn't inside a git work tree.
+      // Render nothing (isRepo:false), not an error badge.
+      if (/not a git repository/i.test(stderr)) {
+        return sendJson(res, 200, { isRepo: false });
+      }
+      console.error(`[api] git status failed: ${err.message}`);
+      return sendJson(res, 502, { error: "failed to read git status" });
+    }
+
+    return sendJson(res, 200, parseGitPorcelain(out));
+  }
+
+  // =========================================================================
+  // File Explorer — /api/sessions/:id/fs/*
+  // Each route runs the standard guard chain (parseSessionRef -> ID_RE ->
+  // registry.get -> sessionExists, all 404) via fsResolveSession. GET routes
+  // are Origin-exempt (like scrollback/screen); POST/PATCH/DELETE inherit the
+  // Origin check applied at the top of handleApi. Every path flows into the
+  // exec seam as ONE argv element and every command terminates options with
+  // `--`; no path is ever concatenated into a command string.
+  // =========================================================================
+
+  // GET /api/sessions/:id/fs/list?path=<abs>&showHidden=0
+  if (
+    req.method === "GET" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "list"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server, tmuxName } = s;
+
+    // Omitted path -> resolve the session's current working directory.
+    let dir = url.searchParams.get("path");
+    if (dir === null || dir === "") {
+      try {
+        const r = await serverExec(server, [
+          "display-message",
+          "-p",
+          "-t",
+          tmuxName,
+          "#{pane_current_path}",
+        ]);
+        dir = r.stdout.trim();
+      } catch (err) {
+        console.error(`[api] fs/list cwd failed: ${err.message}`);
+        return sendJson(res, 502, { error: "failed to resolve session cwd" });
+      }
+    }
+    if (!isAbsPath(dir)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+    const showHidden = ["1", "true", "yes"].includes(
+      String(url.searchParams.get("showHidden") || "").toLowerCase(),
+    );
+
+    // Confirm it's a directory so listing a file doesn't look like an empty dir.
+    try {
+      const ty = await fsStatType(server, dir);
+      if (ty !== "d") {
+        return sendJson(res, 404, { error: "not a directory" });
+      }
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "cannot access path"),
+      });
+    }
+
+    const findArgs = ["find", dir, "-maxdepth", "1", "-mindepth", "1"];
+    if (!showHidden) findArgs.push("!", "-name", ".*");
+    // Fields tab-delimited; records NUL-delimited so spaces/tabs/newlines in
+    // names can't corrupt parsing. find interprets the \t and \0 escapes.
+    findArgs.push("-printf", "%y\\t%s\\t%T@\\t%m\\t%l\\t%f\\0");
+
+    let out;
+    try {
+      out = await serverCmd(server, findArgs);
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to list directory"),
+      });
+    }
+
+    const records = out.stdout.split("\0").filter((r) => r.length > 0);
+    let truncated = false;
+    let usable = records;
+    if (records.length > FS_LIST_CAP) {
+      usable = records.slice(0, FS_LIST_CAP);
+      truncated = true;
+    }
+    const entries = [];
+    for (const rec of usable) {
+      const f = rec.split("\t");
+      if (f.length < 6) continue;
+      const type = fsTypeOf(f[0]);
+      const mtimeSec = parseFloat(f[2]);
+      const mtime = Number.isFinite(mtimeSec)
+        ? Math.round(mtimeSec * 1000)
+        : null;
+      // %f is last; slice(5) reconstructs a name containing a literal tab.
+      const name = f.slice(5).join("\t");
+      const entry = {
+        name,
+        type,
+        size: Number(f[1]) || 0,
+        mtime,
+        mode: f[3],
+      };
+      if (type === "symlink" && f[4]) entry.symlinkTarget = f[4];
+      entries.push(entry);
+    }
+    const body = { path: dir, entries };
+    if (truncated) body.truncated = true;
+    return sendJson(res, 200, body);
+  }
+
+  // GET /api/sessions/:id/fs/read?path=<abs>  (text preview, capped)
+  if (
+    req.method === "GET" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "read"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+
+    // True size + type (reject directories with a clear error).
+    let size = 0;
+    try {
+      const st = await serverCmd(server, [
+        "find",
+        p,
+        "-maxdepth",
+        "0",
+        "-printf",
+        "%y\\t%s",
+      ]);
+      const [ty, sz] = st.stdout.split("\t");
+      if (ty === "d") {
+        return sendJson(res, 400, { error: "path is a directory" });
+      }
+      size = Number(sz) || 0;
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "cannot access path"),
+      });
+    }
+
+    // Read up to CAP+1 bytes so we can detect truncation exactly.
+    let buf;
+    try {
+      const r = await serverCmd(
+        server,
+        ["head", "-c", String(FS_READ_CAP + 1), "--", p],
+        { encoding: "buffer" },
+      );
+      buf = r.stdout;
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to read file"),
+      });
+    }
+
+    const binary = buf.includes(0);
+    const truncated = buf.length > FS_READ_CAP;
+    const bytes = truncated ? buf.subarray(0, FS_READ_CAP) : buf;
+    if (binary) {
+      // Contract: binary files return no content, so `truncated` is always
+      // false (there is no capped-text notion to signal). Matches the
+      // FsReadResponseSchema doc in shared-types.
+      return sendJson(res, 200, {
+        path: p,
+        size,
+        binary: true,
+        truncated: false,
+        encoding: null,
+      });
+    }
+    return sendJson(res, 200, {
+      path: p,
+      size,
+      binary: false,
+      truncated,
+      encoding: "utf-8",
+      content: bytes.toString("utf-8"),
+    });
+  }
+
+  // GET /api/sessions/:id/fs/download?path=<abs>  (binary-safe, streamed, no cap)
+  if (
+    req.method === "GET" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "download"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+    // Verify existence/type BEFORE streaming so we can still send 404/403/400.
+    try {
+      const ty = await fsStatType(server, p);
+      if (ty === "d") {
+        return sendJson(res, 400, { error: "path is a directory" });
+      }
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "cannot access path"),
+      });
+    }
+
+    const base = path.basename(p) || "download";
+    // ASCII fallback for Content-Disposition + RFC 5987 UTF-8 form.
+    const asciiName = base.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+    const argv = serverCmdArgv(server, ["cat", "--", p]);
+    const child = spawn(argv[0], argv.slice(1), { env: childEnvFor(server) });
+
+    const killTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, FS_DOWNLOAD_TIMEOUT_MS);
+
+    child.stderr.on("data", () => {});
+    child.on("error", (err) => {
+      clearTimeout(killTimer);
+      console.error(`[api] fs/download spawn error: ${err.message}`);
+      if (!res.headersSent) {
+        sendJson(res, 502, { error: "failed to stream file" });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    });
+    child.on("close", () => {
+      clearTimeout(killTimer);
+      if (!res.writableEnded) res.end();
+    });
+    res.on("close", () => {
+      clearTimeout(killTimer);
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    });
+
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-disposition": `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(base)}`,
+    });
+    child.stdout.pipe(res);
+    return true;
+  }
+
+  // POST /api/sessions/:id/fs/upload?path=<abs-dest>  (raw body -> tee, streamed)
+  if (
+    req.method === "POST" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "upload"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+
+    // ROUTE-LOCAL BODY_LIMIT BYPASS: read the raw body here (NOT via readBody,
+    // which enforces the global 64 KB BODY_LIMIT) up to the separate upload cap.
+    // The global BODY_LIMIT is untouched.
+    let buf;
+    try {
+      buf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        let total = 0;
+        let over = false;
+        const tooLarge = () => {
+          const e = new Error("upload too large");
+          e.code = "UPLOAD_TOO_LARGE";
+          return e;
+        };
+        req.on("data", (c) => {
+          total += c.length;
+          if (total > FS_UPLOAD_CAP) {
+            // Over the cap: drop what we buffered and keep DRAINING (discarding)
+            // rather than destroying the socket now. Destroying mid-upload makes
+            // a fetch/XHR client see ECONNRESET instead of the 413 — the client
+            // is still streaming, so the response never reaches it. Draining to
+            // `end` lets the client finish and read the 413. A generous hard
+            // ceiling still bounds a client that keeps pushing far past the cap.
+            if (!over) {
+              over = true;
+              chunks.length = 0;
+            }
+            if (total > FS_UPLOAD_CAP + 64 * 1024 * 1024) {
+              req.destroy();
+              reject(tooLarge());
+            }
+            return;
+          }
+          chunks.push(c);
+        });
+        req.on("end", () =>
+          over ? reject(tooLarge()) : resolve(Buffer.concat(chunks)),
+        );
+        req.on("error", reject);
+      });
+    } catch (err) {
+      if (err.code === "UPLOAD_TOO_LARGE") {
+        return sendJson(res, 413, {
+          error: `upload exceeds ${FS_UPLOAD_CAP} bytes`,
+        });
+      }
+      return sendJson(res, 400, { error: "failed to read upload body" });
+    }
+
+    try {
+      // tee writes the file portably; its echoed stdout is discarded.
+      await serverCmdStdin(server, ["tee", "--", p], buf);
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to write file"),
+      });
+    }
+    return sendJson(res, 200, { path: p, size: buf.length });
+  }
+
+  // POST /api/sessions/:id/fs/mkdir   body: { path }
+  if (
+    req.method === "POST" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "mkdir"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    if (!isAbsPath(body.path)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+    try {
+      // No -p: fail-if-exists so a re-create is a clean 409.
+      await serverCmd(server, ["mkdir", "--", body.path]);
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to create directory"),
+      });
+    }
+    return sendJson(res, 201, { path: body.path });
+  }
+
+  // PATCH /api/sessions/:id/fs/entry   body: { from, to, overwrite? }  (rename/move)
+  if (
+    req.method === "PATCH" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "entry"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    if (!isAbsPath(body.from) || !isAbsPath(body.to)) {
+      return sendJson(res, 400, {
+        error: "from and to must be absolute paths",
+      });
+    }
+    const overwrite = body.overwrite === true;
+    if (!overwrite) {
+      // No-clobber: 409 if the destination already exists.
+      let exists = false;
+      try {
+        await fsStatType(server, body.to);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      if (exists) {
+        return sendJson(res, 409, { error: "destination already exists" });
+      }
+    }
+    try {
+      await serverCmd(server, ["mv", "--", body.from, body.to]);
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to move"),
+      });
+    }
+    return sendJson(res, 200, { from: body.from, to: body.to });
+  }
+
+  // DELETE /api/sessions/:id/fs/entry?path=<abs>&recursive=0
+  if (
+    req.method === "DELETE" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "entry"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+    const recursive = ["1", "true", "yes"].includes(
+      String(url.searchParams.get("recursive") || "").toLowerCase(),
+    );
+    let ty;
+    try {
+      ty = await fsStatType(server, p);
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "cannot access path"),
+      });
+    }
+    try {
+      if (ty === "d") {
+        if (recursive) {
+          await serverCmd(server, ["rm", "-r", "--", p]);
+        } else {
+          // rmdir fails on a non-empty dir -> "Directory not empty" -> 409.
+          await serverCmd(server, ["rmdir", "--", p]);
+        }
+      } else {
+        await serverCmd(server, ["rm", "--", p]);
+      }
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to delete"),
+      });
+    }
+    return sendJson(res, 200, { path: p });
   }
 
   // GET /api/sessions/:id/screen
