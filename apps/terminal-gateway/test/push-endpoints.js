@@ -589,11 +589,103 @@ async function main() {
     );
   }
 
+  // =====================================================================
+  // SW suppression rule — extract the ACTUAL `hasVisibleClientForSession`
+  // function shipped in public/sw.js and exercise its branch logic. This is the
+  // real decision code (no duplication); it is a pure, self-contained function.
+  // =====================================================================
+  {
+    const swPath = path.join(ROOT, "..", "terminal", "public", "sw.js");
+    const swSrc = fs.readFileSync(swPath, "utf8");
+    const marker = "function hasVisibleClientForSession";
+    const startIdx = swSrc.indexOf(marker);
+    assert(startIdx >= 0, "sw.js missing hasVisibleClientForSession");
+    // Brace-match from the first `{` after the signature to the matching `}`.
+    const braceStart = swSrc.indexOf("{", startIdx);
+    let depth = 0;
+    let endIdx = -1;
+    for (let i = braceStart; i < swSrc.length; i++) {
+      if (swSrc[i] === "{") depth++;
+      else if (swSrc[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          endIdx = i + 1;
+          break;
+        }
+      }
+    }
+    assert(endIdx > 0, "could not brace-match hasVisibleClientForSession");
+    const fnSrc = swSrc.slice(startIdx, endIdx);
+    // eslint-disable-next-line no-eval
+    const hasVisibleClientForSession = eval(`(${fnSrc})`);
+
+    const SID = "local/web-abc";
+    const client = (over) => ({
+      visibilityState: "visible",
+      focused: true,
+      url: `https://app.example/?session=${encodeURIComponent(SID)}`,
+      ...over,
+    });
+
+    // focused + visible + matching session (URL is percent-encoded) -> suppress
+    assert(
+      hasVisibleClientForSession([client()], SID) === true,
+      "should suppress when a focused visible client shows the matching session",
+    );
+    // a different session on screen -> do NOT suppress
+    assert(
+      hasVisibleClientForSession(
+        [client({ url: "https://app.example/?session=local%2Fweb-OTHER" })],
+        SID,
+      ) === false,
+      "must not suppress when the focused client shows a different session",
+    );
+    // visible but NOT focused -> do NOT suppress
+    assert(
+      hasVisibleClientForSession([client({ focused: false })], SID) === false,
+      "must not suppress a visible-but-unfocused client",
+    );
+    // focused but hidden (backgrounded) -> do NOT suppress
+    assert(
+      hasVisibleClientForSession(
+        [client({ visibilityState: "hidden" })],
+        SID,
+      ) === false,
+      "must not suppress a hidden client",
+    );
+    // no clients / null sessionId -> do NOT suppress
+    assert(
+      hasVisibleClientForSession([], SID) === false,
+      "no clients -> notify",
+    );
+    assert(
+      hasVisibleClientForSession([client()], null) === false,
+      "null sessionId -> notify",
+    );
+    // one of several clients matches -> suppress
+    assert(
+      hasVisibleClientForSession(
+        [
+          client({ focused: false }),
+          client({ url: "https://app.example/?session=local%2Fweb-x" }),
+          client(),
+        ],
+        SID,
+      ) === true,
+      "should suppress when ANY focused visible client shows the session",
+    );
+    console.log(
+      "  ok: SW suppression rule — focused+visible+matching -> omit; " +
+        "unfocused/hidden/other-session/none -> showNotification",
+    );
+  }
+
   console.log(
     "\nPASS: push endpoints — vapid-key (configured + not-configured), " +
       "subscribe/unsubscribe (auth, CSRF, 400, dedup, idempotent, persisted), " +
       "graceful 503, live poll-loop fires on a real tmux job-finish transition, " +
-      "REAL push-service 201 crypto gate, sendToAll delivery, 410 pruning.",
+      "REAL push-service 201 crypto gate, sendToAll delivery, 410 pruning, " +
+      "SW visible-session suppression rule.",
   );
   await cleanup();
   process.exit(0);

@@ -19,7 +19,7 @@
 
 // Bump CACHE_VERSION whenever offline.html or this file changes, so the
 // activate handler evicts the previous cache.
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const CACHE_NAME = `sparklab-terminal-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -102,31 +102,69 @@ self.addEventListener("fetch", (event) => {
 // Web Push — "your job finished" notifications (see docs/PUSH-NOTIFICATIONS-PLAN.md).
 // ---------------------------------------------------------------------------
 
-// EVERY push MUST call showNotification: iOS and Chrome revoke push permission
-// for silent/data-only pushes. The gateway keeps the payload GENERIC (session
-// name + "finished", never command output) since it transits the push service.
+// Pure suppression rule (kept standalone + self-contained so it is unit-tested
+// directly in test/push-endpoints.js). Returns true when some same-origin window
+// client is BOTH visible AND focused AND already showing this session via its
+// `?session=<id>` URL param. `URL.searchParams.get` decodes the percent-encoded
+// qualified id (the frontend writes `?session=<serverId%2Fweb-...>`), so it
+// compares equal to the payload's raw `sessionId`.
+function hasVisibleClientForSession(clients, sessionId) {
+  if (!sessionId) return false;
+  return clients.some((client) => {
+    if (client.visibilityState !== "visible" || client.focused !== true) {
+      return false;
+    }
+    try {
+      return new URL(client.url).searchParams.get("session") === sessionId;
+    } catch {
+      return false;
+    }
+  });
+}
+
+// EVERY push normally MUST call showNotification: iOS and Chrome revoke push
+// permission for silent/data-only pushes. The ONE permitted exception — used
+// here — is that the Push API lets the user agent relax the userVisibleOnly
+// requirement WHILE a same-origin window is visible; Chromium does not spend the
+// silent-push budget (nor show its "site updated in background" fallback) in
+// that window. So we omit the OS notification ONLY when the user is already
+// looking at the exact session that finished — otherwise it is pure noise. In
+// every other case (tab closed, backgrounded, or a different session on screen)
+// we always showNotification, exactly as before. The payload stays GENERIC
+// (session name + "finished", never command output) since it transits the push
+// service. See docs/PUSH-NOTIFICATIONS-PLAN.md.
 self.addEventListener("push", (event) => {
-  let data = {};
-  try {
-    data = event.data ? event.data.json() : {};
-  } catch {
-    data = {};
-  }
-  const title = data.title || "Job finished";
-  const body = data.body || "A terminal command finished.";
-  // The relevant session id, used by notificationclick to deep-link.
-  const sessionId = typeof data.sessionId === "string" ? data.sessionId : null;
-  const options = {
-    body,
-    tag: data.tag || "sparklab-job",
-    icon: "/icons/icon-192.png",
-    badge: "/icons/icon-192.png",
-    data: { sessionId },
-  };
-  // MVP is notify-always. FUTURE refinement (documented, not implemented): check
-  // self.clients for a focused window already showing this sessionId and skip
-  // showNotification when it is visible.
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    (async () => {
+      let data = {};
+      try {
+        data = event.data ? event.data.json() : {};
+      } catch {
+        data = {};
+      }
+      const title = data.title || "Job finished";
+      const body = data.body || "A terminal command finished.";
+      // The relevant session id, used to suppress + by notificationclick.
+      const sessionId =
+        typeof data.sessionId === "string" ? data.sessionId : null;
+
+      const clients = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      // Suppress: the user is actively viewing this terminal. Permission-safe
+      // per the visible-client exception above.
+      if (hasVisibleClientForSession(clients, sessionId)) return;
+
+      await self.registration.showNotification(title, {
+        body,
+        tag: data.tag || "sparklab-job",
+        icon: "/icons/icon-192.png",
+        badge: "/icons/icon-192.png",
+        data: { sessionId },
+      });
+    })(),
+  );
 });
 
 // Focus an existing app window (deep-linking to the session via ?session=<id>

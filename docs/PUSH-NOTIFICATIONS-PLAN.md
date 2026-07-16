@@ -85,18 +85,44 @@ On a detected finish, `push.sendToAll({ title, body, sessionId, tag })` runs the
 
 ## 3. Service worker (`apps/terminal/public/sw.js`)
 
-- **`push`** — parses the JSON payload and **always** calls `showNotification`.
-  iOS and Chrome revoke push permission for silent/data-only pushes, so every
-  push is user-visible by contract. `CACHE_VERSION` bumped `v1`→`v2`.
+- **`push`** — parses the JSON payload and calls `showNotification`, **except**
+  in the one permission-safe suppression case below. `CACHE_VERSION` bumped
+  `v2`→`v3` with this change (`v1`→`v2` was the original push handler).
 - **`notificationclick`** — focuses an existing app window (navigating it to
   `?session=<id>` when possible) or opens one there. That URL param already
   drives active-session selection.
 - The existing `fetch`/`install`/`activate` handlers and the load-bearing
   `/api/*` + WebSocket bypass are **untouched**.
-- **MVP = notify-always** (any session's completion; payload names the session).
-  _Deferred refinement (documented, not implemented):_ the `push` handler could
-  inspect `self.clients` for a focused window already showing that session and
-  suppress the notification when it is visible.
+
+### Visible-session suppression (implemented 2026-07-16)
+
+**Rule.** Before showing, the `push` handler calls
+`self.clients.matchAll({ type: "window", includeUncontrolled: true })` and omits
+the OS notification **iff** some client is **`visibilityState === "visible"`
+AND `focused === true`** AND its URL's `?session=<id>` (percent-decoded by
+`URL.searchParams.get`, matching the frontend's qualified `serverId/web-…`
+value) **equals the payload's `sessionId`**. In every other case — tab closed,
+backgrounded, or a _different_ session on screen — it always `showNotification`,
+exactly as before. Extracted as the pure function `hasVisibleClientForSession`
+so it is unit-tested directly (see §8).
+
+**Why it is permission-safe (pure-omit, no toast).** The Push API spec lets the
+user agent _relax_ the `userVisibleOnly` requirement while a same-origin window
+is visible, and Chromium implements exactly this: it does **not** spend the
+silent-push budget nor show its "site updated in the background" fallback when a
+window client is visible. This is the canonical MDN/web.dev pattern ("the
+exception to always showing a notification is when the user already has your
+site open"). So omitting the notification here incurs **no** permission penalty.
+No in-app toast is shown: when the user is already looking at the exact terminal
+that finished, the completion is visible on screen — any extra alert (OS or
+in-app) would be redundant noise ("ไม่รบกวนผู้ใช้").
+
+**Evidence / honesty note.** Chrome's silent-push _enforcement_ cannot be
+exercised in this repo's automated environment (Playwright Chromium has no FCM
+API keys, so a real Chrome push can't be delivered to a focused tab here). The
+choice therefore rests on the documented W3C Push API relaxation + Chromium's
+implemented behavior, not an end-to-end Chrome-penalty test. The **decision
+logic** itself (which branch fires) is unit-tested against the shipped function.
 
 ---
 
@@ -190,13 +216,15 @@ service authenticates the gateway with.
 - **Pruning:** a local HTTPS mock returning `410` (reusing the real
   subscription's ECDH keys so encryption succeeds before the POST) is added and
   the gateway's send path prunes it — real `410`, real prune.
+- **SW suppression rule:** the shipped `hasVisibleClientForSession` function is
+  extracted from `public/sw.js` (brace-matched + `eval`'d — the real code, not a
+  copy) and its branches are asserted: focused+visible+matching-session → omit;
+  unfocused / hidden / different-session / no-client / null-id → notify.
 
 ---
 
 ## 9. Deliberately out of scope (post-v1)
 
-- **Per-client suppression** when the target session is already visible
-  (documented in §3).
 - **Per-session opt-in / muting** — MVP notifies for all sessions.
 - **Notification actions** (e.g. buttons to re-run, dismiss-all).
 - **Notifying on job _start_ / long-running thresholds / exit-code in payload**
