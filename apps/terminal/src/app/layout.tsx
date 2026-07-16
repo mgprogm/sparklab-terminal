@@ -5,8 +5,24 @@ import { Providers } from "@/components/providers";
 import "@/styles/globals.css";
 
 export const metadata: Metadata = {
+  // metadataBase silences Next's "resolving metadata without a base URL"
+  // warning and anchors the manifest/icon absolute URLs. Overridable per
+  // deployment via NEXT_PUBLIC_SITE_URL.
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000",
+  ),
   title: "Sparklab Terminal",
   description: "Web terminal with persistent tmux sessions",
+  applicationName: "Sparklab Terminal",
+  // PWA: iOS home-screen web-app metadata. `capable` runs it full-screen when
+  // launched from the home screen; the translucent status bar sits over the
+  // warm canvas. themeColor / viewport-fit are handled by `viewport` below —
+  // not duplicated here. See docs/PWA-PLAN.md.
+  appleWebApp: {
+    capable: true,
+    title: "Terminal",
+    statusBarStyle: "black-translucent",
+  },
 };
 
 // Mobile UX spec §2.1/§5: viewport-fit=cover makes env(safe-area-inset-*)

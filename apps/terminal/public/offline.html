@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#2b2622" />
+    <title>Offline — Sparklab Terminal</title>
+    <!--
+      Standalone offline fallback served by the service worker for navigations
+      when the network is down. It is fully self-contained (no external fonts,
+      styles, or images) so it renders with no connectivity. Colors are inlined
+      #2b2622 / #f7f5f0 by necessity — a static shell has no Tailwind tokens
+      available (the design-token rule applies to React components). See
+      docs/PWA-PLAN.md.
+    -->
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #2b2622;
+        color: #f7f5f0;
+        font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        text-align: center;
+        -webkit-font-smoothing: antialiased;
+      }
+      main {
+        max-width: 22rem;
+      }
+      .glyph {
+        width: 48px;
+        height: 48px;
+        margin: 0 auto 24px;
+        display: block;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+        font-weight: 500;
+        letter-spacing: -0.2px;
+      }
+      p {
+        margin: 0 0 20px;
+        font-size: 14px;
+        line-height: 20px;
+        color: #c9c0ad;
+      }
+      button {
+        font: inherit;
+        font-size: 14px;
+        font-weight: 500;
+        color: #2b2622;
+        background: #f7f5f0;
+        border: 0;
+        border-radius: 3px;
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <svg class="glyph" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="7" fill="#383330" />
+        <path
+          d="M8 11l5 5-5 5"
+          fill="none"
+          stroke="#f7f5f0"
+          stroke-width="2.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+        <line x1="15.5" y1="22" x2="23" y2="22" stroke="#f7f5f0" stroke-width="2.5" stroke-linecap="round" />
+      </svg>
+      <h1>You're offline</h1>
+      <p>
+        Sparklab Terminal needs a connection to reach your sessions. Your tmux
+        sessions keep running on the server — they'll be right where you left
+        them once you're back online.
+      </p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

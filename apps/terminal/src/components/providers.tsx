@@ -9,6 +9,8 @@ import {
 } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { InstallPrompt } from "@/components/install-prompt";
+import { ServiceWorkerRegister } from "@/components/service-worker-register";
 import { UnauthorizedError } from "@/features/auth/api";
 import { authKeys } from "@/features/auth/hooks/use-auth-status";
 
@@ -45,7 +47,13 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider>{children}</TooltipProvider>
+      <TooltipProvider>
+        {children}
+        {/* PWA: register the service worker (prod-only) and offer an
+            unobtrusive install affordance. Both render nothing until active. */}
+        <ServiceWorkerRegister />
+        <InstallPrompt />
+      </TooltipProvider>
     </QueryClientProvider>
   );
 }
