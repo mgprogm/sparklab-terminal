@@ -204,6 +204,12 @@ See `deploy/Caddyfile` for the full example. Key points:
 - Everything else → `reverse_proxy 127.0.0.1:3000` (Next.js app)
 - Caddy issues and renews TLS certificates automatically for named hosts.
 
+**Local analogue:** `prod-proxy.cjs` (repo root) applies the identical path-routing
+rules as a zero-dependency Node HTTP proxy on port 3110, serving as the local
+production stand-in for Caddy — with the same single-origin rationale (keeping the
+`gw_session` cookie first-party for both the gateway and the agent). See
+[`LOCAL-PROD.md`](./LOCAL-PROD.md) for the local production setup.
+
 ## "What makes this safe now" checklist
 
 | Threat                                 | Mitigation                                                                                                                                                                                                                         |
