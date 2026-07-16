@@ -1,8 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../hooks/use-login", () => ({ useLogin: vi.fn() }));
 
@@ -62,6 +68,47 @@ describe("LoginScreen", () => {
         password: "secret-password",
       }),
     );
+  });
+
+  describe("mobile press-and-hold reveal", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    const holdTarget = () => screen.getByLabelText(/press and hold/i);
+
+    it("reveals the form after a full 3-second hold", () => {
+      render(<LoginScreen />, { wrapper: wrap() });
+      expect(screen.queryByRole("button", { name: /sign in/i })).toBeNull();
+
+      const target = holdTarget();
+      fireEvent.pointerDown(target, {
+        pointerId: 1,
+        clientX: 100,
+        clientY: 100,
+        pointerType: "touch",
+      });
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+
+      expect(screen.getByRole("button", { name: /sign in/i })).toBeTruthy();
+    });
+
+    it("stays hidden when the hold is released early", () => {
+      render(<LoginScreen />, { wrapper: wrap() });
+      const target = holdTarget();
+
+      fireEvent.pointerDown(target, { pointerId: 1, pointerType: "touch" });
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      fireEvent.pointerUp(target, { pointerId: 1, pointerType: "touch" });
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+
+      expect(screen.queryByRole("button", { name: /sign in/i })).toBeNull();
+    });
   });
 
   it("shows invalid credentials error on 401", () => {

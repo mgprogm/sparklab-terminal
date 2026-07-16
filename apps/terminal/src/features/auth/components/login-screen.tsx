@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 
 import { RateLimitError, UnauthorizedError } from "../api";
+import { HoldToReveal } from "./hold-to-reveal";
 import { LoginBackground } from "./login-background";
 import { useLogin } from "../hooks/use-login";
 
@@ -18,9 +19,11 @@ export function LoginScreen() {
   const form = useForm<LoginBody>({ resolver: zodResolver(LoginBodySchema) });
   const error = loginMutation.error;
   const isRateLimited = error instanceof RateLimitError;
-  // Stealth mode: the page shows only the animated background until the
-  // user presses Ctrl+Space, which toggles the login form.
+  // Stealth mode: the page shows only the animated background until the user
+  // reveals the login form. Desktop toggles it with Ctrl+Space; mobile (coarse
+  // pointer) reveals it via a 3-second press-and-hold (see HoldToReveal).
   const [revealed, setRevealed] = useState(false);
+  const reveal = () => setRevealed(true);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -44,6 +47,10 @@ export function LoginScreen() {
   return (
     <main className="relative flex min-h-dvh flex-col items-center justify-center overflow-hidden bg-[#2b2622] px-4 text-[#f7f5f0]">
       <LoginBackground />
+      {/* Mobile-only press-and-hold reveal (touch counterpart to Ctrl+Space).
+          Rendered only while hidden; CSS-gated to coarse pointers so desktop is
+          unaffected. */}
+      {!revealed && <HoldToReveal onReveal={reveal} />}
       <div
         aria-hidden={!revealed}
         className={`relative flex w-full flex-col items-center transition-all duration-500 ${
