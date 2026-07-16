@@ -82,6 +82,26 @@ Executing a command is therefore always two explicit calls: `{text}` then `{keys
 
 Kills the tmux session (the **only** place `tmux kill-session` is ever run). No body either way.
 
+### Web Push endpoints: `/api/push/*`
+
+Backs the "your job finished" notifications (full design in `docs/PUSH-NOTIFICATIONS-PLAN.md`). All three require auth like any `/api/*` route; the two `POST`s are state-changing and get the Origin/CSRF check automatically, the `GET` is origin-exempt (matching scrollback/git). Schemas: `PushSubscribeRequest`, `PushUnsubscribeRequest`, `VapidPublicKeyResponse`, `PushSubscribeResponse` in `packages/shared-types/src/terminal.ts`.
+
+When VAPID keys are absent the feature is **not configured**: the gateway still boots and behaves identically, `GET vapid-public-key` reports `configured:false`, and `subscribe` returns `503`.
+
+#### `GET /api/push/vapid-public-key` → 200
+
+`{ "configured": true, "publicKey": "<base64url>" }` when VAPID is configured, else `{ "configured": false }` (no key). The client needs `publicKey` as the `applicationServerKey` for `pushManager.subscribe`.
+
+#### `POST /api/push/subscribe` → 201 / 503
+
+Body is a browser `PushSubscription.toJSON()` (`{ endpoint, keys: { p256dh, auth } }`). Stored in the gitignored sidecar `push-subscriptions.json` (atomic write, deduped by `endpoint` — re-subscribe replaces). Returns `{ ok: true, count }`. `503` when push is not configured; `400` on a malformed subscription. The first stored subscription starts the poll loop.
+
+#### `POST /api/push/unsubscribe` → 200
+
+Body `{ endpoint }`. Removes that subscription (idempotent — `200` even if absent). Returns `{ ok: true, count }`. Removing the last subscription stops the poll loop.
+
+**Poll loop + SW push contract.** While ≥1 subscription exists AND VAPID is configured, the gateway polls `listSessions()` every ~4s. On a session's `pane_current_command` transitioning from a real non-shell command to a shell (reachable rows only; `""` is treated as unknown, never a trigger), it sends a Web Push to every stored subscription; a `404`/`410` from the push service prunes that endpoint. The first poll after any (re)start only establishes a baseline and notifies nothing. The payload is **generic** — `{ title, body, sessionId, tag }`, session name only, never command output. The service worker's `push` handler **always** calls `showNotification` (silent pushes get permission revoked on iOS/Chrome); `notificationclick` focuses/opens the app at `?session=<id>`.
+
 ### File-explorer endpoints: `GET|POST|PATCH|DELETE /api/sessions/:id/fs/*`
 
 Six routes that browse and manage the filesystem of whichever server the session lives on (local or a registered remote over SSH). Every route runs the standard `parseSessionRef` + `ID_RE` + `registry.get` + `sessionExists` guard — unknown or malformed session id → `404` on all of them. The underlying commands go through the non-tmux exec seam `serverCmdArgv`/`serverCmd`/`serverCmdStdin` (siblings of `serverExecArgv`, added alongside these routes). Schemas for all request/response shapes live in `packages/shared-types/src/terminal.ts` (`FsEntry`, `FsListResponse`, `FsReadResponse`, `FsMkdirRequest/Response`, `FsRenameRequest/Response`, `FsDeleteResponse`, `FsUploadResponse`).

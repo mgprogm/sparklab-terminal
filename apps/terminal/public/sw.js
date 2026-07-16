@@ -19,7 +19,7 @@
 
 // Bump CACHE_VERSION whenever offline.html or this file changes, so the
 // activate handler evicts the previous cache.
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `sparklab-terminal-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -96,4 +96,60 @@ self.addEventListener("fetch", (event) => {
   }
 
   // Anything else: passthrough (no respondWith).
+});
+
+// ---------------------------------------------------------------------------
+// Web Push — "your job finished" notifications (see docs/PUSH-NOTIFICATIONS-PLAN.md).
+// ---------------------------------------------------------------------------
+
+// EVERY push MUST call showNotification: iOS and Chrome revoke push permission
+// for silent/data-only pushes. The gateway keeps the payload GENERIC (session
+// name + "finished", never command output) since it transits the push service.
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = {};
+  }
+  const title = data.title || "Job finished";
+  const body = data.body || "A terminal command finished.";
+  // The relevant session id, used by notificationclick to deep-link.
+  const sessionId = typeof data.sessionId === "string" ? data.sessionId : null;
+  const options = {
+    body,
+    tag: data.tag || "sparklab-job",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    data: { sessionId },
+  };
+  // MVP is notify-always. FUTURE refinement (documented, not implemented): check
+  // self.clients for a focused window already showing this sessionId and skip
+  // showNotification when it is visible.
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Focus an existing app window (deep-linking to the session via ?session=<id>
+// — that URL param already drives active-session selection) or open one.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const sessionId =
+    event.notification.data && event.notification.data.sessionId;
+  const target = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/";
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => {
+        for (const client of clients) {
+          if ("focus" in client) {
+            // Reuse an open app window; steer it to the session if we can.
+            if (sessionId && "navigate" in client) {
+              return client.focus().then(() => client.navigate(target));
+            }
+            return client.focus();
+          }
+        }
+        return self.clients.openWindow ? self.clients.openWindow(target) : null;
+      }),
+  );
 });

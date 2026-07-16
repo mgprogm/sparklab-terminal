@@ -15,6 +15,7 @@ export type TerminalFontSize = number | "auto";
 /** The selectable sections of the settings dialog. Order = tab order. */
 export const SETTINGS_SECTIONS = [
   "appearance",
+  "notifications",
   "agent",
   "account",
   "connection",

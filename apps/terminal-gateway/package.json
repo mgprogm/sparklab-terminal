@@ -12,12 +12,15 @@
     "test:agent-endpoints": "node test/agent-endpoints.js",
     "test:fs": "node test/fs-endpoints.js",
     "test:git": "node test/git-endpoints.js",
+    "test:push": "node test/push-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
+    "generate-vapid": "node scripts/generate-vapid.js",
     "dev": "node --env-file-if-exists=.env --watch src/server.js",
     "start": "node --env-file-if-exists=.env src/server.js"
   },
   "dependencies": {
     "node-pty": "^1.0.0",
+    "web-push": "^3.6.7",
     "ws": "^8.18.0"
   }
 }

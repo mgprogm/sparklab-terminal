@@ -22,6 +22,10 @@ data/
 servers.json
 apps/terminal-gateway/servers.json
 
+# Gateway push subscription store (device endpoints + keys; never checked in)
+push-subscriptions.json
+apps/terminal-gateway/push-subscriptions.json
+
 # Playwright
 test-results/
 playwright-report/

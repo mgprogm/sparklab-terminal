@@ -19,6 +19,17 @@ export {
   type ListSessionsResponse,
   type ScrollbackResponse,
   type GitStatusResponse,
+  // REST: Web Push /api/push/*
+  PushSubscriptionSchema,
+  PushSubscribeRequestSchema,
+  PushUnsubscribeRequestSchema,
+  VapidPublicKeyResponseSchema,
+  PushSubscribeResponseSchema,
+  type PushSubscription,
+  type PushSubscribeRequest,
+  type PushUnsubscribeRequest,
+  type VapidPublicKeyResponse,
+  type PushSubscribeResponse,
   // REST: File Explorer /api/sessions/:id/fs/*
   FsEntryTypeSchema,
   FsEntrySchema,

@@ -36,6 +36,8 @@ import {
 } from "@sparklab/ui/components/ui/dialog";
 import { cn } from "@sparklab/ui/lib/utils";
 import {
+  Bell,
+  BellOff,
   Bot,
   CircleUser,
   Loader2,
@@ -50,6 +52,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { usePushNotifications } from "../hooks/use-push-notifications";
 import { useServers, useDeleteServer } from "../hooks/use-servers";
 import {
   isServerUnreachable,
@@ -91,6 +94,7 @@ const TABS: {
   icon: ComponentType<{ className?: string }>;
 }[] = [
   { key: "appearance", label: "Appearance", icon: Type },
+  { key: "notifications", label: "Notify", icon: Bell },
   { key: "agent", label: "Agent", icon: Bot },
   { key: "account", label: "Account", icon: CircleUser },
   { key: "connection", label: "Connection", icon: Plug },
@@ -273,6 +277,56 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
   );
 }
 
+/** Notifications settings section — enable/disable "job finished" push. Its own
+ *  component so the push probe (fetch + service-worker checks) only runs when
+ *  this tab is open. */
+function NotificationsSection() {
+  const push = usePushNotifications();
+  const busy = push.busy || !push.ready;
+
+  return (
+    <Section>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          {push.subscribed ? (
+            <Bell className="text-chart-1 size-4 shrink-0" />
+          ) : (
+            <BellOff className="text-muted-foreground size-4 shrink-0" />
+          )}
+          <span className="text-foreground text-sm">Job-finished alerts</span>
+        </div>
+        <Button
+          variant={push.subscribed ? "outline" : "default"}
+          size="sm"
+          disabled={busy || (!push.available && !push.subscribed)}
+          onClick={() => {
+            if (push.subscribed) void push.disable();
+            else void push.enable();
+          }}
+          className="shrink-0"
+        >
+          {busy && <Loader2 className="size-3.5 animate-spin" />}
+          {push.subscribed ? "On" : "Off"}
+        </Button>
+      </div>
+
+      <p className="text-muted-foreground mt-2.5 text-xs leading-relaxed">
+        Get a push notification when a command finishes in any session — even
+        with the tab closed. Alerts name the session only, never its output.
+      </p>
+
+      {!push.available && push.disabledReason && (
+        <p className="text-muted-foreground mt-2 text-xs">
+          {push.disabledReason}
+        </p>
+      )}
+      {push.error && (
+        <p className="text-destructive mt-2 text-xs">{push.error}</p>
+      )}
+    </Section>
+  );
+}
+
 /** A read-only "label: value" row used by the informational sections. */
 function InfoRow({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -392,6 +446,9 @@ export function SettingsDialog({
               </p>
             </Section>
           )}
+
+          {/* Notifications — enable/disable "job finished" push. */}
+          {section === "notifications" && <NotificationsSection />}
 
           {/* Agent chat — informational only. */}
           {section === "agent" && (

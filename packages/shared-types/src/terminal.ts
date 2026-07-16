@@ -307,6 +307,77 @@ export const GitStatusResponseSchema = z.object({
 export type GitStatusResponse = z.infer<typeof GitStatusResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// REST: Web Push notifications  (/api/push/*)
+// ---------------------------------------------------------------------------
+//
+// "Your job finished" push notifications. The gateway owns push end to end
+// (it already runs `tmux list-sessions`, the signal source; it is the single
+// auth/session enforcement point; it owns all sidecar-JSON persistence). It
+// polls session `pane_current_command` while ≥1 subscription exists and, on a
+// non-shell→shell transition, sends a Web Push (RFC 8291, via the `web-push`
+// lib) to every stored subscription. See docs/PUSH-NOTIFICATIONS-PLAN.md.
+//
+// The gateway is dependency-free JS and CANNOT import this module; the JSON it
+// emits is kept in lockstep with these schemas by hand.
+
+/** A browser PushSubscription serialized via `PushSubscription.toJSON()`. The
+ *  `endpoint` is a plain URL for whatever push service the browser uses (FCM
+ *  for Chrome, Mozilla autopush for Firefox, Windows/Apple for others) — kept
+ *  host-agnostic on purpose. `keys` carries the ECDH public key (`p256dh`) and
+ *  the auth secret used for aes128gcm payload encryption. */
+export const PushSubscriptionSchema = z.object({
+  /** Push service delivery URL. Opaque; never assume a host. */
+  endpoint: z.string().url(),
+  /** Optional expiry (epoch ms) the browser may report; usually null. */
+  expirationTime: z.number().nullable().optional(),
+  /** Encryption material from the browser subscription. */
+  keys: z.object({
+    /** Base64url-encoded P-256 ECDH public key. */
+    p256dh: z.string().min(1),
+    /** Base64url-encoded auth secret (16 bytes). */
+    auth: z.string().min(1),
+  }),
+});
+export type PushSubscription = z.infer<typeof PushSubscriptionSchema>;
+
+/** Request body for POST /api/push/subscribe — the browser subscription. */
+export const PushSubscribeRequestSchema = PushSubscriptionSchema;
+export type PushSubscribeRequest = z.infer<typeof PushSubscribeRequestSchema>;
+
+/** Request body for POST /api/push/unsubscribe — identify the subscription to
+ *  drop by its endpoint URL (the store's dedup key). */
+export const PushUnsubscribeRequestSchema = z.object({
+  endpoint: z.string().url(),
+});
+export type PushUnsubscribeRequest = z.infer<
+  typeof PushUnsubscribeRequestSchema
+>;
+
+/** Response body for GET /api/push/vapid-public-key. When push isn't
+ *  configured server-side (no VAPID keys), `configured` is false and
+ *  `publicKey` is absent — the client shows the toggle disabled rather than
+ *  crashing. */
+export const VapidPublicKeyResponseSchema = z.object({
+  /** Whether the gateway has valid VAPID keys and can send push at all. */
+  configured: z.boolean(),
+  /** Base64url VAPID application server public key (present iff configured). */
+  publicKey: z.string().optional(),
+});
+export type VapidPublicKeyResponse = z.infer<
+  typeof VapidPublicKeyResponseSchema
+>;
+
+/** Response body for POST /api/push/subscribe and /unsubscribe (200/201). */
+export const PushSubscribeResponseSchema = z.object({
+  /** True once the subscription is stored (subscribe) or after removal
+   *  (unsubscribe — idempotent, true even if it wasn't present). */
+  ok: z.boolean(),
+  /** Current count of stored subscriptions (all devices). */
+  count: z.number().int(),
+});
+export type PushSubscribeResponse = z.infer<typeof PushSubscribeResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // File Explorer: /api/sessions/:id/fs/*
 // ---------------------------------------------------------------------------
 //

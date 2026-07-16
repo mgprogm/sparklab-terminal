@@ -232,8 +232,10 @@ An unobtrusive, dismissible "Install app" pill:
   the gateway (live sessions), so offline shows the fallback rather than a dead
   shell. Precaching hashed JS/CSS is handled opportunistically (cache-first on
   `/_next/static`), not via a generated precache manifest.
-- **Background sync / push notifications** (e.g. "your job finished"). A natural
-  future fit given persistent jobs, but requires gateway + VAPID work.
+- ~~**Background sync / push notifications** (e.g. "your job finished").~~
+  **Push notifications shipped** (2026-07-16) — see `docs/PUSH-NOTIFICATIONS-PLAN.md`.
+  (Background Sync was considered and correctly rejected there; Web Push is the
+  mechanism.)
 - **A richer install education flow / A2HS coaching on iOS** (Share-sheet
   instructions). The affordance is Chromium-only by design.
 - **Screenshots / `shortcuts` in the manifest** (richer install UI on some

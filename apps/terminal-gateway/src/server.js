@@ -19,6 +19,7 @@ import { WebSocketServer } from "ws";
 import { spawn as ptySpawn } from "node-pty";
 import metadata from "./metadata.js";
 import registry from "./registry.js";
+import push from "./push.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -675,6 +676,115 @@ async function listSessions() {
   return sessions;
 }
 
+// ---------------------------------------------------------------------------
+// Push "job finished" poll loop
+// ---------------------------------------------------------------------------
+//
+// The ONLY new always-on architectural change, and it is fully inert unless
+// there is ≥1 push subscription AND VAPID is configured: the loop is started
+// when the first subscription arrives and stopped when the last leaves, so
+// zero subscriptions => zero cost, zero behavior change (identical single-
+// server / remote-SSH profile to before this feature).
+//
+// Signal: a session's `pane_current_command` (already returned per-session by
+// listSessions()) transitioning from a real non-shell command to a shell. NO
+// screen-diffing — list-sessions gives currentCommand cheaply in one call.
+//
+// Baseline: the FIRST tick after a (re)start records every session's current
+// command and notifies nothing — otherwise every already-running job would
+// "finish" on gateway restart and spam. Per-session last-known state is
+// in-memory/transient (jobs survive; notifications are best-effort).
+
+// Login shells arrive as "bash"/"zsh" or, for a login shell, "-bash"/"-zsh".
+// Mirrors the SHELLS set the agent-service uses (apps/agent-service/src/tools.ts).
+const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
+const PUSH_POLL_INTERVAL_MS = 4000;
+
+let pushPollTimer = null;
+let pushLastCommand = new Map(); // qid -> last-known currentCommand (reachable rows only)
+let pushBaselinePending = true;
+
+function isShellCommand(cmd) {
+  if (!cmd) return false; // "" is UNKNOWN, never a shell, never a trigger
+  const base = cmd.startsWith("-") ? cmd.slice(1) : cmd; // login-shell "-bash"
+  return SHELLS.has(base);
+}
+
+async function pushPollTick() {
+  if (!push.isConfigured() || push.count() === 0) return;
+  let sessions;
+  try {
+    sessions = await listSessions();
+  } catch (err) {
+    console.warn(`[push] poll list failed: ${err.message}`);
+    return;
+  }
+  const finished = [];
+  const seen = new Set();
+  for (const s of sessions) {
+    // Only reachable rows carry a real currentCommand. Unreachable rows return
+    // a fabricated "" — letting that overwrite state would fire spurious pushes
+    // on flap (job -> "" -> job). Skip them entirely => a flap is a no-op.
+    if (!s.reachable) continue;
+    seen.add(s.id);
+    const prev = pushLastCommand.get(s.id);
+    const curr = s.currentCommand || "";
+    // Fire only when a session KNOWN at/after baseline goes from a genuine
+    // non-shell command to a shell. New sessions (no prior entry) just seed.
+    if (!pushBaselinePending && prev !== undefined) {
+      if (prev && !isShellCommand(prev) && isShellCommand(curr)) {
+        finished.push(s);
+      }
+    }
+    pushLastCommand.set(s.id, curr);
+  }
+  // Forget sessions that vanished so a re-created id re-baselines cleanly.
+  for (const id of [...pushLastCommand.keys()]) {
+    if (!seen.has(id)) pushLastCommand.delete(id);
+  }
+  pushBaselinePending = false;
+
+  for (const s of finished) {
+    // Payload transits FCM/Apple/Mozilla push services — keep it GENERIC:
+    // session name + "finished", NEVER command output.
+    const payload = {
+      title: "Job finished",
+      body: `${s.name}: the running command finished.`,
+      sessionId: s.id,
+      tag: `job-${s.id}`,
+    };
+    console.log(
+      `[push] job finished in "${s.id}" -> notifying ${push.count()} subscription(s)`,
+    );
+    void push
+      .sendToAll(payload)
+      .catch((err) => console.warn(`[push] sendToAll failed: ${err.message}`));
+  }
+}
+
+// Start the loop (idempotent). Resets baseline state so stopped->running always
+// re-baselines; a 2nd subscription while already running is a no-op (no
+// re-baseline). Called on subscribe and at boot when subscriptions persist.
+function startPushLoop() {
+  if (pushPollTimer) return;
+  if (!push.isConfigured() || push.count() === 0) return;
+  pushLastCommand = new Map();
+  pushBaselinePending = true;
+  pushPollTimer = setInterval(() => void pushPollTick(), PUSH_POLL_INTERVAL_MS);
+  if (pushPollTimer.unref) pushPollTimer.unref();
+  console.log("[push] job-finished poll loop started");
+}
+
+// Stop the loop and clear state so a future start re-baselines from scratch.
+function stopPushLoop() {
+  if (!pushPollTimer) return;
+  clearInterval(pushPollTimer);
+  pushPollTimer = null;
+  pushLastCommand = new Map();
+  pushBaselinePending = true;
+  console.log("[push] job-finished poll loop stopped");
+}
+
 // ---- JSON helpers ----
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -1075,6 +1185,109 @@ async function handleApi(req, res, url) {
   // A2: All other /api/* routes require a valid session (or open mode).
   if (!isAuthenticated(req)) {
     return sendJson(res, 401, { error: "unauthorized" });
+  }
+
+  // ---- Web Push: /api/push/* ----
+
+  // GET /api/push/vapid-public-key — the client needs this to subscribe. When
+  // push is not configured server-side (no VAPID keys), `configured:false` and
+  // no key: the client disables the toggle rather than crashing. GET => exempt
+  // from the Origin check (like scrollback/screen/git).
+  if (
+    req.method === "GET" &&
+    parts.length === 3 &&
+    parts[1] === "push" &&
+    parts[2] === "vapid-public-key"
+  ) {
+    const publicKey = push.getPublicKey();
+    return sendJson(res, 200, {
+      configured: push.isConfigured(),
+      ...(publicKey ? { publicKey } : {}),
+    });
+  }
+
+  // POST /api/push/subscribe — store a browser PushSubscription. State-changing
+  // => the Origin/CSRF check above already fired for this method.
+  if (
+    req.method === "POST" &&
+    parts.length === 3 &&
+    parts[1] === "push" &&
+    parts[2] === "subscribe"
+  ) {
+    if (!push.isConfigured()) {
+      return sendJson(res, 503, { error: "push not configured" });
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    // Hand-validate the subscription shape (gateway is dependency-free; mirrors
+    // PushSubscribeRequestSchema in @sparklab/shared-types).
+    if (
+      !body ||
+      typeof body.endpoint !== "string" ||
+      !/^https?:\/\//.test(body.endpoint) ||
+      !body.keys ||
+      typeof body.keys.p256dh !== "string" ||
+      !body.keys.p256dh ||
+      typeof body.keys.auth !== "string" ||
+      !body.keys.auth
+    ) {
+      return sendJson(res, 400, { error: "invalid push subscription" });
+    }
+    let cnt;
+    try {
+      cnt = push.add({
+        endpoint: body.endpoint,
+        expirationTime: body.expirationTime ?? null,
+        keys: { p256dh: body.keys.p256dh, auth: body.keys.auth },
+      });
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+    // Starting the loop is idempotent; the first subscription boots it.
+    startPushLoop();
+    return sendJson(res, 201, { ok: true, count: cnt });
+  }
+
+  // POST /api/push/unsubscribe — drop a subscription by endpoint. Idempotent.
+  if (
+    req.method === "POST" &&
+    parts.length === 3 &&
+    parts[1] === "push" &&
+    parts[2] === "unsubscribe"
+  ) {
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    if (!body || typeof body.endpoint !== "string" || !body.endpoint) {
+      return sendJson(res, 400, { error: "endpoint is required" });
+    }
+    push.remove(body.endpoint);
+    // Last subscription gone => stop the loop (back to zero cost).
+    if (push.count() === 0) stopPushLoop();
+    return sendJson(res, 200, { ok: true, count: push.count() });
   }
 
   // ---- Multi-server: /api/servers ----
@@ -2436,4 +2649,12 @@ wss.on("connection", async (ws, req) => {
 // A3: Bind to HOST (default 127.0.0.1).
 server.listen(PORT, HOST, () => {
   console.log(`web-terminal gateway listening on http://${HOST}:${PORT}`);
+  // If subscriptions persisted across a restart AND VAPID is configured, boot
+  // the poll loop now (its first tick re-baselines and notifies nothing).
+  if (push.isConfigured() && push.count() > 0) {
+    startPushLoop();
+    console.log(
+      `[push] ${push.count()} persisted subscription(s); loop active.`,
+    );
+  }
 });
