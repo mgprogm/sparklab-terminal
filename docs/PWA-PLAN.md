@@ -236,13 +236,74 @@ An unobtrusive, dismissible "Install app" pill:
   **Push notifications shipped** (2026-07-16) — see `docs/PUSH-NOTIFICATIONS-PLAN.md`.
   (Background Sync was considered and correctly rejected there; Web Push is the
   mechanism.)
-- **A richer install education flow / A2HS coaching on iOS** (Share-sheet
-  instructions). The affordance is Chromium-only by design.
-- **Screenshots / `shortcuts` in the manifest** (richer install UI on some
-  platforms).
-- **Periodic SW update prompts** ("a new version is available — reload"). The
-  SW uses `skipWaiting` + `clients.claim`, so updates apply on next load; an
-  explicit update toast is deferred.
+- ~~**A richer install education flow / A2HS coaching on iOS**~~ **iOS A2HS
+  coaching shipped** (2026-07-16) — see §9.
+- ~~**Screenshots / `shortcuts` in the manifest**~~ **`shortcuts` shipped**
+  (2026-07-16) — see §9. **`screenshots` deferred** (needs real captures — see §9).
+- ~~**Periodic SW update prompts**~~ **SW update prompt shipped** (2026-07-16) —
+  see §9.
+
+---
+
+## 9. PWA polish pass (implemented 2026-07-16)
+
+Three deferred items landed together. `CACHE_VERSION` bumped **v3 → v4** (the SW
+file changed).
+
+### 9.1 iOS "Add to Home Screen" coaching
+
+Folded into the existing `install-prompt.tsx` so there is ONE unified install
+affordance: Chromium/Android/desktop still gets the `beforeinstallprompt` pill;
+iOS Safari gets a one-time, dismissible coaching card (Share glyph +
+"tap Share → Add to Home Screen. Required for notifications on iOS."). Shown
+**only** when all hold: iOS Safari (not an in-app WebKit wrapper like
+Chrome/Firefox on iOS), NOT already installed (`navigator.standalone !== true`
+and not `display-mode: standalone`), and not previously dismissed
+(`localStorage["sparklab.iosInstallHint.dismissed"]`). The gating predicates
+(`isIosSafari`, `isStandalonePwa`) live in `src/components/pwa-detect.ts` as pure
+functions and are unit-tested (`__tests__/pwa-detect.test.ts`). Rationale: on
+iOS, Web Push works _only_ from a Home-Screen-installed PWA, so this hint is the
+on-ramp to the notifications feature.
+
+### 9.2 SW update prompt ("A new version is available")
+
+A deliberate SW-lifecycle change:
+
+- **`install` no longer calls `self.skipWaiting()`.** A new SW now parks in the
+  `waiting` state instead of auto-activating. `activate` still `clients.claim()`s.
+- The SW listens for `message` `{ type: "SKIP_WAITING" }` and only then calls
+  `self.skipWaiting()`.
+- `service-worker-register.tsx` detects a waiting/installed worker
+  (`registration.waiting`, or `updatefound` → `statechange` reaching
+  `installed`) **and only when `navigator.serviceWorker.controller` already
+  exists** (a genuine update, never the first install), shows an unobtrusive
+  bottom-center "A new version is available — Reload" toast (theme tokens +
+  `@sparklab/ui`). Accept posts `SKIP_WAITING` to the waiting worker, then
+  reloads **once** on `controllerchange`.
+- **Reload-loop safety:** the `controllerchange` → reload listener is attached
+  ONLY when the user accepts (so a first-install `clients.claim()` never
+  triggers a reload), is registered `{ once: true }`, and is additionally
+  ref-guarded. The `installed && hasController` gate (`isUpdateWaiting`,
+  unit-tested) keeps the first-ever install silent.
+- **Transition note:** because the _new_ SW's `install` decides whether to
+  skip-waiting, a client running the old auto-skipWaiting v3 will see the first
+  **v4** park in `waiting` (v4's install no longer skips) — so the prompt
+  governs from the v3→v4 update onward. Offline fallback + the load-bearing
+  `/api/*` and WebSocket bypasses are untouched.
+
+### 9.3 Manifest `shortcuts` (+ `screenshots` deferred)
+
+`shortcuts` added with two entries that deep-link to **real, existing** app
+states via URL flags the app already honors — no invented routes:
+"Agent chat" → `/?agent`, "Settings" → `/?settings=appearance` (each with the
+192px icon). `screenshots` were **deferred, not faked**: representative captures
+require running the full authenticated stack with live sessions (per
+`docs/LOCAL-PROD.md`) and driving a browser to screenshot `form_factor` "wide"
+(desktop) + "narrow" (mobile); a login-screen or empty-terminal capture would be
+unrepresentative, and shipping placeholder images is worse than omitting the
+field. To add later: run the local-prod stack, create a session or two, then
+Playwright-screenshot the terminal at ~1280×800 and ~390×844, save under
+`public/screenshots/`, and add a `screenshots: [...]` array to `manifest.ts`.
 
 ---
 

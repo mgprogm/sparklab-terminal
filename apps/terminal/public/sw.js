@@ -19,7 +19,7 @@
 
 // Bump CACHE_VERSION whenever offline.html or this file changes, so the
 // activate handler evicts the previous cache.
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v4";
 const CACHE_NAME = `sparklab-terminal-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -28,13 +28,22 @@ const OFFLINE_URL = "/offline.html";
 const PRECACHE_URLS = [OFFLINE_URL];
 
 self.addEventListener("install", (event) => {
+  // NOTE: deliberately NO self.skipWaiting() here. A new SW now parks in the
+  // "waiting" state instead of auto-activating, so the page can surface an
+  // "Update available — reload" prompt (see service-worker-register.tsx). The
+  // waiting worker activates only when the page posts { type: "SKIP_WAITING" }
+  // below. (The very first SW on a client — no existing controller — activates
+  // immediately regardless, since there is nothing to wait behind.)
   event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
-      // Activate this SW immediately rather than waiting for all tabs to close.
-      .then(() => self.skipWaiting()),
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS)),
   );
+});
+
+// The page tells us to take over now (user accepted the update prompt).
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener("activate", (event) => {

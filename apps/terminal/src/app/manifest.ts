@@ -40,5 +40,29 @@ export default function manifest(): MetadataRoute.Manifest {
         purpose: "maskable",
       },
     ],
+    // App shortcuts (long-press the installed icon). These deep-link ONLY to
+    // real, existing app states via the URL flags the app already honors:
+    // `?agent` opens the Agent chat panel; `?settings=<section>` opens the
+    // settings dialog to a tab. No invented routes.
+    shortcuts: [
+      {
+        name: "Agent chat",
+        short_name: "Agent",
+        description: "Open the AI agent chat panel",
+        url: "/?agent",
+        icons: [
+          { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+        ],
+      },
+      {
+        name: "Settings",
+        short_name: "Settings",
+        description: "Open terminal settings",
+        url: "/?settings=appearance",
+        icons: [
+          { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+        ],
+      },
+    ],
   };
 }
