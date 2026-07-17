@@ -126,3 +126,21 @@ resumable from the panel's "Chat options" (⋮) menu → **History**.
   stored OpenAI messages, so the raw model message format never reaches the
   client. Approval prompts aren't persisted, so a resumed transcript shows the
   writes as tool rows (denied writes render as error-state rows).
+
+## Message rendering
+
+Assistant messages render in two modes, switched on the streaming flag
+(`apps/terminal/src/features/agent-chat/components/chat-message.tsx`):
+
+- **While streaming** — a cheap inline formatter (backtick `code` spans +
+  newline→`<br/>`) plus the pulsing block cursor. Deliberately NOT markdown:
+  re-parsing on every token is costly and half-parsed markdown flickers.
+- **Once the response finishes** (`streaming` goes false) — the full markdown
+  renderer (`components/markdown.tsx`, `react-markdown` + `remark-gfm`) takes
+  over, giving headings, lists, tables, links, blockquotes, and fenced code.
+  There is no Tailwind typography plugin in the repo, so every element is styled
+  by hand with the design-system theme tokens; inline `code` matches the
+  streaming style exactly. Resumed transcripts arrive with `streaming: false`,
+  so replayed assistant turns render as markdown too.
+
+User messages keep the inline formatter (no markdown) by design.

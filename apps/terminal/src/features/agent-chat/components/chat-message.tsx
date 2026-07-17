@@ -2,12 +2,15 @@
 
 /**
  * User and assistant message rows. User = a quiet full-width block; assistant =
- * plain prose with a streaming block cursor. Minimal inline formatting only
- * (backtick code + line breaks) — no markdown dependency.
+ * a streaming block cursor while text arrives. During streaming we use a cheap
+ * inline formatter (backtick code + line breaks); once the response finishes we
+ * swap in the full markdown renderer (see ./markdown) so the final message gets
+ * headings, lists, tables, links, and fenced code.
  */
 import { Fragment } from "react";
 import { cn } from "@sparklab/ui/lib/utils";
 import type { AssistantEntry, UserEntry } from "../types";
+import { Markdown } from "./markdown";
 
 function renderInline(text: string) {
   // Split on `code` spans; preserve newlines as <br/>.
@@ -48,17 +51,21 @@ export function UserMessage({ entry }: { entry: UserEntry }) {
 export function AssistantMessage({ entry }: { entry: AssistantEntry }) {
   return (
     <div className="text-secondary-foreground px-0.5 text-sm leading-relaxed">
-      {renderInline(entry.text)}
-      {entry.streaming && (
-        <span
-          className={cn(
-            "text-chart-2 ml-0.5 inline-block animate-pulse",
-            "align-baseline",
-          )}
-          aria-hidden="true"
-        >
-          ▍
-        </span>
+      {entry.streaming ? (
+        <>
+          {renderInline(entry.text)}
+          <span
+            className={cn(
+              "text-chart-2 ml-0.5 inline-block animate-pulse",
+              "align-baseline",
+            )}
+            aria-hidden="true"
+          >
+            ▍
+          </span>
+        </>
+      ) : (
+        <Markdown text={entry.text} />
       )}
     </div>
   );
