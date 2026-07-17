@@ -309,10 +309,52 @@ stay green.
 
 ## 10. Deliberately out of scope (post-v1)
 
-- **Multi-user fan-out** — the store is single-user (many devices), matching the
-  current single-user auth model.
+- **Multi-user fan-out (#7)** — see §11 below; a first-class, tracked TODO
+  blocked on multi-user auth, not merely "won't do".
 - **Richer notification actions** (re-run the job, per-action deep targets).
 - **Per-session notification routing** (only some devices) — single-user model.
+
+---
+
+## 11. TODO — #7 Multi-user push fan-out (NOT IMPLEMENTED — blocked)
+
+**Status:** intentionally unimplemented as of 2026-07-17. Tracked here so it is
+not lost; do **not** build it until the dependency below is met.
+
+**Blocked on:** multi-user authentication / isolation (the Phase 4 item listed
+in `CLAUDE.md` as "Not yet implemented"). Everything push does today assumes a
+**single user with many devices**: the subscription store (`push-subscriptions.json`)
+is a flat list of endpoints with no owner, `push-settings.json` holds one global
+preferences object, and `sendToAll()` fans a job-finished payload out to **every**
+stored endpoint. There is no notion of "who owns this session" or "who should be
+notified", because there is exactly one user. Adding fan-out before real user
+identity exists would be meaningless (and a privacy risk — one user's job status
+delivered to another's device).
+
+**Intended scope once unblocked:**
+
+- **Ownership on subscriptions.** Key each stored subscription (and each
+  `push-settings` record) by an authenticated `userId` instead of the current
+  ownerless flat list — a store shape change, backward-compatible via a migration
+  that assigns existing rows to the sole legacy user.
+- **Per-user session→subscriber resolution.** In `pushPollTick`, when a session's
+  job finishes, resolve **which user(s) own/subscribe to that session** and fan
+  out only to _their_ endpoints — never a global `sendToAll()`. This depends on
+  sessions themselves gaining an owner (also Phase 4), so this item is
+  transitively blocked on multi-user session isolation, not just auth.
+- **Per-user preferences & mute.** `minDurationMs` / `notifyOnStart` (§9.2) and
+  per-session `muted` (§9.1) become per-user, not global.
+- **Authorization on the push REST surface.** `/api/push/*` and
+  `/api/push/settings` must scope reads/writes to the caller's `userId` so one
+  user cannot enumerate, mute for, or unsubscribe another user's devices.
+
+**Explicitly NOT in scope for this TODO:** shared/read-only session viewers and
+team-wide broadcast notifications — those are separate Phase 4 features that would
+layer on top of per-user fan-out once it exists.
+
+**Effort estimate:** small-to-moderate _after_ multi-user auth lands (mostly a
+store-shape + resolver change); do not attempt to shim a fake user model to do it
+sooner.
 
 ---
 
