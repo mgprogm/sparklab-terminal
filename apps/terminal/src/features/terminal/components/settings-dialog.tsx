@@ -52,7 +52,10 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
-import { usePushNotifications } from "../hooks/use-push-notifications";
+import {
+  usePushNotifications,
+  usePushSettings,
+} from "../hooks/use-push-notifications";
 import { useServers, useDeleteServer } from "../hooks/use-servers";
 import {
   isServerUnreachable,
@@ -280,9 +283,18 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
 /** Notifications settings section — enable/disable "job finished" push. Its own
  *  component so the push probe (fetch + service-worker checks) only runs when
  *  this tab is open. */
+const DURATION_OPTIONS: { label: string; value: number }[] = [
+  { label: "10s", value: 10000 },
+  { label: "30s", value: 30000 },
+  { label: "1m", value: 60000 },
+  { label: "5m", value: 300000 },
+];
+
 function NotificationsSection() {
   const push = usePushNotifications();
   const busy = push.busy || !push.ready;
+  // Global preferences load only once subscribed (nothing to tune otherwise).
+  const prefs = usePushSettings(push.subscribed);
 
   return (
     <Section>
@@ -322,6 +334,66 @@ function NotificationsSection() {
       )}
       {push.error && (
         <p className="text-destructive mt-2 text-xs">{push.error}</p>
+      )}
+
+      {/* Global preferences — only when enabled (server-side; all devices). */}
+      {push.subscribed && (
+        <div className="border-border mt-3.5 space-y-3 border-t pt-3.5">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-foreground text-sm">Notify after</span>
+            <div className="border-border flex overflow-hidden rounded-md border">
+              {DURATION_OPTIONS.map((opt) => {
+                const active = opt.value === prefs.settings.minDurationMs;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    disabled={prefs.saving}
+                    onClick={() =>
+                      void prefs.update({ minDurationMs: opt.value })
+                    }
+                    aria-pressed={active}
+                    className={cn(
+                      "border-border min-w-10 border-l px-2.5 py-1 text-xs transition-colors first:border-l-0",
+                      active
+                        ? "bg-accent text-foreground"
+                        : "text-muted-foreground hover:bg-accent/50",
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <p className="text-muted-foreground text-xs">
+            Only notify for jobs that ran at least this long (shorter ones are
+            usually not worth an alert).
+          </p>
+
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-foreground text-sm">
+              Alert if still running
+            </span>
+            <Button
+              variant={prefs.settings.notifyOnStart ? "outline" : "default"}
+              size="sm"
+              disabled={prefs.saving}
+              onClick={() =>
+                void prefs.update({
+                  notifyOnStart: !prefs.settings.notifyOnStart,
+                })
+              }
+              className="shrink-0"
+            >
+              {prefs.settings.notifyOnStart ? "On" : "Off"}
+            </Button>
+          </div>
+          <p className="text-muted-foreground text-xs">
+            Also send a one-time alert when a job is still running after the
+            threshold above.
+          </p>
+        </div>
       )}
     </Section>
   );

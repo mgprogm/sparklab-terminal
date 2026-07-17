@@ -84,6 +84,7 @@ export interface UpdateSessionParams {
   name?: string;
   org?: string | null;
   project?: string | null;
+  muted?: boolean;
 }
 
 async function updateSessionApi(

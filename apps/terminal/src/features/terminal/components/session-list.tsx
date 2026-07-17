@@ -45,6 +45,8 @@ import {
   ChevronDown,
   ChevronRight,
   CircleUser,
+  Bell,
+  BellOff,
   Folder,
   Loader2,
   LogOut,
@@ -515,9 +517,26 @@ export function SessionList({
                         <MoreHorizontal className="size-3.5" />
                       </button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-40">
+                    <DropdownMenuContent align="end" className="w-48">
                       <DropdownMenuItem onClick={() => openMoveDialog(s)}>
                         Rename / Move to...
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          void onUpdateSession({ id: s.id, muted: !s.muted })
+                        }
+                      >
+                        {s.muted ? (
+                          <>
+                            <Bell className="size-3.5" />
+                            Unmute notifications
+                          </>
+                        ) : (
+                          <>
+                            <BellOff className="size-3.5" />
+                            Mute notifications
+                          </>
+                        )}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>

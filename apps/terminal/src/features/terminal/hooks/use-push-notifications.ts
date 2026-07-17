@@ -16,7 +16,9 @@
  */
 
 import {
+  PushSettingsSchema,
   VapidPublicKeyResponseSchema,
+  type PushSettings,
   type VapidPublicKeyResponse,
 } from "@sparklab/shared-types";
 import { useCallback, useEffect, useState } from "react";
@@ -205,4 +207,71 @@ export function usePushNotifications(): PushState {
     enable,
     disable,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Global push settings (duration threshold + "still running" alert). Separate
+// hook so it loads only where used (the Notify tab). `enabled` gates the fetch.
+// ---------------------------------------------------------------------------
+export interface PushSettingsState {
+  loaded: boolean;
+  settings: PushSettings;
+  saving: boolean;
+  update: (patch: Partial<PushSettings>) => Promise<void>;
+}
+
+const DEFAULT_PUSH_SETTINGS: PushSettings = {
+  minDurationMs: 30000,
+  notifyOnStart: false,
+};
+
+export function usePushSettings(enabled: boolean): PushSettingsState {
+  const [loaded, setLoaded] = useState(false);
+  const [settings, setSettings] = useState<PushSettings>(DEFAULT_PUSH_SETTINGS);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/push/settings");
+        if (!res.ok) return;
+        const data: unknown = await res.json();
+        const parsed = PushSettingsSchema.parse(data);
+        if (!cancelled) {
+          setSettings(parsed);
+          setLoaded(true);
+        }
+      } catch {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+
+  const update = useCallback(async (patch: Partial<PushSettings>) => {
+    setSaving(true);
+    // Optimistic: reflect immediately, reconcile from the server response.
+    setSettings((prev) => ({ ...prev, ...patch }));
+    try {
+      const res = await fetch("/api/push/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) {
+        const data: unknown = await res.json();
+        setSettings(PushSettingsSchema.parse(data));
+      }
+    } catch {
+      /* keep optimistic value; next open re-fetches */
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  return { loaded, settings, saving, update };
 }

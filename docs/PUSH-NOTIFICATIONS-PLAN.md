@@ -223,14 +223,96 @@ service authenticates the gateway with.
 
 ---
 
-## 9. Deliberately out of scope (post-v1)
+## 9. Extended controls (implemented 2026-07-17)
 
-- **Per-session opt-in / muting** — MVP notifies for all sessions.
-- **Notification actions** (e.g. buttons to re-run, dismiss-all).
-- **Notifying on job _start_ / long-running thresholds / exit-code in payload**
-  (privacy + noise trade-offs deferred).
+Items #4/#5/#6 landed. CACHE_VERSION bumped **v3 → v5** across the work (v4 = new
+`showNotification` shape / poll refactor; v5 = action buttons). `PUSH_POLL_INTERVAL_MS`
+is now env-overridable (tests poll at 200ms).
+
+### 9.1 Per-session mute (#4)
+
+Reuses the existing session metadata — NO new store/endpoint. `muted` rides on
+`sessions.json` alongside org/project, is returned on each `GET /api/sessions`
+row, and is set via the existing `PATCH /api/sessions/:id` (`muted:boolean`).
+Enforced **server-side**: `pushPollTick` skips a finished session when
+`s.muted` (a client can't stop an OS notification with the tab closed). It is
+global-per-session (all devices) — correct for single-user. UI: a
+Mute/Unmute item in the sidebar row's actions menu (`Bell`/`BellOff`), through
+the existing `useUpdateSession` PATCH path.
+
+### 9.2 Global push settings + duration threshold + job-start (#6)
+
+A second gitignored sidecar `push-settings.json` (atomic write, `PUSH_SETTINGS_FILE`
+override), `{ minDurationMs: 30000, notifyOnStart: false }`. `GET /api/push/settings`
+(auth) + `PUT` (auth + Origin/CSRF — `PUT` added to the state-changing guard set),
+edited from the Notify tab. The loop reads settings each tick.
+
+- **Duration threshold.** The state map is `qid -> { cmd, startedAt, notifiedRunning }`.
+  A job is timed on shell→non-shell; on finish `durationMs = now - startedAt` is
+  computed and the notification is suppressed when `durationMs < minDurationMs`.
+  `durationMs` is included in the payload. **Granularity is ±one poll interval**
+  (~4s default); genuinely sub-interval jobs are already invisible (the loop
+  never observes them running). A job already running at baseline has an untimed
+  start (`startedAt = null`) and is long by construction ⇒ it notifies with an
+  unknown/omitted duration.
+- **Job-start = "still running after threshold".** The genuinely useful flavor,
+  and what the `notifyOnStart` toggle does (NOT fire-on-every-command): a
+  one-time alert (guarded by `notifiedRunning`) when a timed job crosses
+  `minDurationMs` while still non-shell.
+
+### 9.3 Exit code (#6) — session-scoped shell hook
+
+A bash/zsh prompt hook installed at **session-create** time writes `$?` to the
+session-scoped tmux user option `@web_last_exit`; the loop reads it **for free**
+via `#{@web_last_exit}` in the existing `list-sessions -F` format (empirically
+verified to resolve there — no `show-options` fallback needed). The hook
+captures `$?` first, guards double-install with a `__SL_HOOK` sentinel, and is
+quiet + non-fatal. The exit code is included in the payload **only when captured**
+(bash/zsh + gateway-created sessions); other shells / pre-existing sessions omit
+it (the backward-compat contract). The value is cleared after a finish so a
+stale code can't re-fire.
+
+- **Remote/SSH status: WORKS.** Verified on both LOCAL and a real
+  ssh-to-localhost server — the hook install (`send-keys`) and the read
+  (`list-sessions`) both flow through the same `serverExec` seam that already
+  operates over ssh. The test uses an ephemeral key + a dedicated `tmux -L`
+  socket and SKIPs gracefully if ssh-to-localhost is unavailable (never a hard
+  failure), so exit-code is NOT local-only.
+
+### 9.4 Success/fail rendering + action buttons (#5)
+
+- The finish **title** reflects status when the exit code is known: "✓ Job
+  finished" / "✗ Job failed (exit N)"; neutral "Job finished" otherwise. Still
+  GENERIC — session name + status, never command output.
+- The SW adds `actions: [{open},{dismiss-all}]`, sliced to
+  `Notification.maxActions`. **Chromium/Android only** — iOS Safari silently
+  ignores `actions` (the body tap still deep-links). `notificationclick` branches
+  via the pure, unit-tested `resolveNotificationClick`: `dismiss-all` closes all
+  notifications; `open`/default focuses + deep-links to `?session=<id>`. The
+  visible-session-suppressed path shows nothing, so no actions there.
+
+### Verification (extends §8)
+
+`test:push` proves all of the above against a REAL running gateway + real tmux
+(200ms interval): mute suppresses; duration gate both ways (with `durationMs`);
+still-running fires exactly once; **exit code `false`→1 / `true`→0 on LOCAL AND
+over SSH**; SW suppression + action-branch resolvers (extracted from the shipped
+`sw.js`). The **real-201** crypto gate and the frontend vitest (mute mutation)
+stay green.
+
+### Needs a REAL device (cannot be automated here)
+
+- iOS action-button rendering (iOS ignores `actions`; body tap verified logically).
+- On-device, tab-closed delivery actually SHOWING the ✓/✗ + duration/exit code
+  (the payload content is verified via the gateway log + the real-201 proves the
+  encrypt/deliver path; rendering on a physical phone is manual).
+
+## 10. Deliberately out of scope (post-v1)
+
 - **Multi-user fan-out** — the store is single-user (many devices), matching the
   current single-user auth model.
+- **Richer notification actions** (re-run the job, per-action deep targets).
+- **Per-session notification routing** (only some devices) — single-user model.
 
 ---
 

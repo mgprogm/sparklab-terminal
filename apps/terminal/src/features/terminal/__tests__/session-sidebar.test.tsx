@@ -181,4 +181,40 @@ describe("SessionSidebar", () => {
       expect(props.onSelectSession).not.toHaveBeenCalled();
     });
   });
+
+  describe("per-session mute", () => {
+    it("mutes an unmuted session via onUpdateSession({ muted: true })", async () => {
+      const user = userEvent.setup();
+      const onUpdateSession = vi.fn();
+      renderSidebar({ onUpdateSession });
+
+      // Open the first row's actions menu, then click Mute.
+      const menuBtn = screen.getAllByTitle("Session actions")[0];
+      if (!menuBtn) throw new Error("no session-actions button rendered");
+      await user.click(menuBtn);
+      await user.click(screen.getByText("Mute notifications"));
+
+      expect(onUpdateSession).toHaveBeenCalledWith({
+        id: "web-alpha",
+        muted: true,
+      });
+    });
+
+    it("unmutes a muted session via onUpdateSession({ muted: false })", async () => {
+      const user = userEvent.setup();
+      const onUpdateSession = vi.fn();
+      const base = sessions[0];
+      if (!base) throw new Error("fixture missing");
+      const muted: SessionInfo[] = [{ ...base, muted: true }];
+      renderSidebar({ sessions: muted, onUpdateSession });
+
+      await user.click(screen.getByTitle("Session actions"));
+      await user.click(screen.getByText("Unmute notifications"));
+
+      expect(onUpdateSession).toHaveBeenCalledWith({
+        id: "web-alpha",
+        muted: false,
+      });
+    });
+  });
 });

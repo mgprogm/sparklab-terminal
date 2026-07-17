@@ -100,7 +100,20 @@ Body is a browser `PushSubscription.toJSON()` (`{ endpoint, keys: { p256dh, auth
 
 Body `{ endpoint }`. Removes that subscription (idempotent — `200` even if absent). Returns `{ ok: true, count }`. Removing the last subscription stops the poll loop.
 
-**Poll loop + SW push contract.** While ≥1 subscription exists AND VAPID is configured, the gateway polls `listSessions()` every ~4s. On a session's `pane_current_command` transitioning from a real non-shell command to a shell (reachable rows only; `""` is treated as unknown, never a trigger), it sends a Web Push to every stored subscription; a `404`/`410` from the push service prunes that endpoint. The first poll after any (re)start only establishes a baseline and notifies nothing. The payload is **generic** — `{ title, body, sessionId, tag }`, session name only, never command output. The service worker's `push` handler **always** calls `showNotification` (silent pushes get permission revoked on iOS/Chrome); `notificationclick` focuses/opens the app at `?session=<id>`.
+#### `GET /api/push/settings` → 200 · `PUT /api/push/settings` → 200
+
+Global push preferences (single-user), stored in the gitignored `push-settings.json` sidecar. Shape: `{ minDurationMs: number (0..86400000, default 30000), notifyOnStart: boolean (default false) }`. `GET` is auth-only (Origin-exempt); `PUT` is auth + Origin/CSRF-guarded (`PUT` is in the state-changing guard set) and accepts a **partial** patch (absent fields unchanged; bad types → `400`). `minDurationMs` gates the "finished" notification on job duration; `notifyOnStart` enables the one-time "still running after threshold" alert.
+
+**`muted` on `PATCH /api/sessions/:id`.** The session PATCH additionally accepts `muted:boolean` (alongside name/org/project), persisted to the `sessions.json` sidecar and echoed in the response; `GET /api/sessions` rows carry `muted`. A muted session is skipped in the poll loop (server-side enforcement).
+
+**Poll loop + SW push contract.** While ≥1 subscription exists AND VAPID is configured, the gateway polls `listSessions()` every `PUSH_POLL_INTERVAL_MS` (default 4s; env-overridable). Per reachable session it tracks `pane_current_command` (`""` = unknown, never a trigger) and times a job on shell→non-shell:
+
+- **Finish** (non-shell→shell): unless the session is `muted` or the duration is below `minDurationMs`, it sends a Web Push (a `404`/`410` prunes the endpoint). The first poll after any (re)start only baselines and notifies nothing.
+- **Still-running** (opt-in `notifyOnStart`): one alert when a timed job crosses `minDurationMs` while still running.
+
+Payload is **generic** — `{ title, body, sessionId, tag, durationMs?, exitCode? }`, session name + status only, **never command output**. `title` is "✓ Job finished" / "✗ Job failed (exit N)" when the exit code is known (bash/zsh gateway-created sessions; captured via a session-scoped `@web_last_exit` shell hook), else neutral "Job finished". `exitCode`/`durationMs` are present only when known.
+
+The service worker's `push` handler **always** calls `showNotification` — the ONE exception is a permission-safe omit when a focused, visible client already shows that `?session=<id>` (visible-client relaxation). It attaches `actions: [open, dismiss-all]` (sliced to `Notification.maxActions`; Chromium/Android only — iOS ignores them). `notificationclick`: `dismiss-all` closes all notifications; `open`/default focuses/opens the app at `?session=<id>`.
 
 ### File-explorer endpoints: `GET|POST|PATCH|DELETE /api/sessions/:id/fs/*`
 
