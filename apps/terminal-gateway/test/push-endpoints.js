@@ -175,6 +175,26 @@ function assert(cond, msg) {
   if (!cond) fail(msg);
 }
 
+// Extract a named, self-contained function's source from a file and eval it.
+// Lets tests exercise the ACTUAL shipped SW helpers (no duplication).
+function extractFn(src, marker) {
+  const start = src.indexOf(marker);
+  assert(start >= 0, `source missing ${marker}`);
+  const braceStart = src.indexOf("{", start);
+  let depth = 0;
+  let end = -1;
+  for (let i = braceStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) {
+      end = i + 1;
+      break;
+    }
+  }
+  assert(end > 0, `could not brace-match ${marker}`);
+  // eslint-disable-next-line no-eval
+  return eval(`(${src.slice(start, end)})`);
+}
+
 async function cleanup() {
   for (const c of toClose) {
     try {
@@ -980,27 +1000,10 @@ async function main() {
   {
     const swPath = path.join(ROOT, "..", "terminal", "public", "sw.js");
     const swSrc = fs.readFileSync(swPath, "utf8");
-    const marker = "function hasVisibleClientForSession";
-    const startIdx = swSrc.indexOf(marker);
-    assert(startIdx >= 0, "sw.js missing hasVisibleClientForSession");
-    // Brace-match from the first `{` after the signature to the matching `}`.
-    const braceStart = swSrc.indexOf("{", startIdx);
-    let depth = 0;
-    let endIdx = -1;
-    for (let i = braceStart; i < swSrc.length; i++) {
-      if (swSrc[i] === "{") depth++;
-      else if (swSrc[i] === "}") {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-    assert(endIdx > 0, "could not brace-match hasVisibleClientForSession");
-    const fnSrc = swSrc.slice(startIdx, endIdx);
-    // eslint-disable-next-line no-eval
-    const hasVisibleClientForSession = eval(`(${fnSrc})`);
+    const hasVisibleClientForSession = extractFn(
+      swSrc,
+      "function hasVisibleClientForSession",
+    );
 
     const SID = "local/web-abc";
     const client = (over) => ({
@@ -1061,6 +1064,39 @@ async function main() {
       "  ok: SW suppression rule — focused+visible+matching -> omit; " +
         "unfocused/hidden/other-session/none -> showNotification",
     );
+
+    // Action-button click branches (the ACTUAL shipped resolver).
+    const resolveNotificationClick = extractFn(
+      swSrc,
+      "function resolveNotificationClick",
+    );
+    const dismiss = resolveNotificationClick("dismiss-all", SID);
+    assert(
+      dismiss.dismissAll === true && dismiss.url === null,
+      `dismiss-all branch wrong: ${JSON.stringify(dismiss)}`,
+    );
+    const open = resolveNotificationClick("open", SID);
+    assert(
+      open.dismissAll === false &&
+        open.url === `/?session=${encodeURIComponent(SID)}`,
+      `open branch wrong: ${JSON.stringify(open)}`,
+    );
+    // Default/body tap (empty action) behaves like open.
+    const tap = resolveNotificationClick("", SID);
+    assert(
+      tap.dismissAll === false && tap.url === open.url,
+      `default tap branch wrong: ${JSON.stringify(tap)}`,
+    );
+    // No session id -> focus the app root.
+    const noSid = resolveNotificationClick("open", null);
+    assert(
+      noSid.dismissAll === false && noSid.url === "/",
+      `no-session branch wrong: ${JSON.stringify(noSid)}`,
+    );
+    console.log(
+      "  ok: SW notificationclick — open/default -> focus+deep-link; " +
+        "dismiss-all -> close all",
+    );
   }
 
   console.log(
@@ -1071,7 +1107,7 @@ async function main() {
       "with durationMs), job-start still-running fires once, exit-code captured " +
       "(local + ssh: false->1, true->0), " +
       "REAL push-service 201 crypto gate, sendToAll delivery, 410 pruning, " +
-      "SW visible-session suppression rule.",
+      "SW visible-session suppression + notificationclick action branches.",
   );
   await cleanup();
   process.exit(0);

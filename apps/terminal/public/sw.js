@@ -19,7 +19,7 @@
 
 // Bump CACHE_VERSION whenever offline.html or this file changes, so the
 // activate handler evicts the previous cache.
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const CACHE_NAME = `sparklab-terminal-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline.html";
 
@@ -165,24 +165,56 @@ self.addEventListener("push", (event) => {
       // per the visible-client exception above.
       if (hasVisibleClientForSession(clients, sessionId)) return;
 
+      // Action buttons are Chromium/Android only — iOS Safari silently ignores
+      // `actions` (the body tap still works). Respect Notification.maxActions.
+      const maxActions =
+        (typeof Notification !== "undefined" && Notification.maxActions) || 0;
+      const actions = [
+        { action: "open", title: "Open" },
+        { action: "dismiss-all", title: "Dismiss all" },
+      ].slice(0, maxActions);
+
       await self.registration.showNotification(title, {
         body,
         tag: data.tag || "sparklab-job",
         icon: "/icons/icon-192.png",
         badge: "/icons/icon-192.png",
         data: { sessionId },
+        actions,
       });
     })(),
   );
 });
 
-// Focus an existing app window (deep-linking to the session via ?session=<id>
-// — that URL param already drives active-session selection) or open one.
+// Pure resolver for a notification click (standalone + self-contained so it is
+// unit-tested in test/push-endpoints.js, like hasVisibleClientForSession). The
+// "dismiss-all" action closes every open notification; "open"/default/body-tap
+// focuses (and deep-links to) the session.
+function resolveNotificationClick(action, sessionId) {
+  if (action === "dismiss-all") return { dismissAll: true, url: null };
+  const url = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/";
+  return { dismissAll: false, url };
+}
+
+// Branch on the clicked action: "dismiss-all" closes every open notification;
+// "open"/default/body-tap focuses an existing app window (deep-linking to the
+// session via ?session=<id>, which already drives active-session selection) or
+// opens one.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const sessionId =
     event.notification.data && event.notification.data.sessionId;
-  const target = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/";
+  const { dismissAll, url } = resolveNotificationClick(event.action, sessionId);
+
+  if (dismissAll) {
+    event.waitUntil(
+      self.registration
+        .getNotifications()
+        .then((ns) => ns.forEach((n) => n.close())),
+    );
+    return;
+  }
+
   event.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })
@@ -191,12 +223,12 @@ self.addEventListener("notificationclick", (event) => {
           if ("focus" in client) {
             // Reuse an open app window; steer it to the session if we can.
             if (sessionId && "navigate" in client) {
-              return client.focus().then(() => client.navigate(target));
+              return client.focus().then(() => client.navigate(url));
             }
             return client.focus();
           }
         }
-        return self.clients.openWindow ? self.clients.openWindow(target) : null;
+        return self.clients.openWindow ? self.clients.openWindow(url) : null;
       }),
   );
 });

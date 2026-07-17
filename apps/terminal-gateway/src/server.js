@@ -759,8 +759,16 @@ function emitNotify(payload, logInfo) {
 }
 
 function finishBody(name, durationMs) {
-  if (durationMs == null) return `${name}: the running command finished.`;
-  return `${name}: finished in ${Math.round(durationMs / 1000)}s.`;
+  const dur = durationMs == null ? "" : ` in ${Math.round(durationMs / 1000)}s`;
+  return `${name}: finished${dur}.`;
+}
+
+// Title reflects success/failure when the exit code is known (bash/zsh); stays
+// neutral otherwise. GENERIC — session-level status only, never command output.
+function finishTitle(exitCode) {
+  if (exitCode == null) return "Job finished";
+  if (exitCode === 0) return "✓ Job finished";
+  return `✗ Job failed (exit ${exitCode})`;
 }
 
 async function pushPollTick() {
@@ -852,7 +860,7 @@ async function pushPollTick() {
   for (const { s, durationMs } of finished) {
     const exitCode = typeof s.exitCode === "number" ? s.exitCode : null;
     const payload = {
-      title: "Job finished",
+      title: finishTitle(exitCode),
       body: finishBody(s.name, durationMs),
       sessionId: s.id,
       tag: `job-${s.id}`,
