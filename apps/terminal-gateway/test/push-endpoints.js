@@ -128,14 +128,58 @@ function startServer(port, env) {
       env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let out = "";
+    // Accumulate ALL stdout so tests can observe the gateway's structured
+    // `[push] notify {json}` lines (the payload is generic — no command output —
+    // and is how we verify content that the encrypted push body hides).
+    proc.stdoutBuf = "";
+    let started = false;
     proc.stdout.on("data", (d) => {
-      out += d.toString();
-      if (out.includes("listening on")) resolve(proc);
+      proc.stdoutBuf += d.toString();
+      if (!started && proc.stdoutBuf.includes("listening on")) {
+        started = true;
+        resolve(proc);
+      }
     });
     proc.stderr.on("data", (d) => process.stderr.write(`[gw:${port}] ${d}`));
     setTimeout(() => reject(new Error("server did not start in time")), 8000);
   });
+}
+
+// Parse the gateway's `[push] notify {json}` lines into objects.
+function notifyEvents(proc) {
+  const out = [];
+  for (const line of proc.stdoutBuf.split("\n")) {
+    const m = /\[push\] notify (\{.*\})\s*$/.exec(line);
+    if (m) {
+      try {
+        out.push(JSON.parse(m[1]));
+      } catch {
+        /* ignore partial line */
+      }
+    }
+  }
+  return out;
+}
+
+// Wait until a notify event matching `pred` appears, or timeout (returns null).
+async function waitForNotify(proc, pred, timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ev = notifyEvents(proc).find(pred);
+    if (ev) return ev;
+    await sleep(120);
+  }
+  return null;
+}
+
+// Assert NO notify event matching `pred` appears within `windowMs`.
+async function expectNoNotify(proc, pred, windowMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < windowMs) {
+    if (notifyEvents(proc).find(pred)) return false;
+    await sleep(120);
+  }
+  return true;
 }
 
 async function req(base, method, pathname, { body, origin, headers } = {}) {
@@ -259,6 +303,7 @@ async function main() {
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "push-endpoints-"));
   const fileA = path.join(scratch, "subs-a.json");
   const fileB = path.join(scratch, "subs-b.json");
+  const settingsFile = path.join(scratch, "push-settings.json");
   const tls = makeCert(scratch);
 
   // --- configured gateway (auth + VAPID). NODE_TLS_REJECT_UNAUTHORIZED=0 so the
@@ -273,6 +318,8 @@ async function main() {
     VAPID_PRIVATE_KEY: VAPID.privateKey,
     VAPID_SUBJECT,
     PUSH_SUBSCRIPTIONS_FILE: fileA,
+    PUSH_SETTINGS_FILE: settingsFile,
+    PUSH_POLL_INTERVAL_MS: "200",
     NODE_TLS_REJECT_UNAUTHORIZED: "0",
   });
   console.log(`configured gateway up on :${PORT}`);
@@ -441,67 +488,96 @@ async function main() {
   }
 
   // =====================================================================
-  // END-TO-END: a REAL tmux non-shell->shell transition, observed by the
-  // gateway's live poll loop, delivers a push. The subscription endpoint is a
-  // local HTTPS mock (reusing real ECDH keys so encryption succeeds) so we can
-  // observe the delivery. This exercises detection -> sendToAll through the
-  // actual running gateway — the one path the other sections don't cover.
+  // LIVE POLL LOOP SCENARIOS — a real running gateway (200ms interval), one
+  // HTTPS mock subscription (reusing real ECDH keys so aes128gcm encryption
+  // succeeds), and REAL tmux sessions. Delivery is observed via the mock; the
+  // encrypted body is opaque, so payload CONTENT (duration/exit code) is
+  // verified from the gateway's generic `[push] notify {json}` stdout lines.
   // =====================================================================
-  {
-    const hits = [];
-    const mock = https.createServer(tls, (rq, rs) => {
-      const chunks = [];
-      rq.on("data", (d) => chunks.push(d));
-      rq.on("end", () => {
-        hits.push(Buffer.concat(chunks).length);
-        rs.writeHead(201);
-        rs.end();
-      });
+  const pollHits = [];
+  const pollMock = https.createServer(tls, (rq, rs) => {
+    const chunks = [];
+    rq.on("data", (d) => chunks.push(d));
+    rq.on("end", () => {
+      pollHits.push(Buffer.concat(chunks).length);
+      rs.writeHead(201);
+      rs.end();
     });
-    await new Promise((r) => mock.listen(0, "127.0.0.1", r));
-    toClose.push(() => new Promise((r) => mock.close(r)));
-    const e2eEndpoint = `https://127.0.0.1:${mock.address().port}/e2e`;
+  });
+  await new Promise((r) => pollMock.listen(0, "127.0.0.1", r));
+  toClose.push(() => new Promise((r) => pollMock.close(r)));
+  const pollEndpoint = `https://127.0.0.1:${pollMock.address().port}/live`;
 
-    // Create a session and start a long-running (non-shell) command in it.
-    const rc = await req(BASE, "POST", "/api/sessions", {
-      body: { name: "push-e2e" },
+  // Subscribe once -> starts the loop; its first tick baselines and notifies
+  // nothing. Sessions created afterward seed on first sight, then fire on finish.
+  {
+    const sr = await req(BASE, "POST", "/api/push/subscribe", {
+      body: { endpoint: pollEndpoint, keys: realSub.keys },
       origin: ALLOWED_ORIGIN,
     });
-    assert(rc.status === 201, `e2e create session -> ${rc.status}`);
+    assert(sr.status === 201, `live subscribe -> ${sr.status}`);
+    await sleep(600); // let the baseline tick pass
+  }
+
+  // Create a fresh session, optionally mute it, then run `cmd` in it.
+  async function runJob(name, cmd, { muted = false } = {}) {
+    const rc = await req(BASE, "POST", "/api/sessions", {
+      body: { name },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(rc.status === 201, `${name}: create -> ${rc.status}`);
     const sid = (await rc.json()).id;
     const tmuxName = sid.includes("/") ? sid.slice(sid.indexOf("/") + 1) : sid;
     createdTmux.push(tmuxName);
-    execFileSync("tmux", ["send-keys", "-t", tmuxName, "sleep 10", "Enter"]);
-    await sleep(1500); // let "sleep" become pane_current_command
-
-    // Subscribe with the mock endpoint -> starts the poll loop. Its first tick
-    // (~4s) baselines "sleep"; a later tick after sleep exits sees the shell and
-    // fires exactly one push to the mock.
-    const sr = await req(BASE, "POST", "/api/push/subscribe", {
-      body: { endpoint: e2eEndpoint, keys: realSub.keys },
-      origin: ALLOWED_ORIGIN,
-    });
-    assert(sr.status === 201, `e2e subscribe -> ${sr.status}`);
-
-    const start = Date.now();
-    while (hits.length === 0 && Date.now() - start < 25000) await sleep(1000);
-    assert(
-      hits.length >= 1,
-      "poll loop did NOT deliver a push on a real non-shell->shell transition",
-    );
-    console.log(
-      `  ok: live poll loop fired a push on a real tmux job-finish transition (${hits.length} delivered)`,
-    );
-
-    // Stop the loop + clean up this session for the crypto section below.
-    await req(BASE, "POST", "/api/push/unsubscribe", {
-      body: { endpoint: e2eEndpoint },
-      origin: ALLOWED_ORIGIN,
-    });
-    await req(BASE, "DELETE", `/api/sessions/${encodeURIComponent(sid)}`, {
-      origin: ALLOWED_ORIGIN,
-    });
+    if (muted) {
+      const mr = await req(
+        BASE,
+        "PATCH",
+        `/api/sessions/${encodeURIComponent(sid)}`,
+        { body: { muted: true }, origin: ALLOWED_ORIGIN },
+      );
+      assert(mr.status === 200, `${name}: mute PATCH -> ${mr.status}`);
+      assert((await mr.json()).muted === true, `${name}: muted not echoed`);
+    }
+    await sleep(400); // shell settles
+    execFileSync("tmux", ["send-keys", "-t", tmuxName, cmd, "Enter"]);
+    return { sid, tmuxName };
   }
+
+  // --- transition: a real finish fires exactly one push (delivered to mock) ---
+  {
+    const hitsBefore = pollHits.length;
+    const { sid } = await runJob("push-transition", "sleep 1");
+    const ev = await waitForNotify(gw, (e) => e.sessionId === sid, 10000);
+    assert(
+      ev,
+      "poll loop did NOT notify on a real non-shell->shell transition",
+    );
+    // Delivery actually reached the (mock) push endpoint.
+    const start = Date.now();
+    while (pollHits.length === hitsBefore && Date.now() - start < 5000)
+      await sleep(150);
+    assert(pollHits.length > hitsBefore, "transition push was not delivered");
+    console.log(
+      "  ok: live poll loop fired + delivered a push on a real job-finish transition",
+    );
+  }
+
+  // --- mute: a muted session's finish notifies NOTHING ---
+  {
+    const { sid } = await runJob("push-muted", "sleep 1", { muted: true });
+    const quiet = await expectNoNotify(gw, (e) => e.sessionId === sid, 4000);
+    assert(quiet, "muted session still produced a notify");
+    console.log("  ok: muted session's job-finish produced NO notification");
+  }
+
+  // <<< additional live-loop scenarios (duration / job-start / exit-code) go here
+
+  // Stop the loop.
+  await req(BASE, "POST", "/api/push/unsubscribe", {
+    body: { endpoint: pollEndpoint },
+    origin: ALLOWED_ORIGIN,
+  });
 
   // =====================================================================
   // CRYPTO GATE — run the gateway's OWN push.js send code against the real
@@ -684,6 +760,7 @@ async function main() {
     "\nPASS: push endpoints — vapid-key (configured + not-configured), " +
       "subscribe/unsubscribe (auth, CSRF, 400, dedup, idempotent, persisted), " +
       "graceful 503, live poll-loop fires on a real tmux job-finish transition, " +
+      "per-session mute suppresses server-side, " +
       "REAL push-service 201 crypto gate, sendToAll delivery, 410 pruning, " +
       "SW visible-session suppression rule.",
   );

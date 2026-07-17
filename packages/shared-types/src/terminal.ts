@@ -144,6 +144,10 @@ export const SessionInfoSchema = z.object({
   org: z.string().nullable().optional(),
   /** Project label within an org. Null when unset; optional for older-gateway compat. */
   project: z.string().nullable().optional(),
+  /** When true, the gateway suppresses "job finished" push notifications for
+   *  this session (global-per-session; enforced server-side in the poll loop).
+   *  Absent from older gateways => treat as false (not muted). */
+  muted: z.boolean().optional(),
   /** Registry id of the server this session lives on (e.g. "local",
    * "build01"). Redundant with the serverId embedded in `id`, but provided so
    * the frontend can group without parsing. Absent from older gateways => the
@@ -179,6 +183,8 @@ export const UpdateSessionRequestSchema = z.object({
   org: z.string().nullable().optional(),
   /** Project label; null clears project. Requires org on the merged result. */
   project: z.string().nullable().optional(),
+  /** Mute/unmute "job finished" push notifications for this session. */
+  muted: z.boolean().optional(),
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequestSchema>;
 
@@ -188,6 +194,7 @@ export const UpdateSessionResponseSchema = z.object({
   name: z.string(),
   org: z.string().nullable(),
   project: z.string().nullable(),
+  muted: z.boolean(),
 });
 export type UpdateSessionResponse = z.infer<typeof UpdateSessionResponseSchema>;
 

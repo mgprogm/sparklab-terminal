@@ -637,6 +637,7 @@ async function listSessions() {
           lastActivity: activity ? Number(activity) : null,
           org: m.org ?? null,
           project: m.project ?? null,
+          muted: m.muted ?? false,
           serverId: server.id,
           reachable: true,
         });
@@ -664,6 +665,7 @@ async function listSessions() {
         lastActivity: null,
         org: m.org ?? null,
         project: m.project ?? null,
+        muted: m.muted ?? false,
         serverId: server.id,
         reachable: false,
       });
@@ -698,7 +700,8 @@ async function listSessions() {
 // Login shells arrive as "bash"/"zsh" or, for a login shell, "-bash"/"-zsh".
 // Mirrors the SHELLS set the agent-service uses (apps/agent-service/src/tools.ts).
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
-const PUSH_POLL_INTERVAL_MS = 4000;
+// Env-overridable so tests can poll at ~200ms instead of sleeping 30s.
+const PUSH_POLL_INTERVAL_MS = Number(process.env.PUSH_POLL_INTERVAL_MS) || 4000;
 
 let pushPollTimer = null;
 let pushLastCommand = new Map(); // qid -> last-known currentCommand (reachable rows only)
@@ -732,7 +735,8 @@ async function pushPollTick() {
     // Fire only when a session KNOWN at/after baseline goes from a genuine
     // non-shell command to a shell. New sessions (no prior entry) just seed.
     if (!pushBaselinePending && prev !== undefined) {
-      if (prev && !isShellCommand(prev) && isShellCommand(curr)) {
+      // Muted sessions are tracked (state still updates below) but never notify.
+      if (prev && !isShellCommand(prev) && isShellCommand(curr) && !s.muted) {
         finished.push(s);
       }
     }
@@ -753,9 +757,9 @@ async function pushPollTick() {
       sessionId: s.id,
       tag: `job-${s.id}`,
     };
-    console.log(
-      `[push] job finished in "${s.id}" -> notifying ${push.count()} subscription(s)`,
-    );
+    // Structured, GENERIC log line (session name + status only, never output) —
+    // the observability + test-verification channel for what was notified.
+    console.log(`[push] notify ${JSON.stringify({ sessionId: s.id })}`);
     void push
       .sendToAll(payload)
       .catch((err) => console.warn(`[push] sendToAll failed: ${err.message}`));
@@ -2354,6 +2358,15 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, { error: "project requires org" });
     }
 
+    // Mute (per-session push suppression; global-per-session, enforced in the
+    // poll loop). Persisted to the same sidecar as name/org/project.
+    if (body.muted !== undefined) {
+      if (typeof body.muted !== "boolean") {
+        return sendJson(res, 400, { error: "muted must be a boolean" });
+      }
+      patch.muted = body.muted;
+    }
+
     metadata.upsert(id, patch);
 
     const updated = metadata.get(id) || {};
@@ -2362,6 +2375,7 @@ async function handleApi(req, res, url) {
       name: updated.name || tmuxName,
       org: updated.org ?? null,
       project: updated.project ?? null,
+      muted: updated.muted ?? false,
     });
   }
 
