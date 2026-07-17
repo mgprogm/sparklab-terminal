@@ -64,7 +64,10 @@ let gw; // configured gateway
 let ncGw; // not-configured gateway
 let cookie = "";
 const toClose = []; // extra servers/browsers to close
-const createdTmux = []; // tmux session names to kill on cleanup
+const createdTmux = []; // LOCAL tmux session names to kill on cleanup
+// SSH-to-localhost fixture (best-effort) for the exit-code-over-ssh scenario.
+const AUTHORIZED_KEYS = path.join(os.homedir(), ".ssh", "authorized_keys");
+let sshRemote = null; // { sock, keyMarker } once set up; null => skip ssh test
 
 // Self-signed cert for the local HTTPS mock push servers (web-push always uses
 // https.request). Generated once; reused by the e2e + prune sections.
@@ -93,6 +96,77 @@ function makeCert(dir) {
   return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
 }
 
+// Best-effort passwordless-ssh-to-localhost fixture: ephemeral key added to
+// ~/.ssh/authorized_keys + a dedicated tmux socket, registered as an ssh server
+// in servers.json (tmuxCommand override is file-only). Returns true on success;
+// on ANY failure returns false so the ssh exit-code scenario is SKIPPED (never
+// a hard failure for an ssh-less environment). Mirrors acceptance-remote-survive.
+function setupSsh(dir, serversFile) {
+  const run = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const sock = `gw-push-${run}`;
+  const keyMarker = `gw-push-exit-${run}`;
+  const keyFile = path.join(dir, "id");
+  try {
+    execFileSync(
+      "ssh-keygen",
+      ["-t", "ed25519", "-N", "", "-f", keyFile, "-C", keyMarker],
+      { stdio: "ignore" },
+    );
+    const pub = fs.readFileSync(`${keyFile}.pub`, "utf8").trim();
+    fs.mkdirSync(path.dirname(AUTHORIZED_KEYS), {
+      recursive: true,
+      mode: 0o700,
+    });
+    fs.appendFileSync(AUTHORIZED_KEYS, `\n${pub}\n`, { mode: 0o600 });
+    sshRemote = { sock, keyMarker };
+    // Probe: must connect non-interactively with this key.
+    execFileSync(
+      "ssh",
+      [
+        "-i",
+        keyFile,
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=5",
+        "localhost",
+        "true",
+      ],
+      { stdio: "ignore", timeout: 10000 },
+    );
+    fs.writeFileSync(
+      serversFile,
+      JSON.stringify(
+        [
+          {
+            id: "remote",
+            name: "Remote (localhost)",
+            type: "ssh",
+            host: "localhost",
+            user: os.userInfo().username,
+            identityFile: keyFile,
+            tmuxCommand: ["tmux", "-L", sock],
+          },
+        ],
+        null,
+        2,
+      ),
+    );
+    return true;
+  } catch (e) {
+    console.log(
+      `  (ssh-to-localhost unavailable; exit-code-over-ssh SKIPPED: ${String(
+        e.message || e,
+      ).slice(0, 100)})`,
+    );
+    return false;
+  }
+}
+
 function fail(msg) {
   console.error(`\nFAIL: ${msg}`);
   void cleanup().finally(() => process.exit(1));
@@ -110,6 +184,20 @@ async function cleanup() {
   for (const name of createdTmux) {
     try {
       execFileSync("tmux", ["kill-session", "-t", name], { stdio: "ignore" });
+    } catch {}
+  }
+  if (sshRemote) {
+    try {
+      execFileSync("tmux", ["-L", sshRemote.sock, "kill-server"], {
+        stdio: "ignore",
+      });
+    } catch {}
+    try {
+      const kept = fs
+        .readFileSync(AUTHORIZED_KEYS, "utf8")
+        .split("\n")
+        .filter((l) => !l.includes(sshRemote.keyMarker));
+      fs.writeFileSync(AUTHORIZED_KEYS, kept.join("\n"), { mode: 0o600 });
     } catch {}
   }
   if (gw && !gw.killed) gw.kill("SIGTERM");
@@ -304,7 +392,9 @@ async function main() {
   const fileA = path.join(scratch, "subs-a.json");
   const fileB = path.join(scratch, "subs-b.json");
   const settingsFile = path.join(scratch, "push-settings.json");
+  const serversFile = path.join(scratch, "servers.json");
   const tls = makeCert(scratch);
+  const sshReady = setupSsh(scratch, serversFile);
 
   // --- configured gateway (auth + VAPID). NODE_TLS_REJECT_UNAUTHORIZED=0 so the
   // gateway's own push sends accept the local self-signed HTTPS mock used by the
@@ -319,6 +409,7 @@ async function main() {
     VAPID_SUBJECT,
     PUSH_SUBSCRIPTIONS_FILE: fileA,
     PUSH_SETTINGS_FILE: settingsFile,
+    SERVERS_FILE: serversFile,
     PUSH_POLL_INTERVAL_MS: "200",
     NODE_TLS_REJECT_UNAUTHORIZED: "0",
   });
@@ -571,16 +662,21 @@ async function main() {
     await sleep(600); // let the baseline tick pass
   }
 
-  // Create a fresh session, optionally mute it, then run `cmd` in it.
-  async function runJob(name, cmd, { muted = false } = {}) {
+  // Create a fresh session, optionally mute it, then run `cmd` in it. `serverId`
+  // targets a registry server; `sock` (its `tmux -L <sock>`) is how the test
+  // sends keys to a REMOTE (ssh-localhost) session directly.
+  async function runJob(name, cmd, { muted = false, serverId, sock } = {}) {
+    const body = serverId ? { name, serverId } : { name };
     const rc = await req(BASE, "POST", "/api/sessions", {
-      body: { name },
+      body,
       origin: ALLOWED_ORIGIN,
     });
     assert(rc.status === 201, `${name}: create -> ${rc.status}`);
     const sid = (await rc.json()).id;
     const tmuxName = sid.includes("/") ? sid.slice(sid.indexOf("/") + 1) : sid;
-    createdTmux.push(tmuxName);
+    // Remote sessions live on the -L socket and die when it's killed at cleanup;
+    // only LOCAL default-socket sessions need per-id kill tracking.
+    if (!sock) createdTmux.push(tmuxName);
     if (muted) {
       const mr = await req(
         BASE,
@@ -604,8 +700,17 @@ async function main() {
       }
       assert(confirmed, `${name}: muted not visible in GET /api/sessions`);
     }
-    await sleep(400); // shell settles
-    execFileSync("tmux", ["send-keys", "-t", tmuxName, cmd, "Enter"]);
+    // Remote create + hook-install runs over ssh (slower) — give it longer.
+    await sleep(sock ? 1600 : 400);
+    const tmuxArgv = sock ? ["tmux", "-L", sock] : ["tmux"];
+    execFileSync(tmuxArgv[0], [
+      ...tmuxArgv.slice(1),
+      "send-keys",
+      "-t",
+      tmuxName,
+      cmd,
+      "Enter",
+    ]);
     return { sid, tmuxName };
   }
 
@@ -704,7 +809,76 @@ async function main() {
     });
   }
 
-  // <<< additional live-loop scenarios (exit-code) go here
+  // --- EXIT CODE (the crux) — false -> 1, true -> 0, on the LOCAL server ---
+  {
+    // Threshold already 500 here; run a long-enough job that ends with a known
+    // exit. `sleep 1; false` => pane shows "sleep" (detected running) then the
+    // prompt hook captures $? of `false` (1) into @web_last_exit.
+    const failJob = await runJob("push-exit-fail", "sleep 1; false");
+    const evFail = await waitForNotify(
+      gw,
+      (e) => e.sessionId === failJob.sid && e.kind === "finish",
+      12000,
+    );
+    assert(evFail, "exit-code(fail): no finish notification");
+    assert(
+      evFail.exitCode === 1,
+      `exit-code(fail): expected exitCode 1, got ${JSON.stringify(evFail)}`,
+    );
+
+    const okJob = await runJob("push-exit-ok", "sleep 1; true");
+    const evOk = await waitForNotify(
+      gw,
+      (e) => e.sessionId === okJob.sid && e.kind === "finish",
+      12000,
+    );
+    assert(evOk, "exit-code(ok): no finish notification");
+    assert(
+      evOk.exitCode === 0,
+      `exit-code(ok): expected exitCode 0, got ${JSON.stringify(evOk)}`,
+    );
+    console.log(
+      "  ok: EXIT CODE captured on LOCAL — `false` -> 1, `true` -> 0",
+    );
+  }
+
+  // --- EXIT CODE over SSH — same mechanism through the ssh exec seam ---
+  if (sshReady) {
+    const sock = sshRemote.sock;
+    const failJob = await runJob("push-ssh-fail", "sleep 1; false", {
+      serverId: "remote",
+      sock,
+    });
+    const evFail = await waitForNotify(
+      gw,
+      (e) => e.sessionId === failJob.sid && e.kind === "finish",
+      15000,
+    );
+    assert(evFail, "exit-code ssh(fail): no finish notification");
+    assert(
+      evFail.exitCode === 1,
+      `exit-code ssh(fail): expected 1, got ${JSON.stringify(evFail)}`,
+    );
+    const okJob = await runJob("push-ssh-ok", "sleep 1; true", {
+      serverId: "remote",
+      sock,
+    });
+    const evOk = await waitForNotify(
+      gw,
+      (e) => e.sessionId === okJob.sid && e.kind === "finish",
+      15000,
+    );
+    assert(evOk, "exit-code ssh(ok): no finish notification");
+    assert(
+      evOk.exitCode === 0,
+      `exit-code ssh(ok): expected 0, got ${JSON.stringify(evOk)}`,
+    );
+    console.log(
+      "  ok: EXIT CODE captured over SSH — `false` -> 1, `true` -> 0",
+    );
+  } else {
+    console.log("  SKIP: exit-code over ssh (ssh-to-localhost unavailable)");
+  }
 
   // Stop the loop.
   await req(BASE, "POST", "/api/push/unsubscribe", {
@@ -894,7 +1068,8 @@ async function main() {
       "subscribe/unsubscribe (auth, CSRF, 400, dedup, idempotent, persisted), " +
       "graceful 503, settings GET/PUT, live poll-loop fires on a real transition, " +
       "per-session mute suppresses server-side, duration threshold (suppress/fire " +
-      "with durationMs), job-start still-running fires once, " +
+      "with durationMs), job-start still-running fires once, exit-code captured " +
+      "(local + ssh: false->1, true->0), " +
       "REAL push-service 201 crypto gate, sendToAll delivery, 410 pruning, " +
       "SW visible-session suppression rule.",
   );

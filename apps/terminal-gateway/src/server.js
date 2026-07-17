@@ -544,6 +544,20 @@ async function sessionExists(server, name) {
   }
 }
 
+// One-line shell hook (bash + zsh) installed at session-create time so a job's
+// exit code is captured for "job finished" notifications. It writes $? to a
+// SESSION-scoped tmux user option `@web_last_exit` on every prompt; the poll
+// loop reads it via `#{@web_last_exit}` in list-sessions (verified to resolve).
+// Notes: captures $? FIRST (before any clobber); a `__SL_HOOK` sentinel guards
+// against double-install; the tmux call is quiet + non-fatal (`-q`, 2>/dev/null)
+// so a non-tmux/plain shell is unaffected. bash/zsh + gateway-created sessions
+// only — other shells / pre-existing sessions simply never set it (exitCode is
+// then omitted from the payload; the backward-compat contract).
+const EXIT_HOOK =
+  'if [ -z "$__SL_HOOK" ]; then __SL_HOOK=1; ' +
+  'if [ -n "$ZSH_VERSION" ]; then __sl(){ local ec=$?; tmux set-option -q @web_last_exit "$ec" 2>/dev/null; }; precmd_functions+=(__sl); ' +
+  'elif [ -n "$BASH_VERSION" ]; then PROMPT_COMMAND=\'__ec=$?; tmux set-option -q @web_last_exit "$__ec" 2>/dev/null\'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; fi; fi';
+
 // Create + configure a new session on `server`. This is the only path that
 // spawns a tmux session; attach never creates. Options mirror Phase 1.
 async function createSession(server, id, cwd) {
@@ -576,6 +590,17 @@ async function createSession(server, id, cwd) {
     "aggressive-resize",
     "on",
   ]).catch(() => {});
+  // Install the exit-code capture hook (bash/zsh). Typed literally (-l) so its
+  // quotes/`$` survive, then Enter to run it, then `clear` to hide it. Quiet +
+  // non-fatal — a session still works if this is lost.
+  try {
+    await serverExec(server, ["send-keys", "-t", id, "-l", EXIT_HOOK]);
+    await serverExec(server, ["send-keys", "-t", id, "Enter"]);
+    await serverExec(server, ["send-keys", "-t", id, "-l", "clear"]);
+    await serverExec(server, ["send-keys", "-t", id, "Enter"]);
+  } catch (e) {
+    console.warn(`[tmux] exit-hook install failed: ${e.message}`);
+  }
   console.log(`[tmux] created session "${id}" on server "${server.id}"`);
 }
 
@@ -599,7 +624,7 @@ async function listSessions() {
         const res = await serverExec(server, [
           "list-sessions",
           "-F",
-          "#{session_name}\t#{session_created}\t#{pane_current_command}\t#{session_attached}\t#{session_activity}",
+          "#{session_name}\t#{session_created}\t#{pane_current_command}\t#{session_attached}\t#{session_activity}\t#{@web_last_exit}",
         ]);
         out = res.stdout;
         ok = true;
@@ -620,9 +645,14 @@ async function listSessions() {
       reachableServerIds.add(server.id);
       for (const line of out.split("\n")) {
         if (!line.trim()) continue;
-        const [name, created, currentCommand, attached, activity] =
+        const [name, created, currentCommand, attached, activity, lastExit] =
           line.split("\t");
         if (!name || !name.startsWith(PREFIX)) continue;
+        // Exit code from the shell hook's @web_last_exit (bash/zsh, gateway-
+        // created sessions). Empty/unset/non-numeric => null (omitted downstream).
+        const exitCode = /^-?\d+$/.test((lastExit || "").trim())
+          ? Number(lastExit.trim())
+          : null;
         const qid = formatSessionRef(server.id, name);
         liveIds.push(qid);
         const m = meta[qid] || {};
@@ -638,6 +668,7 @@ async function listSessions() {
           org: m.org ?? null,
           project: m.project ?? null,
           muted: m.muted ?? false,
+          exitCode,
           serverId: server.id,
           reachable: true,
         });
@@ -819,18 +850,36 @@ async function pushPollTick() {
   pushBaselinePending = false;
 
   for (const { s, durationMs } of finished) {
+    const exitCode = typeof s.exitCode === "number" ? s.exitCode : null;
     const payload = {
       title: "Job finished",
       body: finishBody(s.name, durationMs),
       sessionId: s.id,
       tag: `job-${s.id}`,
       ...(durationMs != null ? { durationMs } : {}),
+      ...(exitCode != null ? { exitCode } : {}),
     };
     emitNotify(payload, {
       sessionId: s.id,
       kind: "finish",
       durationMs: durationMs ?? null,
+      exitCode,
     });
+    // Consume the exit code so a stale value can never re-fire (best-effort).
+    if (exitCode != null) {
+      const { serverId, tmuxName } = parseSessionRef(s.id);
+      const srv = registry.get(serverId);
+      if (srv) {
+        void serverExec(srv, [
+          "set-option",
+          "-t",
+          tmuxName,
+          "-q",
+          "@web_last_exit",
+          "",
+        ]).catch(() => {});
+      }
+    }
   }
   for (const s of running) {
     const payload = {

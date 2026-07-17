@@ -148,6 +148,10 @@ export const SessionInfoSchema = z.object({
    *  this session (global-per-session; enforced server-side in the poll loop).
    *  Absent from older gateways => treat as false (not muted). */
   muted: z.boolean().optional(),
+  /** Last captured job exit code from the shell hook's `@web_last_exit`
+   *  (bash/zsh, gateway-created sessions only). Null/absent when unknown
+   *  (other shell, pre-existing session, or consumed after a notification). */
+  exitCode: z.number().int().nullable().optional(),
   /** Registry id of the server this session lives on (e.g. "local",
    * "build01"). Redundant with the serverId embedded in `id`, but provided so
    * the frontend can group without parsing. Absent from older gateways => the
