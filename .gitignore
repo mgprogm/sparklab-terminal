@@ -26,6 +26,10 @@ apps/terminal-gateway/servers.json
 push-subscriptions.json
 apps/terminal-gateway/push-subscriptions.json
 
+# Gateway push settings (runtime prefs: duration threshold + job-start toggle)
+push-settings.json
+apps/terminal-gateway/push-settings.json
+
 # Playwright
 test-results/
 playwright-report/
