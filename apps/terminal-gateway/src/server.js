@@ -704,7 +704,11 @@ const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
 const PUSH_POLL_INTERVAL_MS = Number(process.env.PUSH_POLL_INTERVAL_MS) || 4000;
 
 let pushPollTimer = null;
-let pushLastCommand = new Map(); // qid -> last-known currentCommand (reachable rows only)
+// qid -> { cmd, startedAt: number|null, notifiedRunning: boolean }. startedAt is
+// the epoch-ms when the current job began (shell->non-shell); null when unknown
+// (job already running at baseline). notifiedRunning guards the one-time
+// "still running after threshold" alert.
+let pushState = new Map();
 let pushBaselinePending = true;
 
 function isShellCommand(cmd) {
@@ -713,8 +717,24 @@ function isShellCommand(cmd) {
   return SHELLS.has(base);
 }
 
+// Emit one notification: a GENERIC stdout log line (session + status only,
+// never command output — the observability + test channel for the encrypted
+// payload) then the real push.
+function emitNotify(payload, logInfo) {
+  console.log(`[push] notify ${JSON.stringify(logInfo)}`);
+  void push
+    .sendToAll(payload)
+    .catch((err) => console.warn(`[push] sendToAll failed: ${err.message}`));
+}
+
+function finishBody(name, durationMs) {
+  if (durationMs == null) return `${name}: the running command finished.`;
+  return `${name}: finished in ${Math.round(durationMs / 1000)}s.`;
+}
+
 async function pushPollTick() {
   if (!push.isConfigured() || push.count() === 0) return;
+  const settings = push.getSettings();
   let sessions;
   try {
     sessions = await listSessions();
@@ -722,47 +742,105 @@ async function pushPollTick() {
     console.warn(`[push] poll list failed: ${err.message}`);
     return;
   }
-  const finished = [];
+  const now = Date.now();
+  const finished = []; // { s, durationMs }
+  const running = []; // sessions crossing the still-running threshold
   const seen = new Set();
+
   for (const s of sessions) {
     // Only reachable rows carry a real currentCommand. Unreachable rows return
     // a fabricated "" — letting that overwrite state would fire spurious pushes
     // on flap (job -> "" -> job). Skip them entirely => a flap is a no-op.
     if (!s.reachable) continue;
     seen.add(s.id);
-    const prev = pushLastCommand.get(s.id);
     const curr = s.currentCommand || "";
-    // Fire only when a session KNOWN at/after baseline goes from a genuine
-    // non-shell command to a shell. New sessions (no prior entry) just seed.
-    if (!pushBaselinePending && prev !== undefined) {
-      // Muted sessions are tracked (state still updates below) but never notify.
-      if (prev && !isShellCommand(prev) && isShellCommand(curr) && !s.muted) {
-        finished.push(s);
+    const currShell = isShellCommand(curr);
+    const prev = pushState.get(s.id);
+
+    // Baseline / first sighting: seed only, notify nothing. A job already
+    // running here started before we could time it => startedAt unknown.
+    if (pushBaselinePending || prev === undefined) {
+      pushState.set(s.id, {
+        cmd: curr,
+        startedAt: null,
+        notifiedRunning: false,
+      });
+      continue;
+    }
+
+    const prevShell = isShellCommand(prev.cmd);
+    if (prevShell && !currShell) {
+      // shell -> non-shell: a job STARTED. Time it.
+      pushState.set(s.id, {
+        cmd: curr,
+        startedAt: now,
+        notifiedRunning: false,
+      });
+    } else if (!prevShell && currShell) {
+      // non-shell -> shell: a job FINISHED.
+      const durationMs = prev.startedAt != null ? now - prev.startedAt : null;
+      // Duration gate: suppress jobs shorter than the threshold. A job whose
+      // start we never timed (startedAt null; e.g. running since baseline) is
+      // long by construction => notify with unknown duration.
+      const longEnough =
+        durationMs == null || durationMs >= settings.minDurationMs;
+      if (!s.muted && longEnough) finished.push({ s, durationMs });
+      pushState.set(s.id, {
+        cmd: curr,
+        startedAt: null,
+        notifiedRunning: false,
+      });
+    } else {
+      // No shell transition. Keep timing/notified state; refresh cmd.
+      pushState.set(s.id, {
+        cmd: curr,
+        startedAt: prev.startedAt,
+        notifiedRunning: prev.notifiedRunning,
+      });
+      // "Still running after threshold" (opt-in): fire ONCE when a timed job
+      // crosses minDurationMs while still non-shell.
+      if (
+        settings.notifyOnStart &&
+        !currShell &&
+        !s.muted &&
+        prev.startedAt != null &&
+        !prev.notifiedRunning &&
+        now - prev.startedAt >= settings.minDurationMs
+      ) {
+        running.push(s);
+        pushState.get(s.id).notifiedRunning = true;
       }
     }
-    pushLastCommand.set(s.id, curr);
   }
   // Forget sessions that vanished so a re-created id re-baselines cleanly.
-  for (const id of [...pushLastCommand.keys()]) {
-    if (!seen.has(id)) pushLastCommand.delete(id);
+  for (const id of [...pushState.keys()]) {
+    if (!seen.has(id)) pushState.delete(id);
   }
   pushBaselinePending = false;
 
-  for (const s of finished) {
-    // Payload transits FCM/Apple/Mozilla push services — keep it GENERIC:
-    // session name + "finished", NEVER command output.
+  for (const { s, durationMs } of finished) {
     const payload = {
       title: "Job finished",
-      body: `${s.name}: the running command finished.`,
+      body: finishBody(s.name, durationMs),
       sessionId: s.id,
       tag: `job-${s.id}`,
+      ...(durationMs != null ? { durationMs } : {}),
     };
-    // Structured, GENERIC log line (session name + status only, never output) —
-    // the observability + test-verification channel for what was notified.
-    console.log(`[push] notify ${JSON.stringify({ sessionId: s.id })}`);
-    void push
-      .sendToAll(payload)
-      .catch((err) => console.warn(`[push] sendToAll failed: ${err.message}`));
+    emitNotify(payload, {
+      sessionId: s.id,
+      kind: "finish",
+      durationMs: durationMs ?? null,
+    });
+  }
+  for (const s of running) {
+    const payload = {
+      title: "Job still running",
+      body: `${s.name}: still running.`,
+      sessionId: s.id,
+      tag: `running-${s.id}`,
+      running: true,
+    };
+    emitNotify(payload, { sessionId: s.id, kind: "running", durationMs: null });
   }
 }
 
@@ -772,7 +850,7 @@ async function pushPollTick() {
 function startPushLoop() {
   if (pushPollTimer) return;
   if (!push.isConfigured() || push.count() === 0) return;
-  pushLastCommand = new Map();
+  pushState = new Map();
   pushBaselinePending = true;
   pushPollTimer = setInterval(() => void pushPollTick(), PUSH_POLL_INTERVAL_MS);
   if (pushPollTimer.unref) pushPollTimer.unref();
@@ -784,7 +862,7 @@ function stopPushLoop() {
   if (!pushPollTimer) return;
   clearInterval(pushPollTimer);
   pushPollTimer = null;
-  pushLastCommand = new Map();
+  pushState = new Map();
   pushBaselinePending = true;
   console.log("[push] job-finished poll loop stopped");
 }
@@ -1160,7 +1238,8 @@ async function handleApi(req, res, url) {
   if (
     (req.method === "POST" ||
       req.method === "DELETE" ||
-      req.method === "PATCH") &&
+      req.method === "PATCH" ||
+      req.method === "PUT") &&
     req.headers.origin
   ) {
     if (!isOriginAllowed(req.headers.origin)) {
@@ -1208,6 +1287,63 @@ async function handleApi(req, res, url) {
       configured: push.isConfigured(),
       ...(publicKey ? { publicKey } : {}),
     });
+  }
+
+  // GET /api/push/settings — global push preferences (duration threshold + the
+  // "still running after threshold" job-start toggle). GET => Origin-exempt.
+  if (
+    req.method === "GET" &&
+    parts.length === 3 &&
+    parts[1] === "push" &&
+    parts[2] === "settings"
+  ) {
+    return sendJson(res, 200, push.getSettings());
+  }
+
+  // PUT /api/push/settings — partial update (Origin/CSRF-guarded above).
+  if (
+    req.method === "PUT" &&
+    parts.length === 3 &&
+    parts[1] === "push" &&
+    parts[2] === "settings"
+  ) {
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    const patch = {};
+    if (body.minDurationMs !== undefined) {
+      if (
+        typeof body.minDurationMs !== "number" ||
+        !Number.isFinite(body.minDurationMs) ||
+        body.minDurationMs < 0
+      ) {
+        return sendJson(res, 400, {
+          error: "minDurationMs must be a non-negative number",
+        });
+      }
+      patch.minDurationMs = body.minDurationMs;
+    }
+    if (body.notifyOnStart !== undefined) {
+      if (typeof body.notifyOnStart !== "boolean") {
+        return sendJson(res, 400, { error: "notifyOnStart must be a boolean" });
+      }
+      patch.notifyOnStart = body.notifyOnStart;
+    }
+    return sendJson(res, 200, push.setSettings(patch));
   }
 
   // POST /api/push/subscribe — store a browser PushSubscription. State-changing

@@ -384,6 +384,28 @@ export const PushSubscribeResponseSchema = z.object({
 });
 export type PushSubscribeResponse = z.infer<typeof PushSubscribeResponseSchema>;
 
+/** Global push preferences (single-user), stored in the gateway's
+ *  push-settings.json sidecar. GET /api/push/settings returns this full shape. */
+export const PushSettingsSchema = z.object({
+  /** Minimum job duration (ms) before a "finished" notification fires. Jobs
+   *  shorter than this are suppressed (they're rarely worth an alert, and
+   *  sub-poll-interval jobs are already invisible). Default 30000. */
+  minDurationMs: z
+    .number()
+    .int()
+    .min(0)
+    .max(24 * 60 * 60 * 1000),
+  /** When true, also fire a ONE-TIME "still running" alert when a job crosses
+   *  minDurationMs while still running. Default false. */
+  notifyOnStart: z.boolean(),
+});
+export type PushSettings = z.infer<typeof PushSettingsSchema>;
+
+/** Request body for PUT /api/push/settings — a partial patch; absent fields are
+ *  unchanged. */
+export const PushSettingsUpdateSchema = PushSettingsSchema.partial();
+export type PushSettingsUpdate = z.infer<typeof PushSettingsUpdateSchema>;
+
 // ---------------------------------------------------------------------------
 // File Explorer: /api/sessions/:id/fs/*
 // ---------------------------------------------------------------------------

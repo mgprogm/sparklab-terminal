@@ -387,6 +387,52 @@ async function main() {
     console.log("  ok: malformed subscription -> 400");
   }
 
+  // 5b. push settings — GET defaults, PUT updates + persists, validation, CSRF
+  {
+    const g = await req(BASE, "GET", "/api/push/settings");
+    assert(g.status === 200, `GET settings -> ${g.status}`);
+    const def = await g.json();
+    assert(
+      def.minDurationMs === 30000 && def.notifyOnStart === false,
+      `default settings unexpected: ${JSON.stringify(def)}`,
+    );
+    // No cookie -> 401
+    const noauth = await fetch(`${BASE}/api/push/settings`);
+    assert(noauth.status === 401, `GET settings no-cookie -> ${noauth.status}`);
+    // PUT partial update
+    const p = await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: 1234, notifyOnStart: true },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(p.status === 200, `PUT settings -> ${p.status}`);
+    const upd = await p.json();
+    assert(
+      upd.minDurationMs === 1234 && upd.notifyOnStart === true,
+      `PUT settings not applied: ${JSON.stringify(upd)}`,
+    );
+    // Persisted to the sidecar file
+    const onDisk = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+    assert(onDisk.minDurationMs === 1234, "settings not persisted to sidecar");
+    // Validation: bad type -> 400
+    const bad = await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: "soon" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(bad.status === 400, `PUT bad settings -> ${bad.status}, want 400`);
+    // CSRF: forbidden Origin -> 403
+    const csrf = await req(BASE, "PUT", "/api/push/settings", {
+      body: { notifyOnStart: false },
+      origin: "http://evil.example.com",
+    });
+    assert(
+      csrf.status === 403,
+      `PUT forbidden-origin -> ${csrf.status}, want 403`,
+    );
+    console.log(
+      "  ok: push settings GET/PUT (defaults, update, persist, 400, auth, CSRF 403)",
+    );
+  }
+
   // --- REAL browser subscription (the crypto gate depends on this) ---
   console.log("  driving Playwright Firefox for a REAL push subscription…");
   const browserSub = await realBrowserSubscription();
@@ -516,6 +562,12 @@ async function main() {
       origin: ALLOWED_ORIGIN,
     });
     assert(sr.status === 201, `live subscribe -> ${sr.status}`);
+    // Low threshold so short (~1s) test jobs clear the duration gate; disable
+    // still-running for the transition/mute scenarios.
+    await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: 500, notifyOnStart: false },
+      origin: ALLOWED_ORIGIN,
+    });
     await sleep(600); // let the baseline tick pass
   }
 
@@ -538,6 +590,19 @@ async function main() {
       );
       assert(mr.status === 200, `${name}: mute PATCH -> ${mr.status}`);
       assert((await mr.json()).muted === true, `${name}: muted not echoed`);
+      // Deterministic: wait until the LIST the poll loop reads shows muted:true
+      // (closes a race where a fresh session's metadata can be briefly pruned).
+      const until = Date.now() + 3000;
+      let confirmed = false;
+      while (Date.now() < until) {
+        const list = await (await req(BASE, "GET", "/api/sessions")).json();
+        if (list.find((r) => r.id === sid)?.muted === true) {
+          confirmed = true;
+          break;
+        }
+        await sleep(150);
+      }
+      assert(confirmed, `${name}: muted not visible in GET /api/sessions`);
     }
     await sleep(400); // shell settles
     execFileSync("tmux", ["send-keys", "-t", tmuxName, cmd, "Enter"]);
@@ -571,7 +636,75 @@ async function main() {
     console.log("  ok: muted session's job-finish produced NO notification");
   }
 
-  // <<< additional live-loop scenarios (duration / job-start / exit-code) go here
+  // --- duration threshold: short job (< threshold) suppressed ---
+  {
+    // Raise threshold high; a ~1s job is detected running then finishes well
+    // under it => suppressed by DURATION (not by never-detecting it).
+    await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: 60000 },
+      origin: ALLOWED_ORIGIN,
+    });
+    const { sid } = await runJob("push-short", "sleep 1");
+    const quiet = await expectNoNotify(gw, (e) => e.sessionId === sid, 4000);
+    assert(quiet, "short job below threshold still notified");
+    console.log("  ok: sub-threshold job suppressed by duration gate");
+  }
+
+  // --- duration threshold: long-enough job fires WITH durationMs ---
+  {
+    await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: 500 },
+      origin: ALLOWED_ORIGIN,
+    });
+    const { sid } = await runJob("push-long", "sleep 2");
+    const ev = await waitForNotify(
+      gw,
+      (e) => e.sessionId === sid && e.kind === "finish",
+      12000,
+    );
+    assert(ev, "long job did not fire a finish notification");
+    assert(
+      typeof ev.durationMs === "number" && ev.durationMs >= 500,
+      `finish durationMs missing/short: ${JSON.stringify(ev)}`,
+    );
+    console.log(
+      `  ok: job >= threshold fires with durationMs (${ev.durationMs}ms)`,
+    );
+  }
+
+  // --- job-start "still running after threshold" (opt-in): fires once ---
+  {
+    await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: 500, notifyOnStart: true },
+      origin: ALLOWED_ORIGIN,
+    });
+    const { sid } = await runJob("push-running", "sleep 3");
+    const ev = await waitForNotify(
+      gw,
+      (e) => e.sessionId === sid && e.kind === "running",
+      8000,
+    );
+    assert(ev, "still-running alert did not fire when notifyOnStart is on");
+    // It must fire exactly once for this session.
+    await sleep(1500);
+    const runningEvents = notifyEvents(gw).filter(
+      (e) => e.sessionId === sid && e.kind === "running",
+    );
+    assert(
+      runningEvents.length === 1,
+      `still-running fired ${runningEvents.length} times, want 1`,
+    );
+    console.log(
+      "  ok: 'still running after threshold' fires exactly once (opt-in)",
+    );
+    // Restore defaults for any later scenarios.
+    await req(BASE, "PUT", "/api/push/settings", {
+      body: { minDurationMs: 500, notifyOnStart: false },
+      origin: ALLOWED_ORIGIN,
+    });
+  }
+
+  // <<< additional live-loop scenarios (exit-code) go here
 
   // Stop the loop.
   await req(BASE, "POST", "/api/push/unsubscribe", {
@@ -759,8 +892,9 @@ async function main() {
   console.log(
     "\nPASS: push endpoints — vapid-key (configured + not-configured), " +
       "subscribe/unsubscribe (auth, CSRF, 400, dedup, idempotent, persisted), " +
-      "graceful 503, live poll-loop fires on a real tmux job-finish transition, " +
-      "per-session mute suppresses server-side, " +
+      "graceful 503, settings GET/PUT, live poll-loop fires on a real transition, " +
+      "per-session mute suppresses server-side, duration threshold (suppress/fire " +
+      "with durationMs), job-start still-running fires once, " +
       "REAL push-service 201 crypto gate, sendToAll delivery, 410 pruning, " +
       "SW visible-session suppression rule.",
   );

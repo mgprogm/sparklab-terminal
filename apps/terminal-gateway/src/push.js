@@ -27,6 +27,19 @@ const FILE =
   path.join(__dirname, "..", "push-subscriptions.json");
 const TMP = `${FILE}.tmp`;
 
+// Global push preferences (single-user), a second gitignored sidecar with the
+// same atomic write. Powers the duration threshold (#6) and the "still running
+// after threshold" job-start toggle. Missing/corrupt => defaults.
+const SETTINGS_FILE =
+  process.env.PUSH_SETTINGS_FILE ||
+  path.join(__dirname, "..", "push-settings.json");
+const SETTINGS_TMP = `${SETTINGS_FILE}.tmp`;
+const MAX_DURATION_MS = 24 * 60 * 60 * 1000; // clamp: 0..24h
+const DEFAULT_SETTINGS = Object.freeze({
+  minDurationMs: 30000,
+  notifyOnStart: false,
+});
+
 // ---- VAPID configuration ----
 // setVapidDetails() throws on missing/invalid keys or a subject that is not a
 // mailto: / https: URL, so it is called ONLY when all three are present, inside
@@ -54,6 +67,56 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 
 function isConfigured() {
   return configured;
+}
+
+// ---- Global push settings ----
+let settings = { ...DEFAULT_SETTINGS };
+
+function sanitizeSettings(p) {
+  const out = { ...DEFAULT_SETTINGS };
+  if (p && typeof p === "object") {
+    if (
+      typeof p.minDurationMs === "number" &&
+      Number.isFinite(p.minDurationMs) &&
+      p.minDurationMs >= 0
+    ) {
+      out.minDurationMs = Math.min(
+        Math.floor(p.minDurationMs),
+        MAX_DURATION_MS,
+      );
+    }
+    if (typeof p.notifyOnStart === "boolean")
+      out.notifyOnStart = p.notifyOnStart;
+  }
+  return out;
+}
+
+function loadSettings() {
+  try {
+    settings = sanitizeSettings(
+      JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")),
+    );
+  } catch {
+    settings = { ...DEFAULT_SETTINGS };
+  }
+  return settings;
+}
+
+function persistSettings() {
+  fs.writeFileSync(SETTINGS_TMP, JSON.stringify(settings, null, 2), "utf8");
+  fs.renameSync(SETTINGS_TMP, SETTINGS_FILE);
+}
+
+function getSettings() {
+  return { ...settings };
+}
+
+// Merge a partial patch over current settings, clamp, persist. Returns the new
+// full settings.
+function setSettings(patch) {
+  settings = sanitizeSettings({ ...settings, ...(patch || {}) });
+  persistSettings();
+  return { ...settings };
 }
 
 function getPublicKey() {
@@ -165,10 +228,13 @@ async function sendToAll(payload) {
 }
 
 load();
+loadSettings();
 
 export default {
   isConfigured,
   getPublicKey,
+  getSettings,
+  setSettings,
   list,
   count,
   add,
