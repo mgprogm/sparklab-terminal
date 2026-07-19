@@ -870,7 +870,7 @@ export function SessionList({
           longest row's max-content) to block so rows truncate within the
           viewport width instead of overflowing horizontally — otherwise the
           shrink-0 row actions get pushed past the right edge and clipped. */}
-      <ScrollArea className="flex-1 [&>[data-slot=scroll-area-viewport]>div]:!block">
+      <ScrollArea className="min-h-0 flex-1 [&>[data-slot=scroll-area-viewport]>div]:!block">
         <div className={cn("space-y-0.5", collapsed ? "p-1" : "p-1.5")}>
           {collapsed
             ? renderFlatList()

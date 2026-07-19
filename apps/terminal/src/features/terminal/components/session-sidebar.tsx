@@ -62,21 +62,47 @@ export function SessionSidebar({
   onOpenSettings,
 }: SessionSidebarProps) {
   return (
-    <aside
+    // Wrapper establishes the positioning context for the collapse toggle and
+    // controls the flex-item width/transition — but intentionally has no
+    // overflow-hidden so the toggle button can visually extend beyond the right
+    // edge without being clipped.
+    <div
       className={cn(
-        "border-border bg-background relative hidden h-full flex-col border-r transition-[width,flex-basis] duration-0 md:flex",
+        "relative hidden h-full transition-[width,flex-basis] duration-0 md:flex",
         collapsed ? "w-[52px] flex-[0_0_52px]" : "w-[248px] flex-[0_0_248px]",
       )}
     >
-      {/* Collapse toggle — a small round button STRADDLING the sidebar's
-          right border, vertically centered on the 42px header line. */}
+      <aside className="border-border bg-background flex h-full w-full flex-col overflow-hidden border-r">
+        <SessionList
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          servers={servers}
+          collapsed={collapsed}
+          loading={loading}
+          onSelectSession={onSelectSession}
+          onCreateSession={onCreateSession}
+          onDeleteSession={onDeleteSession}
+          onUpdateSession={onUpdateSession}
+          onDialogClose={onDialogClose}
+          username={username}
+          onLogout={onLogout}
+          logoutPending={logoutPending}
+          onOpenSettings={onOpenSettings}
+        />
+      </aside>
+
+      {/* Collapse toggle — placed OUTSIDE <aside> so its overflow-hidden does
+          not clip this button, which straddles the sidebar's right border.
+          The wrapper div's z-index-free relative context lets z-50 on this
+          button compete in the root stacking context, painting it above the
+          non-positioned terminal-panel header. */}
       <button
         type="button"
         onClick={onToggleCollapse}
         aria-expanded={!collapsed}
         aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        className="border-border bg-background text-muted-foreground hover:bg-accent hover:text-secondary-foreground absolute -right-3 top-[21px] z-20 flex size-6 -translate-y-1/2 items-center justify-center rounded-full border shadow-sm transition-colors"
+        className="border-border bg-background text-muted-foreground hover:bg-accent hover:text-secondary-foreground absolute -right-3 top-[21px] z-50 flex size-6 -translate-y-1/2 items-center justify-center rounded-full border shadow-sm transition-colors"
       >
         {collapsed ? (
           <ChevronsRight className="size-3.5" />
@@ -84,23 +110,6 @@ export function SessionSidebar({
           <ChevronsLeft className="size-3.5" />
         )}
       </button>
-
-      <SessionList
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        servers={servers}
-        collapsed={collapsed}
-        loading={loading}
-        onSelectSession={onSelectSession}
-        onCreateSession={onCreateSession}
-        onDeleteSession={onDeleteSession}
-        onUpdateSession={onUpdateSession}
-        onDialogClose={onDialogClose}
-        username={username}
-        onLogout={onLogout}
-        logoutPending={logoutPending}
-        onOpenSettings={onOpenSettings}
-      />
-    </aside>
+    </div>
   );
 }
