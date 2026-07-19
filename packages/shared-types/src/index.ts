@@ -142,6 +142,12 @@ export {
   AgentChatListSchema,
   AgentReplayEntrySchema,
   AgentChatHistorySchema,
+  MAX_BROWSER_SCREENSHOT_BYTES,
+  MAX_BROWSER_SCREENSHOT_BASE64_LENGTH,
+  MAX_BROWSER_VIEWPORT_DIMENSION,
+  AgentBrowserScreenshotSchema,
+  AgentBrowserViewSchema,
+  AgentBrowserClosedSchema,
   AgentWsServerMessageSchema,
   type AgentChatStarted,
   type AgentAssistantDelta,
@@ -157,6 +163,9 @@ export {
   type AgentChatList,
   type AgentReplayEntry,
   type AgentChatHistory,
+  type AgentBrowserScreenshot,
+  type AgentBrowserView,
+  type AgentBrowserClosed,
   type AgentWsServerMessage,
 } from "./agent";
 export {

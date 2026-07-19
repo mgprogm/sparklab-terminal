@@ -306,6 +306,79 @@ export const AgentChatHistorySchema = z.object({
 });
 export type AgentChatHistory = z.infer<typeof AgentChatHistorySchema>;
 
+// Browser screenshots are transported only on the live WebSocket. Keep both
+// their decoded size and their viewport bounded before the frontend creates an
+// image URL; these frames are deliberately absent from persisted chat history.
+export const MAX_BROWSER_SCREENSHOT_BYTES = 2 * 1024 * 1024;
+export const MAX_BROWSER_SCREENSHOT_BASE64_LENGTH =
+  Math.ceil(MAX_BROWSER_SCREENSHOT_BYTES / 3) * 4;
+export const MAX_BROWSER_VIEWPORT_DIMENSION = 4096;
+
+const BrowserIdSchema = z.string().min(1).max(128);
+const BrowserRevisionSchema = z.number().int().nonnegative().safe();
+
+export const AgentBrowserScreenshotSchema = z
+  .object({
+    mediaType: z.enum(["image/png", "image/webp"]),
+    data: z
+      .string()
+      .min(1)
+      .max(MAX_BROWSER_SCREENSHOT_BASE64_LENGTH)
+      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)
+      .refine((value) => {
+        const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+        return (value.length / 4) * 3 - padding <= MAX_BROWSER_SCREENSHOT_BYTES;
+      }, "Screenshot exceeds decoded byte limit"),
+  })
+  .strict();
+export type AgentBrowserScreenshot = z.infer<
+  typeof AgentBrowserScreenshotSchema
+>;
+
+/** Latest read-only browser snapshot for the terminal overlay. */
+export const AgentBrowserViewSchema = z
+  .object({
+    type: z.literal("browser_view"),
+    browserId: BrowserIdSchema,
+    revision: BrowserRevisionSchema,
+    url: z
+      .string()
+      .max(2048)
+      .url()
+      .refine((value) => {
+        try {
+          const parsed = new URL(value);
+          return (
+            (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+            parsed.username === "" &&
+            parsed.password === ""
+          );
+        } catch {
+          return false;
+        }
+      }, "Browser URL must be HTTP(S) without embedded credentials"),
+    title: z.string().max(512),
+    viewport: z
+      .object({
+        width: z.number().int().min(1).max(MAX_BROWSER_VIEWPORT_DIMENSION),
+        height: z.number().int().min(1).max(MAX_BROWSER_VIEWPORT_DIMENSION),
+      })
+      .strict(),
+    screenshot: AgentBrowserScreenshotSchema,
+  })
+  .strict();
+export type AgentBrowserView = z.infer<typeof AgentBrowserViewSchema>;
+
+/** The owned browser was closed; clients discard its last ephemeral view. */
+export const AgentBrowserClosedSchema = z
+  .object({
+    type: z.literal("browser_closed"),
+    browserId: BrowserIdSchema,
+    revision: BrowserRevisionSchema,
+  })
+  .strict();
+export type AgentBrowserClosed = z.infer<typeof AgentBrowserClosedSchema>;
+
 /** Discriminated union of all server -> client agent chat messages. */
 export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatStartedSchema,
@@ -319,5 +392,7 @@ export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentPongSchema,
   AgentChatListSchema,
   AgentChatHistorySchema,
+  AgentBrowserViewSchema,
+  AgentBrowserClosedSchema,
 ]);
 export type AgentWsServerMessage = z.infer<typeof AgentWsServerMessageSchema>;

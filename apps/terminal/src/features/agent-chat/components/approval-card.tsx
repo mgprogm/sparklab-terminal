@@ -7,7 +7,7 @@
  * hint fires, in which case it turns destructive with a short arming delay.
  */
 import { useEffect, useRef, useState } from "react";
-import { Keyboard, TriangleAlert } from "lucide-react";
+import { Globe2, Keyboard, TriangleAlert } from "lucide-react";
 import { Button } from "@sparklab/ui/components/ui/button";
 import { cn } from "@sparklab/ui/lib/utils";
 import type { AgentApprovalBehavior } from "@sparklab/shared-types";
@@ -19,6 +19,9 @@ interface Input {
   command?: string;
   keys?: string[];
   name?: string;
+  action?: string;
+  url?: string;
+  index?: number;
 }
 
 function keystrokeParts(tool: string, input: Input): string[] {
@@ -60,6 +63,7 @@ export function ApprovalCard({
   const [armed, setArmed] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
   const input = (entry.input ?? {}) as Input;
+  const browserAction = entry.tool === "browser_act";
 
   const parts = keystrokeParts(entry.tool, input);
   const hints = riskHints(entry.tool, input);
@@ -79,7 +83,11 @@ export function ApprovalCard({
     ref.current?.focus();
   }, []);
 
-  const approve = () => onRespond(always ? "allow_always" : "allow");
+  // Browser writes are intentionally one-time approvals. The service also
+  // enforces this, but omitting allow_always here makes the safety boundary
+  // visible and prevents an invalid choice from being sent.
+  const approve = () =>
+    onRespond(browserAction ? "allow" : always ? "allow_always" : "allow");
   const deny = () => onRespond("deny");
 
   return (
@@ -87,7 +95,7 @@ export function ApprovalCard({
       ref={ref}
       tabIndex={-1}
       role="group"
-      aria-label="Approval needed"
+      aria-label={browserAction ? "Browser approval needed" : "Approval needed"}
       onKeyDown={(e) => {
         if (e.key === "Enter" && armed) {
           e.preventDefault();
@@ -100,13 +108,21 @@ export function ApprovalCard({
       className="border-chart-2/40 bg-card flex flex-col gap-2 rounded-md border p-2.5 outline-none"
     >
       <div className="text-chart-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider">
-        <Keyboard className="size-3.5" />
-        Approval needed
+        {browserAction ? (
+          <Globe2 className="size-3.5" />
+        ) : (
+          <Keyboard className="size-3.5" />
+        )}
+        {browserAction ? "Browser approval needed" : "Approval needed"}
       </div>
 
       <div className="text-body flex items-center gap-1.5 text-xs">
-        {entry.tool === "create_session" ? "create" : "type into"}
-        {sessionName && (
+        {browserAction
+          ? `Allow this browser action${input.action ? `: ${input.action}` : ""}`
+          : entry.tool === "create_session"
+            ? "create"
+            : "type into"}
+        {!browserAction && sessionName && (
           <span className="bg-secondary text-foreground rounded-xs flex items-center gap-1 px-1.5 py-0.5">
             <span className="bg-chart-1 size-[5px] rounded-full" />
             {sessionName}
@@ -114,7 +130,26 @@ export function ApprovalCard({
         )}
       </div>
 
-      {parts.length > 0 && (
+      {browserAction && (
+        <div className="bg-secondary/60 rounded-sm px-2 py-1.5 text-xs leading-relaxed">
+          <div className="text-foreground">{entry.summary}</div>
+          {input.url && (
+            <div
+              className="text-muted-foreground mt-1 truncate font-mono text-[11px]"
+              title={input.url}
+            >
+              {input.url}
+            </div>
+          )}
+          {typeof input.index === "number" && (
+            <div className="text-muted-foreground mt-1 text-[11px]">
+              Page element {String(input.index)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!browserAction && parts.length > 0 && (
         <div className="bg-secondary/60 rounded-sm px-2 py-1.5 font-mono text-xs leading-relaxed">
           {parts.map((p, i) => (
             <span key={i}>
@@ -154,7 +189,7 @@ export function ApprovalCard({
           onClick={approve}
           className="h-7 text-xs"
         >
-          Approve ⏎
+          {browserAction ? "Approve once ⏎" : "Approve ⏎"}
         </Button>
         <Button
           size="sm"
@@ -166,17 +201,24 @@ export function ApprovalCard({
         </Button>
       </div>
 
-      <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">
-        <input
-          type="checkbox"
-          checked={always}
-          onChange={(e) => setAlways(e.target.checked)}
-          className={cn("accent-chart-2 rounded-xs size-3")}
-        />
-        Auto-approve{" "}
-        {entry.tool === "create_session" ? "creating sessions" : "typing"}
-        {sessionName ? ` in ${sessionName}` : ""} this session
-      </label>
+      {browserAction ? (
+        <p className="text-muted-foreground text-[11px]">
+          Browser actions are approved one at a time. The page is read-only
+          here.
+        </p>
+      ) : (
+        <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">
+          <input
+            type="checkbox"
+            checked={always}
+            onChange={(e) => setAlways(e.target.checked)}
+            className={cn("accent-chart-2 rounded-xs size-3")}
+          />
+          Auto-approve{" "}
+          {entry.tool === "create_session" ? "creating sessions" : "typing"}
+          {sessionName ? ` in ${sessionName}` : ""} this session
+        </label>
+      )}
     </div>
   );
 }

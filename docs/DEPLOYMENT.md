@@ -67,6 +67,8 @@ Set in `apps/agent-service/.env` (gitignored). If you are not deploying Agent Ch
 | `ALLOWED_ORIGINS`                             | localhost dev origins   | **Yes**             | Allowed browser `Origin`s for the `/agent` WS. Set to your public origin, e.g. `https://term.example.com`.                |
 | `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | _(unset)_               | **Yes** (auth mode) | Credentials the service uses to log in to the gateway. Match the gateway's; omit only in open mode.                       |
 | `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009` | **Yes**             | Inlined at build time into the Next.js app — the public agent WS URL: `wss://term.example.com` (same origin as the site). |
+| `BROWSER_USE_PROJECT`                         | _(unset)_               | No                  | Trusted Browser Use checkout. When set, enables one isolated local Chromium/MCP process per chat.                         |
+| `BROWSER_USE_HEADLESS`                        | `true`                  | No                  | Keep per-chat Chromium headless in deployment.                                                                            |
 
 Because Caddy serves the agent WS at the same public origin as the site,
 `NEXT_PUBLIC_AGENT_URL` is typically the same host as `NEXT_PUBLIC_GATEWAY_URL`
@@ -76,6 +78,17 @@ Conversation history is stored as JSONL files under `apps/agent-service/data/`
 (gitignored, one file per chat). Back up or prune that directory as needed — the
 user can delete individual chats from the panel's History modal, but there is no
 automatic expiry.
+
+Virtual browser deployment additionally requires `uv sync` and
+`uvx browser-use install` in `BROWSER_USE_PROJECT`, plus enough CPU/memory for
+one Chromium process tree per active browser chat. Keep Browser Use, Chromium,
+and the agent service under the same unprivileged OS account. The adapter uses
+ephemeral profiles and an enforcing outbound proxy that denies local, private,
+link-local, reserved, and metadata-service addresses on every request. Preserve
+the Chrome bypass value `<-loopback>`: it removes Chrome's implicit loopback
+exception and forces loopback traffic through the policy proxy. Do not exempt
+destinations, reuse profiles, expose MCP stdio, or grant the browser process
+access to sensitive host directories.
 
 ## Step-by-step: production on a VPS
 

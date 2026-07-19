@@ -28,7 +28,15 @@ const server = createServer((req, res) => {
   res.end(JSON.stringify({ error: "not found" }));
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const MAX_INBOUND_BYTES = 64 * 1024;
+const MAX_PENDING_FRAMES = 32;
+const MAX_PENDING_BYTES = 256 * 1024;
+const MAX_OUTBOUND_BYTES = 3 * 1024 * 1024;
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: MAX_INBOUND_BYTES,
+});
+const loops = new Set<AgentLoop>();
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -59,6 +67,7 @@ wss.on("connection", (ws: WebSocket, req) => {
   // WS open). Attach the listener SYNCHRONOUSLY and buffer until ready, or the
   // first user_message is silently dropped and the turn never starts.
   const pending: RawData[] = [];
+  let pendingBytes = 0;
 
   const route = (data: RawData) => {
     if (!loop) return;
@@ -94,12 +103,32 @@ wss.on("connection", (ws: WebSocket, req) => {
     }
   };
 
-  ws.on("message", (data) => {
+  ws.on("message", (data, isBinary) => {
+    if (isBinary) {
+      ws.close(1003, "JSON text frames only");
+      return;
+    }
     if (ready) route(data);
-    else pending.push(data);
+    else {
+      const bytes = Buffer.byteLength(data.toString());
+      if (
+        pending.length >= MAX_PENDING_FRAMES ||
+        pendingBytes + bytes > MAX_PENDING_BYTES
+      ) {
+        ws.close(1009, "too many messages before initialization");
+        return;
+      }
+      pending.push(data);
+      pendingBytes += bytes;
+    }
   });
-  ws.on("close", () => loop?.dispose());
-  ws.on("error", () => loop?.dispose());
+  const disposeLoop = () => {
+    if (!loop) return;
+    void loop.dispose();
+    loops.delete(loop);
+  };
+  ws.on("close", disposeLoop);
+  ws.on("error", disposeLoop);
 
   void (async () => {
     // Auth: proxy the browser's cookie to the gateway. 4001 = no-reconnect.
@@ -118,16 +147,20 @@ wss.on("connection", (ws: WebSocket, req) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const resumeChatId = url.searchParams.get("resumeChatId") || undefined;
     loop = new AgentLoop(send, resumeChatId);
+    loops.add(loop);
     await loop.init();
 
     ready = true;
     for (const d of pending) route(d);
     pending.length = 0;
+    pendingBytes = 0;
   })();
 });
 
 function safeSend(ws: WebSocket, frame: AgentWsServerMessage): void {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
+  if (ws.readyState !== ws.OPEN) return;
+  const payload = JSON.stringify(frame);
+  if (Buffer.byteLength(payload) <= MAX_OUTBOUND_BYTES) ws.send(payload);
 }
 
 server.listen(config.port, () => {
@@ -135,3 +168,17 @@ server.listen(config.port, () => {
     `[agent] listening on :${config.port} — gateway ${config.gatewayUrl}, model ${config.azure.deployment}`,
   );
 });
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void (async () => {
+      await Promise.all([...loops].map((loop) => loop.dispose()));
+      loops.clear();
+      for (const client of wss.clients)
+        client.close(1001, "service shutting down");
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 500).unref();
+    })();
+    setTimeout(() => process.exit(1), 5_000).unref();
+  });
+}

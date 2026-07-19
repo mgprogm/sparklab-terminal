@@ -9,6 +9,7 @@
     "start": "tsx --env-file-if-exists=.env src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/*.test.ts",
     "smoke": "node --env-file-if-exists=.env test/smoke.js"
   },
   "dependencies": {

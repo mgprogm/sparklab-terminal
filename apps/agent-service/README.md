@@ -6,19 +6,23 @@ OpenAI deployment (`gpt-5.6-sol`). It lets the user chat with an AI agent that
 can view, drive, and create terminal sessions — always through the gateway,
 never touching tmux directly.
 
+It can also start one isolated Browser Use stdio MCP process per chat on demand.
+Only observe, tab listing, and structured browser actions are exposed; raw MCP,
+JavaScript, CDP, files, uploads, and downloads are not available to the model.
+
 It is a **fourth independent lifetime** in the stack (browser · gateway · tmux ·
 agent): it can crash or restart without affecting any attached pty. See
 [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for where it sits, and
 [../../docs/AGENT-PROTOCOL.md](../../docs/AGENT-PROTOCOL.md) for the wire
-protocol, the 7 tools, and the safety model.
+protocol, the tool surface, and the safety model.
 
 ## Why a custom loop (no agent SDK)
 
 The loop, the approval gate, and conversation persistence are all first-party
 (`src/agent-loop.ts`, `src/approvals.ts`, `src/history.ts`). This keeps the only
-dependency an HTTP client (`openai` in Azure mode) and makes the seven terminal
-tools the model's entire capability surface — there are no built-in tools to
-disable.
+dependency an HTTP client (`openai` in Azure mode) and makes the declared
+terminal and browser tools the model's entire capability surface — there are no
+built-in tools to disable.
 
 ## Setup
 
@@ -33,6 +37,20 @@ Required env (see `.env.example` and the table in
 (in gateway auth mode) `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD`. The service
 **fails fast** at startup if a required Azure var is missing. `.env` is
 gitignored — never commit the key.
+
+To enable virtual-browser tools, set `BROWSER_USE_PROJECT` to a trusted local
+Browser Use checkout. In that checkout, install Python dependencies and
+Chromium with `uv sync` and `uvx browser-use install`. `uv` must be on the agent
+service's `PATH`. `BROWSER_USE_HEADLESS` defaults to `true`.
+
+Every chat receives a temporary Browser Use config, Chromium profile, download
+directory, and enforcing loopback proxy. The proxy blocks non-HTTP(S), embedded
+credentials, loopback, link-local, private/reserved networks, metadata services,
+unsafe redirects, and DNS rebinding. Browser processes and their Chromium
+process groups are terminated on Stop or disconnect; temporary state is then
+removed. Do not weaken this isolation or expose the MCP process directly.
+The initial `about:blank` observation intentionally has no view frame; the
+first bounded view is emitted once navigation reaches a public HTTP(S) page.
 
 ## Scripts
 
@@ -55,9 +73,10 @@ real Azure call, so it needs a valid `.env` and takes ~1min (the model is slow).
 | --------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `src/index.ts`                                            | HTTP + WS server; origin + cookie auth; buffers early frames until ready |
 | `src/agent-loop.ts`                                       | The streaming tool-calling loop (one per connection); per-turn caps      |
-| `src/tools.ts`                                            | The 7 tools (schemas + dispatcher) against the gateway                   |
+| `src/tools.ts`                                            | Terminal/browser function schemas and terminal dispatcher                |
 | `src/gateway-client.ts`                                   | Gateway REST client (login, sessions, screen, keys)                      |
-| `src/approvals.ts`                                        | Write-approval gate (request/response bridge, 120s timeout → deny)       |
+| `src/approvals.ts`                                        | Write-approval gate (browser actions are always one-time)                |
+| `src/browser-runtime.ts` / `src/browser-proxy.ts`         | Isolated Browser Use MCP lifecycle and network enforcement               |
 | `src/history.ts`                                          | Per-chat JSONL persistence under `data/` (gitignored)                    |
 | `src/azure.ts` / `src/config.ts` / `src/system-prompt.ts` | Azure client, env validation, operator persona                           |
 

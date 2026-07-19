@@ -5,8 +5,10 @@
 import {
   Clock,
   Eye,
+  Globe2,
   Keyboard,
   List,
+  MousePointer2,
   Plus,
   type LucideIcon,
 } from "lucide-react";
@@ -16,6 +18,13 @@ export const WRITE_TOOL_NAMES = new Set([
   "press_keys",
   "run_command",
   "create_session",
+  "browser_act",
+]);
+
+export const BROWSER_TOOL_NAMES = new Set([
+  "browser_observe",
+  "browser_list_tabs",
+  "browser_act",
 ]);
 
 export function toolIcon(tool: string): LucideIcon {
@@ -28,6 +37,12 @@ export function toolIcon(tool: string): LucideIcon {
       return Clock;
     case "create_session":
       return Plus;
+    case "browser_observe":
+      return Globe2;
+    case "browser_list_tabs":
+      return List;
+    case "browser_act":
+      return MousePointer2;
     case "type_text":
     case "press_keys":
     case "run_command":

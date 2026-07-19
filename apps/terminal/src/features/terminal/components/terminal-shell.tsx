@@ -29,7 +29,7 @@ import {
 } from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
-import { FolderTree, Loader2, Menu, Unplug } from "lucide-react";
+import { FolderTree, Globe2, Loader2, Menu, Unplug } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DynamicXTerm } from "./dynamic-xterm";
@@ -70,6 +70,10 @@ import {
   useAgentStore,
 } from "@/features/agent-chat";
 import { authKeys, useAuthStatus, useLogout } from "@/features/auth";
+import {
+  BrowserViewOverlay,
+  useBrowserViewStore,
+} from "@/features/browser-view";
 
 export function TerminalShell() {
   const queryClient = useQueryClient();
@@ -95,6 +99,9 @@ export function TerminalShell() {
   // Agent panel open state lives in the agent-chat store (persisted there).
   const agentPanelOpen = useAgentStore((s) => s.panelOpen);
   const setAgentPanelOpen = useAgentStore((s) => s.setPanelOpen);
+  const browserView = useBrowserViewStore((s) => s.view);
+  const browserVisible = useBrowserViewStore((s) => s.visible);
+  const showBrowser = useBrowserViewStore((s) => s.show);
 
   const {
     data: sessions = [],
@@ -389,6 +396,22 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Browse files</TooltipContent>
           </Tooltip>
+          {browserView && !browserVisible && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-chart-2 size-7 shrink-0"
+                  aria-label="Reopen browser view"
+                  onClick={showBrowser}
+                >
+                  <Globe2 className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reopen browser view</TooltipContent>
+            </Tooltip>
+          )}
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
             <span className={dotClass} />
             <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">
@@ -416,6 +439,10 @@ export function TerminalShell() {
               <p className="text-muted-foreground">No session selected.</p>
             </div>
           )}
+
+          {/* Read-only screenshots cover xterm in-place. Xterm remains mounted,
+              connected, and at the same size beneath this absolute layer. */}
+          <BrowserViewOverlay />
 
           {/* Connect/reconnect overlay: the header badge alone is easy to miss,
               so surface the wait on the pane itself. Removed reactively when

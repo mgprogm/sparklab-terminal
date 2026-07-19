@@ -49,6 +49,10 @@ export const config = {
     user: process.env.GATEWAY_AUTH_USER?.trim() || "",
     password: process.env.GATEWAY_AUTH_PASSWORD?.trim() || "",
   },
+  browser: {
+    project: process.env.BROWSER_USE_PROJECT?.trim() || "",
+    headless: optional("BROWSER_USE_HEADLESS", "true") !== "false",
+  },
 } as const;
 
 /** Coarse per-turn safety caps (see agent-loop). */
@@ -56,4 +60,5 @@ export const CAPS = {
   maxModelCalls: 24,
   maxWriteExecs: 10,
   approvalTimeoutMs: 120_000,
+  browserActionTimeoutMs: 30_000,
 } as const;

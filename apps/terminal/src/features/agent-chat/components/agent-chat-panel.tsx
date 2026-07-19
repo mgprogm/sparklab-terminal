@@ -342,10 +342,10 @@ function MessageStream({
                 className="border-l-border text-muted-foreground border-l-2 py-1 pl-2 text-xs"
               >
                 {e.state === "deny"
-                  ? "⌨ request denied"
+                  ? `${e.tool.startsWith("browser_") ? "🌐" : "⌨"} request denied`
                   : e.state === "expired"
-                    ? "⌨ request expired"
-                    : "⌨ approved"}
+                    ? `${e.tool.startsWith("browser_") ? "🌐" : "⌨"} request expired`
+                    : `${e.tool.startsWith("browser_") ? "🌐" : "⌨"} approved`}
               </div>
             );
           case "notice":

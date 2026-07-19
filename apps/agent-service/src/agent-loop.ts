@@ -34,6 +34,7 @@ import {
   targetSession,
   type ToolArgs,
 } from "./tools.js";
+import { BrowserRuntime, type BrowserAction } from "./browser-runtime.js";
 
 type Send = (frame: AgentWsServerMessage) => void;
 
@@ -50,11 +51,13 @@ export class AgentLoop {
   private abort: AbortController | null = null;
   private running = false;
   private ready: Promise<void>;
+  private browser: BrowserRuntime;
 
   constructor(
     private send: Send,
     resumeChatId?: string,
   ) {
+    this.browser = this.newBrowserRuntime();
     this.chatId = resumeChatId || newChatId();
     this.ready = resumeChatId
       ? loadChat(resumeChatId).then((h) => {
@@ -84,11 +87,13 @@ export class AgentLoop {
   interrupt(): void {
     this.abort?.abort();
     this.approvals.denyAll();
+    void this.closeBrowser();
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.abort?.abort();
     this.approvals.denyAll();
+    await this.closeBrowser();
   }
 
   async handleUserMessage(
@@ -149,7 +154,15 @@ export class AgentLoop {
                   (tc): ChatCompletionMessageToolCall => ({
                     id: tc.id,
                     type: "function",
-                    function: { name: tc.name, arguments: tc.arguments },
+                    function: {
+                      name: tc.name,
+                      arguments: JSON.stringify(
+                        sanitizePersistedToolArgs(
+                          tc.name,
+                          parseArgs(tc.arguments),
+                        ),
+                      ),
+                    },
                   }),
                 ),
               }
@@ -168,6 +181,7 @@ export class AgentLoop {
         for (const tc of toolCalls) {
           if (signal.aborted) break;
           const args = parseArgs(tc.arguments);
+          const publicArgs = redactToolArgs(tc.name, args);
           const sessionId = targetSession(args);
           const summary = describeCall(tc.name, args);
           const isWrite = WRITE_TOOLS.has(tc.name);
@@ -178,7 +192,7 @@ export class AgentLoop {
             tool: tc.name,
             sessionId,
             summary,
-            input: args,
+            input: publicArgs,
           });
 
           let resultContent: string;
@@ -196,8 +210,9 @@ export class AgentLoop {
                   tool: tc.name,
                   sessionId,
                   summary,
-                  input: args,
+                  input: publicArgs,
                 }),
+              tc.name !== "browser_act",
             );
             if (behavior === "deny") {
               resultContent =
@@ -210,7 +225,7 @@ export class AgentLoop {
                 ok: false,
                 summary: "denied by user",
               });
-              await this.appendToolResult(tc.id, resultContent);
+              await this.appendToolResult(tc.id, resultContent, tc.name);
               continue;
             }
           }
@@ -223,12 +238,12 @@ export class AgentLoop {
             } else {
               writeExecs++;
               this.send({ type: "status", state: "acting" });
-              resultContent = await executeTool(tc.name, args, signal);
+              resultContent = await this.execute(tc.name, args, signal);
               ok = !resultContent.startsWith("error");
             }
           } else {
             this.send({ type: "status", state: "acting" });
-            resultContent = await executeTool(tc.name, args, signal);
+            resultContent = await this.execute(tc.name, args, signal);
             ok = !resultContent.startsWith("error");
           }
 
@@ -239,7 +254,7 @@ export class AgentLoop {
             ok,
             summary: ok ? undefined : resultContent.slice(0, 200),
           });
-          await this.appendToolResult(tc.id, resultContent);
+          await this.appendToolResult(tc.id, resultContent, tc.name);
         }
       }
     } catch (err) {
@@ -260,6 +275,7 @@ export class AgentLoop {
   private async appendToolResult(
     toolCallId: string,
     content: string,
+    tool: string,
   ): Promise<void> {
     const msg: ChatCompletionMessageParam = {
       role: "tool",
@@ -267,11 +283,66 @@ export class AgentLoop {
       content,
     };
     this.history.push(msg);
-    await appendMessages(this.chatId, [msg]);
+    const persistedMsg: ChatCompletionMessageParam = {
+      ...msg,
+      content: sanitizePersistedToolResult(tool, content),
+    };
+    await appendMessages(this.chatId, [persistedMsg]);
   }
 
   private finishWithNotice(text: string): void {
     this.send({ type: "assistant_message", text });
+  }
+
+  private async execute(
+    tool: string,
+    args: ToolArgs,
+    signal: AbortSignal,
+  ): Promise<string> {
+    try {
+      if (tool === "browser_observe") {
+        const result = await this.browser.observe(signal);
+        if (result.snapshot)
+          this.send({ type: "browser_view", ...result.snapshot });
+        return result.content;
+      }
+      if (tool === "browser_list_tabs")
+        return (await this.browser.listTabs(signal)).content;
+      if (tool === "browser_act") {
+        const action = parseBrowserAction(args);
+        if (typeof action === "string") return `error: ${action}`;
+        const result = await this.browser.act(action, signal);
+        if (result.snapshot)
+          this.send({ type: "browser_view", ...result.snapshot });
+        return result.content;
+      }
+      return executeTool(tool, args, signal);
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      if (tool.startsWith("browser_") && this.browser.isClosed) {
+        this.browser = this.newBrowserRuntime();
+      }
+      return `error: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async closeBrowser(): Promise<void> {
+    // A concurrent abort may already have disposed the runtime and cleared its
+    // child. Still replace that closed instance so the next turn starts cleanly.
+    if (!this.browser.isActive && !this.browser.isClosed) return;
+    const closing = this.browser;
+    this.browser = this.newBrowserRuntime();
+    const browserId = closing.browserId;
+    const revision = await closing.dispose();
+    this.send({ type: "browser_closed", browserId, revision });
+  }
+
+  private newBrowserRuntime(): BrowserRuntime {
+    return new BrowserRuntime((browserId, revision) => {
+      this.send({ type: "browser_closed", browserId, revision });
+      if (this.browser.browserId === browserId)
+        this.browser = this.newBrowserRuntime();
+    });
   }
 
   /** One streaming model call: relay text deltas, accumulate tool calls. */
@@ -330,5 +401,80 @@ function parseArgs(raw: string): ToolArgs {
     return v && typeof v === "object" ? (v as ToolArgs) : {};
   } catch {
     return {};
+  }
+}
+
+function redactToolArgs(tool: string, args: ToolArgs): ToolArgs {
+  return tool === "browser_act" && args.action === "type"
+    ? { ...args, text: "[redacted]" }
+    : args;
+}
+
+export function sanitizePersistedToolArgs(
+  tool: string,
+  args: ToolArgs,
+): ToolArgs {
+  const redacted = redactToolArgs(tool, args);
+  if (
+    tool !== "browser_act" ||
+    args.action !== "navigate" ||
+    typeof args.url !== "string"
+  ) {
+    return redacted;
+  }
+  try {
+    const url = new URL(args.url);
+    url.search = "";
+    url.hash = "";
+    return { ...redacted, url: url.toString() };
+  } catch {
+    return { ...redacted, url: "[invalid URL omitted]" };
+  }
+}
+
+export function sanitizePersistedToolResult(
+  tool: string,
+  content: string,
+): string {
+  return tool.startsWith("browser_")
+    ? "[browser result omitted from durable history]"
+    : content;
+}
+
+function parseBrowserAction(args: ToolArgs): BrowserAction | string {
+  switch (args.action) {
+    case "navigate":
+      return typeof args.url === "string" && args.url.length <= 2048
+        ? { action: "navigate", url: args.url, new_tab: args.new_tab }
+        : "navigate requires a URL of at most 2048 characters";
+    case "click":
+      return Number.isInteger(args.index) && (args.index ?? -1) >= 0
+        ? {
+            action: "click",
+            index: args.index as number,
+            new_tab: args.new_tab,
+          }
+        : "click requires a non-negative element index";
+    case "type":
+      return Number.isInteger(args.index) &&
+        typeof args.text === "string" &&
+        args.text.length <= 10_000
+        ? { action: "type", index: args.index as number, text: args.text }
+        : "type requires an element index and text of at most 10000 characters";
+    case "scroll":
+      return args.direction === "up" || args.direction === "down"
+        ? { action: "scroll", direction: args.direction }
+        : "scroll direction must be up or down";
+    case "go_back":
+      return { action: "go_back" };
+    case "switch_tab":
+    case "close_tab":
+      return typeof args.tab_id === "string" &&
+        args.tab_id.length > 0 &&
+        args.tab_id.length <= 64
+        ? { action: args.action, tab_id: args.tab_id }
+        : `${args.action} requires a tab_id`;
+    default:
+      return "unknown browser action";
   }
 }

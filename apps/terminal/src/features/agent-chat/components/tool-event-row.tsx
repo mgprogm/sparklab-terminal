@@ -70,7 +70,7 @@ export function ToolEventRow({
       </button>
       {open && (
         <div className="bg-secondary/40 [&::-webkit-scrollbar-thumb]:bg-border mt-1 max-h-56 overflow-auto whitespace-pre rounded-sm p-2 font-mono text-xs [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5">
-          {formatInput(entry.input)}
+          {formatInput(entry.tool, entry.input)}
           {entry.resultSummary && (
             <>
               {"\n\n— result —\n"}
@@ -83,8 +83,17 @@ export function ToolEventRow({
   );
 }
 
-function formatInput(input: unknown): string {
+function formatInput(tool: string, input: unknown): string {
   try {
+    if (tool === "browser_act" && input && typeof input === "object") {
+      const safe = { ...(input as Record<string, unknown>) };
+      // Typed page values can be credentials or other secrets. Tool events
+      // describe the action without echoing those values into the transcript.
+      for (const key of ["text", "value", "password"]) {
+        if (key in safe) safe[key] = "[redacted]";
+      }
+      return JSON.stringify(safe, null, 2);
+    }
     return JSON.stringify(input, null, 2);
   } catch {
     return String(input);

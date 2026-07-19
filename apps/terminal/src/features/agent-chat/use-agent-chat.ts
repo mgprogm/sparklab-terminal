@@ -15,6 +15,7 @@ import { authKeys } from "@/features/auth";
 import { useQueryClient } from "@tanstack/react-query";
 import { AgentConnection } from "./connection";
 import { useAgentStore } from "./store";
+import { useBrowserViewStore } from "@/features/browser-view";
 
 let conn: AgentConnection | null = null;
 
@@ -27,10 +28,20 @@ export function useAgentChat() {
     (resumeChatId: string | null) => {
       conn?.dispose();
       const ingest = useAgentStore.getState().ingest;
+      const ingestBrowser = useBrowserViewStore.getState().ingest;
       const setConnected = useAgentStore.getState().setConnected;
       conn = new AgentConnection(
         {
-          onFrame: ingest,
+          onFrame: (frame) => {
+            if (
+              frame.type === "browser_view" ||
+              frame.type === "browser_closed"
+            ) {
+              ingestBrowser(frame);
+              return;
+            }
+            ingest(frame);
+          },
           onConnected: setConnected,
           onAuthError: () => {
             void queryClient.invalidateQueries({ queryKey: authKeys.me() });
@@ -75,6 +86,7 @@ export function useAgentChat() {
 
   /** Start a fresh chat (old one stays in history). */
   const newChat = useCallback(() => {
+    useBrowserViewStore.getState().clear();
     useAgentStore.getState().resetForNewChat();
     openConnection(null);
   }, [openConnection]);
@@ -83,6 +95,7 @@ export function useAgentChat() {
   const loadChat = useCallback(
     (chatId: string) => {
       if (chatId === useAgentStore.getState().chatId) return;
+      useBrowserViewStore.getState().clear();
       // Clear now; chat_history will replace with the reconstructed transcript.
       // loadingChat keeps the panel on "Loading chat…" (not the new-chat empty
       // state) until that replay arrives.

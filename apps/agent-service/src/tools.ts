@@ -1,13 +1,15 @@
 /**
- * The agent's entire capability surface: seven tools, defined as OpenAI
- * function-calling schemas and dispatched against the gateway client.
+ * The agent's entire capability surface: terminal and virtual-browser tools,
+ * defined as OpenAI function-calling schemas.
  *
  * Because the loop is ours, there are no built-in tools to disable — these are
  * the only things the model can do, and every one flows through tmux-owned
- * processes via the gateway.
+ * processes via the gateway or the isolated Browser Use runtime.
  *
- *   READ  (auto):  list_sessions, read_screen, wait_idle
- *   WRITE (ask):   type_text, press_keys, run_command, create_session
+ *   READ  (auto):  list_sessions, read_screen, wait_idle,
+ *                  browser_observe, browser_list_tabs
+ *   WRITE (ask):   type_text, press_keys, run_command, create_session,
+ *                  browser_act
  *
  * There is deliberately no kill_session — destroying a session stays a
  * human-only act in the UI.
@@ -21,11 +23,74 @@ export const WRITE_TOOLS = new Set([
   "press_keys",
   "run_command",
   "create_session",
+  "browser_act",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
 
 export const TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "browser_observe",
+      description:
+        "Observe the current browser page: URL, title, viewport, indexed interactive elements, and screenshot. Starts an isolated browser lazily. Call before every browser action.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_list_tabs",
+      description: "List tabs in this chat's isolated browser.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_act",
+      description:
+        "Perform exactly one browser action. Always requires one-time user approval. Observe first and use indexed elements. Type only non-secret data explicitly supplied for this task.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: [
+              "navigate",
+              "click",
+              "type",
+              "scroll",
+              "go_back",
+              "switch_tab",
+              "close_tab",
+            ],
+          },
+          url: {
+            type: "string",
+            maxLength: 2048,
+            description: "Absolute public HTTP(S) URL for navigate.",
+          },
+          new_tab: { type: "boolean" },
+          index: { type: "integer", minimum: 0, maximum: 100000 },
+          text: { type: "string", maxLength: 10000 },
+          direction: { type: "string", enum: ["up", "down"] },
+          tab_id: { type: "string", minLength: 1, maxLength: 64 },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -169,6 +234,12 @@ export interface ToolArgs {
   history_lines?: number;
   timeout_ms?: number;
   quiet_ms?: number;
+  action?: string;
+  url?: string;
+  new_tab?: boolean;
+  index?: number;
+  direction?: string;
+  tab_id?: string;
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -195,6 +266,24 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `run: ${truncate(String(args.command ?? ""))}`;
     case "create_session":
       return `create session${args.name ? ` "${args.name}"` : ""}`;
+    case "browser_observe":
+      return "observe browser";
+    case "browser_list_tabs":
+      return "list browser tabs";
+    case "browser_act":
+      if (args.action === "type")
+        return `type into browser element ${args.index ?? "?"}: [redacted]`;
+      if (args.action === "navigate")
+        return `navigate browser to ${truncate(String(args.url ?? ""))}`;
+      if (args.action === "click")
+        return `click browser element ${args.index ?? "?"}`;
+      if (args.action === "scroll")
+        return `scroll browser ${args.direction ?? ""}`;
+      if (args.action === "switch_tab")
+        return `switch to browser tab ${args.tab_id ?? ""}`;
+      if (args.action === "close_tab")
+        return `close browser tab ${args.tab_id ?? ""}`;
+      return "go back in browser";
     default:
       return tool;
   }
