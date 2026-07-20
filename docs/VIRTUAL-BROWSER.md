@@ -42,6 +42,8 @@ Open `http://localhost:3002`, open Agent Chat, and ask it to visit a public HTTP
 
 The initial `about:blank` observation intentionally displays no screenshot. Private, loopback, link-local, reserved, credential-bearing, and non-HTTP(S) destinations are rejected.
 
+> **Local enablement status (2026-07-20):** on this dev machine the Browser Use checkout (`/home/sparklab/workspaces/sparklab/browser-use`) has `uv sync` done and `uv` is on `PATH`; `BROWSER_USE_PROJECT` + `BROWSER_USE_HEADLESS=true` were added to `apps/agent-service/.env`. **Not yet manually tested end-to-end** — agent-service has not been restarted and the browser lazy-spawn / snapshot flow has not been exercised in the UI. Verify by restarting `pnpm dev` and asking Agent Chat to visit a public URL before relying on it.
+
 ## Code Map and Invariants
 
 - `apps/agent-service/src/browser-runtime.ts` owns one lazy Browser Use MCP subprocess per agent loop, bounded MCP messages, snapshots, and cleanup.
