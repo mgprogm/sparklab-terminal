@@ -51,5 +51,9 @@ coverage/
 # graphify knowledge-graph output (regenerate with graphify_azure.py)
 graphify-out/
 
+# CI workflows and git hooks (kept out of the public repo)
+.github/workflows/
+.husky/
+
 # agent-service chat history (per-chat JSONL)
 apps/agent-service/data/
