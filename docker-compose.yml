@@ -1,0 +1,39 @@
+# Sparklab Terminal — all-in-one container.
+#
+#   cp .env.docker.example .env.docker   # then edit at least the AUTH_* values
+#   docker compose up -d --build
+#   open http://localhost:3110           # login: admin / (your password)
+#
+# The frontend bakes PUBLIC_ORIGIN at BUILD time — so PUBLIC_ORIGIN is passed as
+# a build arg AND a runtime env. Change it (e.g. to your https domain) and
+# rebuild: `docker compose up -d --build`.
+#
+# See docs/DOCKER.md for TLS/reverse-proxy deployment and the tmux lifetime note.
+
+services:
+  sparklab:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        # Baked into the client bundle (WS/REST target). Must equal the origin
+        # the browser actually loads the app from.
+        PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3110}
+    image: sparklab-terminal:latest
+    env_file:
+      - .env.docker
+    environment:
+      # Runtime copy of the same origin (allowlist + cookie scoping). Keep in
+      # sync with the build arg above.
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3110}
+    ports:
+      - "${HOST_PORT:-3110}:3110"
+    volumes:
+      # All mutable state (session metadata, server registry, push subs/settings,
+      # agent chat history). Survives container recreation; tmux sessions do NOT.
+      - sparklab-data:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+volumes:
+  sparklab-data:

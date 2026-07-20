@@ -44,6 +44,9 @@ coverage/
 .env
 .env.local
 .env*.local
+# Docker env (real secrets); the *.example template stays checked in.
+.env.docker
+!.env.docker.example
 
 # TypeScript incremental build info
 *.tsbuildinfo

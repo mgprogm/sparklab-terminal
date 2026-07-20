@@ -1,0 +1,32 @@
+# Build context excludes — keep the image lean and reproducible.
+# node_modules are installed fresh inside the image (native node-pty must be
+# compiled against the image's toolchain, never copied from the host/macOS).
+**/node_modules
+**/.next
+**/.next-prod
+**/.next-e2e
+**/.turbo
+
+# Runtime state / secrets — never bake these into an image (see docs/DOCKER.md;
+# state lives in the /data volume, secrets come from env at run time).
+data/
+apps/*/data/
+servers.json
+apps/*/servers.json
+push-subscriptions.json
+apps/*/push-subscriptions.json
+push-settings.json
+apps/*/push-settings.json
+.env
+.env.local
+.env*.local
+apps/*/.env
+apps/*/.env.local
+
+# Regenerable / dev-only
+graphify-out/
+.git
+.github
+.husky
+**/*.log
+.DS_Store
