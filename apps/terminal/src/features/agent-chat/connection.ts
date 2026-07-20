@@ -1,8 +1,9 @@
 /**
  * AgentConnection — the chat WebSocket to the agent service, modelled on the
  * terminal's Connection class (heartbeat, exponential backoff, noReconnect on
- * 4001, StrictMode-safe disposal). JSON text frames only; every inbound frame
- * is validated against AgentWsServerMessageSchema and dropped if invalid.
+ * 4001, StrictMode-safe disposal). Each instance is bound to one terminal and
+ * reconnects with that terminal plus its resolved chat id. JSON text frames
+ * only; every inbound frame is schema-validated and invalid frames are dropped.
  */
 import {
   AgentWsServerMessageSchema,
@@ -32,7 +33,9 @@ export class AgentConnection {
 
   constructor(
     private readonly callbacks: AgentConnectionCallbacks,
+    private readonly terminalSessionId: string,
     private resumeChatId: string | null = null,
+    private readonly forceNewChat = false,
   ) {
     this.agentUrl =
       process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:3009";
@@ -42,10 +45,12 @@ export class AgentConnection {
     if (this.noReconnect) return;
     const proto = this.agentUrl.startsWith("https") ? "wss" : "ws";
     const host = this.agentUrl.replace(/^https?:\/\//, "");
-    const q = this.resumeChatId
-      ? `?resumeChatId=${encodeURIComponent(this.resumeChatId)}`
-      : "";
-    const ws = new WebSocket(`${proto}://${host}/agent${q}`);
+    const params = new URLSearchParams({
+      terminalSessionId: this.terminalSessionId,
+    });
+    if (this.resumeChatId) params.set("resumeChatId", this.resumeChatId);
+    if (this.forceNewChat) params.set("newChat", "1");
+    const ws = new WebSocket(`${proto}://${host}/agent?${params.toString()}`);
     this.ws = ws;
 
     ws.onopen = () => {

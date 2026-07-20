@@ -24,6 +24,12 @@ dependency an HTTP client (`openai` in Azure mode) and makes the declared
 terminal and browser tools the model's entire capability surface — there are no
 built-in tools to disable.
 
+Chats are owned by terminal session, not by the browser page. Every `/agent`
+connection supplies `terminalSessionId`; the service resumes that terminal's
+latest chat unless the client selects a specific `resumeChatId` or requests
+`newChat=1`. Ownership is durable, so switching terminals or reloading the page
+cannot leak one terminal's transcript into another.
+
 ## Setup
 
 ```bash
@@ -77,7 +83,7 @@ real Azure call, so it needs a valid `.env` and takes ~1min (the model is slow).
 | `src/gateway-client.ts`                                   | Gateway REST client (login, sessions, screen, keys)                      |
 | `src/approvals.ts`                                        | Write-approval gate (browser actions are always one-time)                |
 | `src/browser-runtime.ts` / `src/browser-proxy.ts`         | Isolated Browser Use MCP lifecycle and network enforcement               |
-| `src/history.ts`                                          | Per-chat JSONL persistence under `data/` (gitignored)                    |
+| `src/history.ts`                                          | JSONL history + terminal ownership metadata; latest-chat resolution      |
 | `src/azure.ts` / `src/config.ts` / `src/system-prompt.ts` | Azure client, env validation, operator persona                           |
 
 Runs via `tsx` (not plain `node`) because it imports `@sparklab/shared-types`

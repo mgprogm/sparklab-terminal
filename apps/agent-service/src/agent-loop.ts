@@ -19,12 +19,7 @@ import type {
 import { azure, MODEL } from "./azure.js";
 import { CAPS } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
-import {
-  appendMessages,
-  loadChat,
-  newChatId,
-  reconstructTranscript,
-} from "./history.js";
+import { appendMessages, loadChat, reconstructTranscript } from "./history.js";
 import { systemPrompt } from "./system-prompt.js";
 import {
   TOOLS,
@@ -55,20 +50,23 @@ export class AgentLoop {
 
   constructor(
     private send: Send,
-    resumeChatId?: string,
+    chatId: string,
+    private readonly terminalSessionId: string,
   ) {
     this.browser = this.newBrowserRuntime();
-    this.chatId = resumeChatId || newChatId();
-    this.ready = resumeChatId
-      ? loadChat(resumeChatId).then((h) => {
-          this.history = h;
-        })
-      : Promise.resolve();
+    this.chatId = chatId;
+    this.ready = loadChat(chatId).then((history) => {
+      this.history = history;
+    });
   }
 
   async init(): Promise<void> {
     await this.ready;
-    this.send({ type: "chat_started", chatId: this.chatId });
+    this.send({
+      type: "chat_started",
+      chatId: this.chatId,
+      terminalSessionId: this.terminalSessionId,
+    });
     // Replay the transcript so a resumed chat (explicit load, page reload, or
     // transient reconnect) renders. The client REPLACES its entries with this.
     if (this.history.length > 0) {

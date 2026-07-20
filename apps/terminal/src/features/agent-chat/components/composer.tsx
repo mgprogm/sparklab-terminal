@@ -7,8 +7,6 @@
  * Enter sends, Shift+Enter inserts a newline. While the agent is working the
  * send button becomes a Stop that interrupts the turn.
  */
-import { useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronDown, Pin, Square } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,17 +14,23 @@ import {
   DropdownMenuTrigger,
 } from "@sparklab/ui/components/ui/dropdown-menu";
 import { cn } from "@sparklab/ui/lib/utils";
-import type { SessionInfo } from "@sparklab/shared-types";
+import { ArrowUp, ChevronDown, Pin, Square } from "lucide-react";
+import { useLayoutEffect, useRef, useState } from "react";
+
 import { useAgentStore } from "../store";
+
+import type { SessionInfo } from "@sparklab/shared-types";
 
 export function Composer({
   sessions,
   activeSessionId,
+  disabled = false,
   onSend,
   onStop,
 }: {
   sessions: SessionInfo[];
   activeSessionId: string | null;
+  disabled?: boolean;
   onSend: (text: string, targetSessionId?: string) => void;
   onStop: () => void;
 }) {
@@ -55,7 +59,7 @@ export function Composer({
 
   const submit = () => {
     const t = text.trim();
-    if (!t || working) return;
+    if (!t || working || disabled) return;
     onSend(t, effectiveTarget ?? undefined);
     setText("");
   };
@@ -67,6 +71,7 @@ export function Composer({
           ref={taRef}
           rows={1}
           value={text}
+          disabled={disabled}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
@@ -74,7 +79,9 @@ export function Composer({
               submit();
             }
           }}
-          placeholder="Ask the agent…"
+          placeholder={
+            disabled ? "Waiting for terminal chat…" : "Ask the agent…"
+          }
           className="text-foreground placeholder:text-muted-foreground max-h-[132px] min-h-8 resize-none bg-transparent px-3 pb-1 pt-2 text-base leading-relaxed outline-none sm:text-sm"
         />
 
@@ -125,11 +132,11 @@ export function Composer({
             <button
               type="button"
               onClick={submit}
-              disabled={!text.trim()}
+              disabled={!text.trim() || disabled}
               aria-label="Send"
               className={cn(
                 "bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-sm transition-opacity",
-                !text.trim() && "opacity-40",
+                (!text.trim() || disabled) && "opacity-40",
               )}
             >
               <ArrowUp className="size-4" />

@@ -5,7 +5,23 @@ import {
   AgentBrowserViewSchema,
   AgentWsServerMessageSchema,
   MAX_BROWSER_SCREENSHOT_BASE64_LENGTH,
+  AgentWsClientMessageSchema,
 } from "./agent";
+
+describe("terminal-linked chat frames", () => {
+  it("accepts terminal-scoped history requests and chat ownership", () => {
+    expect(AgentWsClientMessageSchema.parse({ type: "list_chats" })).toEqual({
+      type: "list_chats",
+    });
+    expect(
+      AgentWsServerMessageSchema.parse({
+        type: "chat_started",
+        chatId: "chat-a",
+        terminalSessionId: "local/web-a",
+      }),
+    ).toMatchObject({ terminalSessionId: "local/web-a" });
+  });
+});
 
 const view = {
   type: "browser_view" as const,

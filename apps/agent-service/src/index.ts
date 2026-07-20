@@ -4,8 +4,10 @@
  * HTTP server + a WebSocket endpoint at /agent. On upgrade we mirror the
  * gateway's WS security posture: origin allowlist BEFORE the handshake, then
  * cookie auth AFTER (by proxying the browser's cookie to the gateway's
- * /api/auth/me). Unauthorized connections close with code 4001, which the
- * frontend maps to "do not reconnect" — the same contract the terminal uses.
+ * /api/auth/me). Each authenticated socket is then bound to its required
+ * terminalSessionId before resolving that terminal's chat. Unauthorized
+ * connections close with code 4001, which the frontend maps to "do not
+ * reconnect" — the same contract the terminal uses.
  */
 import { createServer } from "node:http";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
@@ -16,7 +18,7 @@ import {
 import { config } from "./config.js";
 import { gateway } from "./gateway-client.js";
 import { AgentLoop } from "./agent-loop.js";
-import { deleteChat, listChats } from "./history.js";
+import { deleteChat, listChats, openChat } from "./history.js";
 
 const server = createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
@@ -62,6 +64,7 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (ws: WebSocket, req) => {
   const send = (frame: AgentWsServerMessage) => safeSend(ws, frame);
   let loop: AgentLoop | null = null;
+  let connectedTerminalSessionId: string | undefined;
   let ready = false;
   // Messages can arrive before auth + loop.init() finish (the client sends on
   // WS open). Attach the listener SYNCHRONOUSLY and buffer until ready, or the
@@ -93,12 +96,23 @@ wss.on("connection", (ws: WebSocket, req) => {
         loop.interrupt();
         break;
       case "list_chats":
-        void listChats().then((chats) => send({ type: "chat_list", chats }));
+        void listChats(connectedTerminalSessionId).then((chats) =>
+          send({ type: "chat_list", chats }),
+        );
         break;
       case "delete_chat":
-        void deleteChat(msg.data.chatId)
-          .then(() => listChats())
-          .then((chats) => send({ type: "chat_list", chats }));
+        void deleteChat(msg.data.chatId, connectedTerminalSessionId)
+          .then(() => listChats(connectedTerminalSessionId))
+          .then((chats) => send({ type: "chat_list", chats }))
+          .catch((error: unknown) =>
+            send({
+              type: "error",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Unable to delete chat",
+            }),
+          );
         break;
     }
   };
@@ -145,8 +159,27 @@ wss.on("connection", (ws: WebSocket, req) => {
     }
 
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+    const terminalSessionId = url.searchParams.get("terminalSessionId")?.trim();
+    if (!terminalSessionId || terminalSessionId.length > 512) {
+      send({ type: "error", message: "terminalSessionId is required" });
+      ws.close(1008, "terminal session required");
+      return;
+    }
+    connectedTerminalSessionId = terminalSessionId;
     const resumeChatId = url.searchParams.get("resumeChatId") || undefined;
-    loop = new AgentLoop(send, resumeChatId);
+    const forceNew = url.searchParams.get("newChat") === "1";
+    let chatId: string;
+    try {
+      chatId = await openChat(terminalSessionId, resumeChatId, forceNew);
+    } catch (error) {
+      send({
+        type: "error",
+        message: error instanceof Error ? error.message : "Unable to open chat",
+      });
+      ws.close(1008, "unable to open chat");
+      return;
+    }
+    loop = new AgentLoop(send, chatId, terminalSessionId);
     loops.add(loop);
     await loop.init();
 

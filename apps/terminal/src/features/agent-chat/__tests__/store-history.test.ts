@@ -8,16 +8,20 @@
  * duplicate the whole conversation on a flaky link.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { useAgentStore } from "../store";
+
 import type {
   AgentChatSummary,
   AgentReplayEntry,
 } from "@sparklab/shared-types";
 
-import { useAgentStore } from "../store";
-
 function reset() {
   useAgentStore.setState({
     chatId: null,
+    terminalSessionId: null,
+    chatIdsByTerminal: {},
+    legacyChatId: null,
     entries: [],
     chats: [],
     unreadCount: 0,
@@ -33,11 +37,55 @@ describe("agent-chat store — history", () => {
 
   it("chat_list populates the chats list", () => {
     const chats: AgentChatSummary[] = [
-      { id: "a", title: "First", updatedAt: 2, messageCount: 4 },
-      { id: "b", title: "Second", updatedAt: 1, messageCount: 2 },
+      {
+        id: "a",
+        title: "First",
+        updatedAt: 2,
+        messageCount: 4,
+        terminalSessionId: "local/web-a",
+      },
+      {
+        id: "b",
+        title: "Second",
+        updatedAt: 1,
+        messageCount: 2,
+        terminalSessionId: "local/web-a",
+      },
     ];
     useAgentStore.getState().ingest({ type: "chat_list", chats });
     expect(useAgentStore.getState().chats).toEqual(chats);
+  });
+
+  it("records the latest chat independently for each terminal", () => {
+    useAgentStore.getState().ingest({
+      type: "chat_started",
+      chatId: "chat-a",
+      terminalSessionId: "local/web-a",
+    });
+    useAgentStore.getState().ingest({
+      type: "chat_started",
+      chatId: "chat-b",
+      terminalSessionId: "local/web-b",
+    });
+    expect(useAgentStore.getState().chatIdsByTerminal).toEqual({
+      "local/web-a": "chat-a",
+      "local/web-b": "chat-b",
+    });
+  });
+
+  it("clears the old transcript while switching terminals", () => {
+    useAgentStore.setState({
+      entries: [{ kind: "user", id: "old", text: "terminal A" }],
+      pinnedTargetId: "local/web-a",
+    });
+    useAgentStore.getState().beginTerminalSwitch("local/web-b", "chat-b");
+    expect(useAgentStore.getState()).toMatchObject({
+      terminalSessionId: "local/web-b",
+      chatId: "chat-b",
+      entries: [],
+      loadingChat: true,
+      pinnedTargetId: null,
+    });
   });
 
   it("chat_history REPLACES entries (does not append) and sets chatId", () => {

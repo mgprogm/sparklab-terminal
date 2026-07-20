@@ -1,10 +1,11 @@
 /**
- * Per-chat conversation persistence as JSONL under data/<chatId>.jsonl.
+ * Terminal-linked conversation persistence under data/: one model-message
+ * JSONL plus one immutable <chatId>.meta.json ownership record per chat.
  *
- * Because the loop is ours, one file serves BOTH jobs the Claude Agent SDK
- * would have handled separately: restoring the model's message history so a
- * dropped WebSocket can resume mid-conversation, and (for the UI) replaying
- * what was said. Each line is one OpenAI chat message.
+ * The JSONL restores model history and reconstructs the UI transcript. The
+ * metadata binds the chat to exactly one terminal and lets the service resolve
+ * that terminal's latest chat. Same-terminal opens are serialized to avoid
+ * minting duplicates when clients switch or reconnect concurrently.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -14,6 +15,7 @@ import {
   readFile,
   stat,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -28,16 +30,136 @@ import type {
 } from "@sparklab/shared-types";
 import { describeCall, targetSession, type ToolArgs } from "./tools.js";
 
-const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "data");
+const DATA_DIR =
+  process.env.AGENT_HISTORY_DIR?.trim() ||
+  join(dirname(fileURLToPath(import.meta.url)), "..", "data");
+
+interface ChatMetadata {
+  terminalSessionId: string;
+  createdAt: number;
+}
+
+const terminalLocks = new Map<string, Promise<void>>();
+let lastCreatedAt = 0;
 
 function chatFile(chatId: string): string {
-  // chatId is a server-minted UUID; still guard against path traversal.
-  const safe = chatId.replace(/[^a-zA-Z0-9-]/g, "");
-  return join(DATA_DIR, `${safe}.jsonl`);
+  return join(DATA_DIR, `${safeChatId(chatId)}.jsonl`);
+}
+
+function metadataFile(chatId: string): string {
+  return join(DATA_DIR, `${safeChatId(chatId)}.meta.json`);
+}
+
+function safeChatId(chatId: string): string {
+  if (!/^[a-zA-Z0-9-]{1,128}$/.test(chatId)) {
+    throw new Error("Invalid chat id");
+  }
+  return chatId;
 }
 
 export function newChatId(): string {
   return randomUUID();
+}
+
+async function readMetadata(chatId: string): Promise<ChatMetadata | null> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(metadataFile(chatId), "utf8"),
+    ) as Partial<ChatMetadata>;
+    return typeof parsed.terminalSessionId === "string" &&
+      parsed.terminalSessionId.length > 0 &&
+      typeof parsed.createdAt === "number"
+      ? {
+          terminalSessionId: parsed.terminalSessionId,
+          createdAt: parsed.createdAt,
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function linkChat(
+  chatId: string,
+  terminalSessionId: string,
+): Promise<void> {
+  await mkdir(DATA_DIR, { recursive: true });
+  lastCreatedAt = Math.max(Date.now(), lastCreatedAt + 1);
+  const metadata: ChatMetadata = {
+    terminalSessionId,
+    createdAt: lastCreatedAt,
+  };
+  try {
+    await writeFile(metadataFile(chatId), JSON.stringify(metadata), {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  } catch (error) {
+    const existing = await readMetadata(chatId);
+    if (existing?.terminalSessionId === terminalSessionId) return;
+    if (existing) {
+      throw new Error("Chat belongs to a different terminal session");
+    }
+    throw error;
+  }
+}
+
+async function latestChatId(terminalSessionId: string): Promise<string | null> {
+  if (!existsSync(DATA_DIR)) return null;
+  const names = (await readdir(DATA_DIR)).filter((name) =>
+    name.endsWith(".meta.json"),
+  );
+  let latest: { id: string; updatedAt: number } | null = null;
+  for (const name of names) {
+    const id = name.replace(/\.meta\.json$/, "");
+    const metadata = await readMetadata(id);
+    if (metadata?.terminalSessionId !== terminalSessionId) continue;
+    let updatedAt = metadata.createdAt;
+    try {
+      updatedAt = Math.max(updatedAt, (await stat(chatFile(id))).mtimeMs);
+    } catch {
+      // A brand-new chat has metadata before its first persisted message.
+    }
+    if (!latest || updatedAt > latest.updatedAt) latest = { id, updatedAt };
+  }
+  return latest?.id ?? null;
+}
+
+/**
+ * Resolve the conversation for a terminal. Calls for the same terminal are
+ * serialized so two simultaneous first connections cannot mint two chats.
+ */
+export async function openChat(
+  terminalSessionId: string,
+  resumeChatId?: string,
+  forceNew = false,
+): Promise<string> {
+  const previous = terminalLocks.get(terminalSessionId) ?? Promise.resolve();
+  let release = () => {};
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  terminalLocks.set(terminalSessionId, queued);
+  await previous;
+  try {
+    if (resumeChatId) {
+      await linkChat(resumeChatId, terminalSessionId);
+      return resumeChatId;
+    }
+    if (!forceNew) {
+      const latest = await latestChatId(terminalSessionId);
+      if (latest) return latest;
+    }
+    const chatId = newChatId();
+    await linkChat(chatId, terminalSessionId);
+    return chatId;
+  } finally {
+    release();
+    if (terminalLocks.get(terminalSessionId) === queued) {
+      terminalLocks.delete(terminalSessionId);
+    }
+  }
 }
 
 export async function appendMessages(
@@ -68,19 +190,38 @@ export async function loadChat(
   return out;
 }
 
-/** Delete a chat's JSONL file. No-op if it doesn't exist. */
-export async function deleteChat(chatId: string): Promise<void> {
-  const file = chatFile(chatId);
-  if (existsSync(file)) await unlink(file);
+/** Delete both durable chat files. No-op when they do not exist. */
+export async function deleteChat(
+  chatId: string,
+  terminalSessionId?: string,
+): Promise<void> {
+  const metadata = await readMetadata(chatId);
+  if (
+    terminalSessionId &&
+    metadata &&
+    metadata.terminalSessionId !== terminalSessionId
+  ) {
+    throw new Error("Chat belongs to a different terminal session");
+  }
+  await Promise.all(
+    [chatFile(chatId), metadataFile(chatId)].map(async (file) => {
+      try {
+        await unlink(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }),
+  );
 }
 
 /**
- * List every persisted chat, newest-first. Metadata is DERIVED from the JSONL
- * (there is no sidecar): title from the first user message, updatedAt from the
- * file mtime, messageCount from the line count. Cheap enough for a single-user
- * tool — one stat + one read per file.
+ * List every persisted chat, newest-first. Display metadata is derived from the
+ * JSONL; terminal ownership comes from the adjacent metadata file. Cheap enough
+ * for a single-user tool — one stat + one read per file.
  */
-export async function listChats(): Promise<AgentChatSummary[]> {
+export async function listChats(
+  terminalSessionId?: string,
+): Promise<AgentChatSummary[]> {
   if (!existsSync(DATA_DIR)) return [];
   const names = (await readdir(DATA_DIR)).filter((n) => n.endsWith(".jsonl"));
   const out: AgentChatSummary[] = [];
@@ -93,6 +234,13 @@ export async function listChats(): Promise<AgentChatSummary[]> {
         readFile(file, "utf8"),
       ]);
       const messages: ChatCompletionMessageParam[] = [];
+      const metadata = await readMetadata(id);
+      if (
+        terminalSessionId &&
+        metadata?.terminalSessionId !== terminalSessionId
+      ) {
+        continue;
+      }
       for (const line of raw.split("\n")) {
         if (!line.trim()) continue;
         try {
@@ -107,6 +255,7 @@ export async function listChats(): Promise<AgentChatSummary[]> {
         title: deriveTitle(messages),
         updatedAt: info.mtimeMs,
         messageCount: messages.length,
+        terminalSessionId: metadata?.terminalSessionId ?? null,
       });
     } catch {
       /* unreadable file — omit rather than fail the whole list */

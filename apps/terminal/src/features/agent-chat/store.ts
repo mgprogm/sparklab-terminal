@@ -3,11 +3,16 @@
  * transcript. The WS connection (connection.ts) drives it through the `ingest`
  * action; components read/dispatch through the hooks below.
  *
- * Only `panelOpen` is persisted (like sidebarCollapsed) — the transcript is
- * ephemeral in the client; durable history lives in the service's JSONL.
+ * Persisted keys include the latest chat id per terminal session (see
+ * partialize). The transcript is ephemeral here; durable history and terminal
+ * ownership live in the service.
  */
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+
+import { WRITE_TOOL_NAMES } from "./tool-meta";
+
+import type { TranscriptEntry } from "./types";
 import type {
   AgentApprovalBehavior,
   AgentChatSummary,
@@ -15,8 +20,6 @@ import type {
   AgentStatusState,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
-import { WRITE_TOOL_NAMES } from "./tool-meta";
-import type { TranscriptEntry } from "./types";
 
 /** Fold a server-reconstructed replay entry into a UI transcript entry. */
 function replayToEntry(e: AgentReplayEntry): TranscriptEntry {
@@ -47,16 +50,30 @@ function replayToEntry(e: AgentReplayEntry): TranscriptEntry {
 let seq = 0;
 const nextId = () => `e${String(++seq)}`;
 
+/** Desktop presentation of the agent panel: right-docked column or modal. */
+export type AgentDisplayMode = "docked" | "modal";
+
 interface AgentState {
   panelOpen: boolean;
   setPanelOpen: (open: boolean) => void;
   togglePanel: () => void;
+
+  /** Desktop-only; mobile always uses the bottom Sheet regardless. */
+  displayMode: AgentDisplayMode;
+  setDisplayMode: (mode: AgentDisplayMode) => void;
+  toggleDisplayMode: () => void;
 
   connected: boolean;
   setConnected: (c: boolean) => void;
 
   status: AgentStatusState;
   chatId: string | null;
+  /** Terminal whose chat is currently rendered. */
+  terminalSessionId: string | null;
+  /** Last known chat per terminal, used for immediate reload/switch resume. */
+  chatIdsByTerminal: Record<string, string>;
+  /** One-time migration bridge from the former single global persisted chat. */
+  legacyChatId: string | null;
   entries: TranscriptEntry[];
   unreadCount: number;
 
@@ -90,6 +107,11 @@ interface AgentState {
   resolveApproval: (requestId: string, behavior: AgentApprovalBehavior) => void;
   /** Wipe transcript + chatId for a fresh chat (the WS reconnects with none). */
   resetForNewChat: () => void;
+  /** Clear transient state while a terminal-specific connection is opening. */
+  beginTerminalSwitch: (
+    terminalSessionId: string | null,
+    chatId?: string | null,
+  ) => void;
 }
 
 function bumpWrite(
@@ -122,11 +144,21 @@ export const useAgentStore = create<AgentState>()(
           unreadCount: !s.panelOpen ? 0 : s.unreadCount,
         })),
 
+      displayMode: "docked",
+      setDisplayMode: (mode) => set({ displayMode: mode }),
+      toggleDisplayMode: () =>
+        set((s) => ({
+          displayMode: s.displayMode === "docked" ? "modal" : "docked",
+        })),
+
       connected: false,
       setConnected: (c) => set({ connected: c }),
 
       status: "idle",
       chatId: null,
+      terminalSessionId: null,
+      chatIdsByTerminal: {},
+      legacyChatId: null,
       entries: [],
       unreadCount: 0,
       chats: [],
@@ -151,7 +183,16 @@ export const useAgentStore = create<AgentState>()(
       ingest: (frame) => {
         switch (frame.type) {
           case "chat_started":
-            set({ chatId: frame.chatId });
+            set((state) => ({
+              chatId: frame.chatId,
+              terminalSessionId: frame.terminalSessionId,
+              chatIdsByTerminal: {
+                ...state.chatIdsByTerminal,
+                [frame.terminalSessionId]: frame.chatId,
+              },
+              legacyChatId: null,
+              loadingChat: false,
+            }));
             break;
 
           case "chat_list":
@@ -344,12 +385,44 @@ export const useAgentStore = create<AgentState>()(
           agentActiveSessionIds: [],
           _writeActive: {},
         }),
+
+      beginTerminalSwitch: (terminalSessionId, chatId = null) =>
+        set({
+          terminalSessionId,
+          chatId,
+          entries: [],
+          unreadCount: 0,
+          status: "idle",
+          loadingChat: terminalSessionId !== null,
+          chats: [],
+          chatsLoading: false,
+          pinnedTargetId: null,
+          agentActiveSessionIds: [],
+          _writeActive: {},
+        }),
     }),
     {
       name: "agent-chat-store",
-      // Persist chatId too so a page reload resumes the last conversation (the
-      // service replays its transcript via chat_history on reconnect).
-      partialize: (s) => ({ panelOpen: s.panelOpen, chatId: s.chatId }),
+      partialize: (s) => ({
+        panelOpen: s.panelOpen,
+        displayMode: s.displayMode,
+        chatIdsByTerminal: s.chatIdsByTerminal,
+        legacyChatId: s.legacyChatId,
+      }),
+      version: 1,
+      migrate: (persisted, version) => {
+        const state = persisted as Partial<AgentState>;
+        if (version === 0) {
+          return {
+            ...state,
+            legacyChatId:
+              typeof state.chatId === "string" ? state.chatId : null,
+            chatId: null,
+            chatIdsByTerminal: {},
+          } as AgentState;
+        }
+        return state as AgentState;
+      },
     },
   ),
 );

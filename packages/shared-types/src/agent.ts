@@ -158,6 +158,8 @@ export type AgentWsClientMessage = z.infer<typeof AgentWsClientMessageSchema>;
 export const AgentChatStartedSchema = z.object({
   type: z.literal("chat_started"),
   chatId: z.string(),
+  /** Terminal session that owns this conversation. */
+  terminalSessionId: z.string().min(1),
 });
 export type AgentChatStarted = z.infer<typeof AgentChatStartedSchema>;
 
@@ -248,7 +250,7 @@ export const AgentPongSchema = z.object({
 });
 export type AgentPong = z.infer<typeof AgentPongSchema>;
 
-/** One row in the chat history list — metadata derived from the JSONL file. */
+/** One terminal-scoped history row: display data from JSONL + durable owner. */
 export const AgentChatSummarySchema = z.object({
   /** Chat id (== JSONL filename stem, resumable via ?resumeChatId=). */
   id: z.string(),
@@ -258,6 +260,8 @@ export const AgentChatSummarySchema = z.object({
   updatedAt: z.number(),
   /** Number of persisted messages (user + assistant + tool). */
   messageCount: z.number().int(),
+  /** Terminal session this chat is linked to; null marks legacy history. */
+  terminalSessionId: z.string().min(1).nullable(),
 });
 export type AgentChatSummary = z.infer<typeof AgentChatSummarySchema>;
 

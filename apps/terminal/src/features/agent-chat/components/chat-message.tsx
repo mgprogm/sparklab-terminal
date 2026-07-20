@@ -9,8 +9,8 @@
  */
 import { Fragment } from "react";
 import { cn } from "@sparklab/ui/lib/utils";
-import type { AssistantEntry, UserEntry } from "../types";
 import { Markdown } from "./markdown";
+import type { AssistantEntry, UserEntry } from "../types";
 
 function renderInline(text: string) {
   // Split on `code` spans; preserve newlines as <br/>.

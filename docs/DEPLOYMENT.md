@@ -74,10 +74,11 @@ Because Caddy serves the agent WS at the same public origin as the site,
 `NEXT_PUBLIC_AGENT_URL` is typically the same host as `NEXT_PUBLIC_GATEWAY_URL`
 (both `wss://term.example.com`); the path (`/agent` vs `/attach`) routes them.
 
-Conversation history is stored as JSONL files under `apps/agent-service/data/`
-(gitignored, one file per chat). Back up or prune that directory as needed — the
-user can delete individual chats from the panel's History modal, but there is no
-automatic expiry.
+Conversation history is stored under `apps/agent-service/data/` as a JSONL
+message log plus a `.meta.json` terminal-ownership record per chat. Both are
+required to preserve terminal-scoped resume behavior, so back up or prune them
+together. The directory is gitignored; users can delete individual chats from
+the focused terminal's History modal, but there is no automatic expiry.
 
 Virtual browser deployment additionally requires `uv sync` and
 `uvx browser-use install` in `BROWSER_USE_PROJECT`, plus enough CPU/memory for

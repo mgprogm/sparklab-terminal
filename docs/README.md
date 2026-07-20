@@ -24,7 +24,7 @@ This repo is a **pnpm + Turborepo monorepo**. The flagship app is a web terminal
 Browser (Next.js + xterm.js) --WS--> Gateway (node-pty) --tmux attach--> tmux server --> shell + jobs
 ```
 
-It also ships an **Agent Chat**: an AI agent (a custom tool-calling loop over Azure OpenAI, in `apps/agent-service`) that views and drives terminals — with per-write approval — through the gateway. It can also operate an isolated Browser Use instance and publish a read-only browser view. See [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md) and [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md).
+It also ships an **Agent Chat**: an AI agent (a custom tool-calling loop over Azure OpenAI, in `apps/agent-service`) that views and drives terminals — with per-write approval — through the gateway. Conversation history is scoped per terminal and automatically follows the focused terminal. It can also operate an isolated Browser Use instance and publish a read-only browser view. See [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md) and [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md).
 
 - `apps/terminal-gateway` — Node gateway (plain JS): REST session CRUD + agent REST (`/screen`, `/keys`) + `/attach` WebSocket.
 - `apps/agent-service` — Node/TS agent service: the `/agent` WebSocket + the tool-calling loop over `gpt-5.6-sol`.

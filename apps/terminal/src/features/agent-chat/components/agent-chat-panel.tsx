@@ -5,15 +5,12 @@
  * connection lifecycle); renders a docked right column on desktop and a bottom
  * Sheet on mobile. Closed = nothing visible but the FAB.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  EllipsisVertical,
-  History,
-  Loader2,
-  Plus,
-  Sparkles,
-  X,
-} from "lucide-react";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@sparklab/ui/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,14 +24,17 @@ import {
   SheetTitle,
 } from "@sparklab/ui/components/ui/sheet";
 import { cn } from "@sparklab/ui/lib/utils";
-import type {
-  AgentApprovalBehavior,
-  AgentStatusState,
-  SessionInfo,
-} from "@sparklab/shared-types";
-
-import { useSessions } from "@/features/terminal/hooks/use-sessions";
-import { useTerminalStore } from "@/features/terminal/store";
+import {
+  EllipsisVertical,
+  History,
+  Loader2,
+  Maximize2,
+  PanelRight,
+  Plus,
+  Sparkles,
+  X,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStore } from "../store";
 import { useAgentChat } from "../use-agent-chat";
@@ -43,7 +43,15 @@ import { ChatHistoryDialog } from "./chat-history-dialog";
 import { AssistantMessage, UserMessage } from "./chat-message";
 import { Composer } from "./composer";
 import { ToolEventRow } from "./tool-event-row";
+
 import type { TranscriptEntry } from "../types";
+import type {
+  AgentApprovalBehavior,
+  AgentStatusState,
+} from "@sparklab/shared-types";
+
+import { useSessions } from "@/features/terminal/hooks/use-sessions";
+import { useTerminalStore } from "@/features/terminal/store";
 
 const SUGGESTIONS = [
   "What's running in my sessions?",
@@ -55,9 +63,12 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   const panelOpen = useAgentStore((s) => s.panelOpen);
   const setPanelOpen = useAgentStore((s) => s.setPanelOpen);
   const togglePanel = useAgentStore((s) => s.togglePanel);
+  const displayMode = useAgentStore((s) => s.displayMode);
+  const toggleDisplayMode = useAgentStore((s) => s.toggleDisplayMode);
   const entries = useAgentStore((s) => s.entries);
   const connected = useAgentStore((s) => s.connected);
   const chatId = useAgentStore((s) => s.chatId);
+  const terminalSessionId = useAgentStore((s) => s.terminalSessionId);
   const chats = useAgentStore((s) => s.chats);
   const status = useAgentStore((s) => s.status);
   const loadingChat = useAgentStore((s) => s.loadingChat);
@@ -91,6 +102,8 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     for (const s of sessions) m.set(s.id, s.name);
     return (id?: string) => (id ? (m.get(id) ?? id) : undefined);
   }, [sessions]);
+  const activeSessionName =
+    sessionName(activeSessionId ?? undefined) ?? "No terminal";
 
   // ⌘J / Ctrl+J toggles the panel from anywhere.
   useEffect(() => {
@@ -105,7 +118,8 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   }, [togglePanel]);
 
   // xterm refits to its container via ResizeObserver; nudge it when the docked
-  // column appears/disappears so the terminal reflows to the new width.
+  // column appears/disappears — or when switching docked↔modal, since the modal
+  // frees the 360px column and docking re-claims it (both are width changes).
   useEffect(() => {
     if (isMobile) return;
     const id = window.setTimeout(
@@ -113,7 +127,7 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
       50,
     );
     return () => window.clearTimeout(id);
-  }, [panelOpen, isMobile]);
+  }, [panelOpen, displayMode, isMobile]);
 
   const handleSend = (text: string, target?: string) => {
     addUserMessage(text);
@@ -135,6 +149,9 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <Header
         connected={connected}
+        terminalName={activeSessionName}
+        displayMode={isMobile ? undefined : displayMode}
+        onToggleDisplayMode={toggleDisplayMode}
         onNewChat={newChat}
         onOpenHistory={() => setHistoryOpen(true)}
         onClose={() => setPanelOpen(false)}
@@ -143,13 +160,20 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
         entries={entries}
         status={status}
         loadingChat={loadingChat}
+        hasTerminal={activeSessionId !== null}
         sessionName={sessionName}
         onRespond={handleRespond}
         onSuggest={handleSend}
       />
       <Composer
+        key={activeSessionId ?? "no-terminal"}
         sessions={sessions}
         activeSessionId={activeSessionId}
+        disabled={
+          activeSessionId === null ||
+          terminalSessionId !== activeSessionId ||
+          !connected
+        }
         onSend={handleSend}
         onStop={interrupt}
       />
@@ -159,6 +183,7 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
         chats={chats}
         loading={chatsLoading}
         activeChatId={chatId}
+        terminalName={activeSessionName}
         onSelect={loadChat}
         onDelete={deleteChat}
         onNew={newChat}
@@ -183,6 +208,30 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     );
   }
 
+  // Desktop, floating window: a centered Dialog. Radix manages open state, so
+  // (like the mobile Sheet) it stays mounted-but-closed. The panel's own Header
+  // carries close/switch, so the Dialog's built-in X is suppressed.
+  if (displayMode === "modal") {
+    return (
+      <Dialog open={panelOpen} onOpenChange={setPanelOpen}>
+        <DialogContent
+          showCloseButton={false}
+          // `sm:max-w-none` is required: the primitive's base class carries
+          // `sm:max-w-lg`, which tailwind-merge keeps as a separate variant
+          // group — plain `max-w-none` wouldn't override it, capping us at 512px.
+          className="flex h-[min(80dvh,720px)] w-[min(92vw,560px)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none"
+        >
+          <DialogTitle className="sr-only">Agent chat</DialogTitle>
+          <DialogDescription className="sr-only">
+            Chat with the terminal agent.
+          </DialogDescription>
+          {panelOpen && body}
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
+  // Desktop, docked: a right-hand column. Unmounts entirely when closed.
   if (!panelOpen) return null;
 
   return (
@@ -194,11 +243,18 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
 
 function Header({
   connected,
+  terminalName,
+  displayMode,
+  onToggleDisplayMode,
   onNewChat,
   onOpenHistory,
   onClose,
 }: {
   connected: boolean;
+  terminalName: string;
+  /** undefined on mobile → the mode switch is hidden (Sheet is the only mode). */
+  displayMode?: "docked" | "modal";
+  onToggleDisplayMode: () => void;
   onNewChat: () => void;
   onOpenHistory: () => void;
   onClose: () => void;
@@ -207,6 +263,12 @@ function Header({
     <div className="border-border flex h-[42px] shrink-0 items-center gap-2 border-b px-3.5">
       <Sparkles className="text-chart-2 size-4" />
       <span className="text-foreground text-sm font-medium">Agent</span>
+      <span
+        className="text-muted-foreground max-w-32 truncate text-xs"
+        title={terminalName}
+      >
+        · {terminalName}
+      </span>
       {/* While the panel is open and the socket is down, the connection is
           always retrying — pulse amber so the wait is visible. */}
       <span
@@ -217,6 +279,27 @@ function Header({
         title={connected ? "connected" : "connecting…"}
       />
       <div className="ml-auto flex items-center gap-0.5">
+        {displayMode && (
+          <button
+            type="button"
+            onClick={onToggleDisplayMode}
+            aria-label={
+              displayMode === "docked"
+                ? "Switch to floating window"
+                : "Dock to side"
+            }
+            title={
+              displayMode === "docked" ? "Floating window" : "Dock to side"
+            }
+            className="text-muted-foreground hover:text-foreground hover:bg-accent flex size-7 items-center justify-center rounded-sm transition-colors"
+          >
+            {displayMode === "docked" ? (
+              <Maximize2 className="size-4" />
+            ) : (
+              <PanelRight className="size-4" />
+            )}
+          </button>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -255,6 +338,7 @@ function MessageStream({
   entries,
   status,
   loadingChat,
+  hasTerminal,
   sessionName,
   onRespond,
   onSuggest,
@@ -262,6 +346,7 @@ function MessageStream({
   entries: TranscriptEntry[];
   status: AgentStatusState;
   loadingChat: boolean;
+  hasTerminal: boolean;
   sessionName: (id?: string) => string | undefined;
   onRespond: (
     requestId: string,
@@ -295,6 +380,13 @@ function MessageStream({
   };
 
   if (entries.length === 0) {
+    if (!hasTerminal) {
+      return (
+        <div className="text-muted-foreground flex flex-1 items-center justify-center px-6 text-center text-xs">
+          Select a terminal to open its agent conversation.
+        </div>
+      );
+    }
     // A resumed chat's transcript is in flight — don't flash the new-chat
     // empty state while waiting for the chat_history replay.
     if (loadingChat) {

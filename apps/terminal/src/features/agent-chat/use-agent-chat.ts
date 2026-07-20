@@ -1,38 +1,52 @@
 "use client";
 
 /**
- * Owns the single AgentConnection for the app. Connects lazily the first time
- * the panel opens, then stays connected for the page's lifetime (so a
- * running turn survives closing the panel). Frames are folded into the store.
+ * Owns the app's one live AgentConnection. It connects lazily when the panel
+ * first opens and stays live while the panel is closed, but is replaced when
+ * the focused terminal changes so each terminal gets its own conversation.
  *
- * Switching chats is a reconnect, not a new protocol verb: loading a past chat
- * reopens the socket with `?resumeChatId=` (the service replays its transcript
- * via `chat_history`); starting a new chat reopens with none (the service mints
- * a fresh id). The old chat is always preserved in the service's JSONL.
+ * Every socket carries `terminalSessionId`. The persisted terminal→chat map is
+ * a fast client hint; the service resolves the latest linked chat when no id is
+ * supplied. Explicit history loads use `resumeChatId`; new chats use `newChat`.
+ * A connection generation guard drops late frames from superseded terminals.
  */
-import { useCallback, useEffect } from "react";
-import { authKeys } from "@/features/auth";
 import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect } from "react";
+
 import { AgentConnection } from "./connection";
 import { useAgentStore } from "./store";
+
+import { authKeys } from "@/features/auth";
 import { useBrowserViewStore } from "@/features/browser-view";
+import { useTerminalStore } from "@/features/terminal/store";
 
 let conn: AgentConnection | null = null;
+let connectionGeneration = 0;
+let connectionTerminalSessionId: string | null = null;
 
 export function useAgentChat() {
   const queryClient = useQueryClient();
   const panelOpen = useAgentStore((s) => s.panelOpen);
+  const activeSessionId = useTerminalStore((s) => s.activeSessionId);
 
   // Build a fresh connection bound to `resumeChatId`, disposing any prior one.
   const openConnection = useCallback(
-    (resumeChatId: string | null) => {
+    (
+      terminalSessionId: string,
+      resumeChatId: string | null,
+      forceNewChat = false,
+    ) => {
+      const generation = ++connectionGeneration;
       conn?.dispose();
+      useAgentStore.getState().setConnected(false);
+      connectionTerminalSessionId = terminalSessionId;
       const ingest = useAgentStore.getState().ingest;
       const ingestBrowser = useBrowserViewStore.getState().ingest;
       const setConnected = useAgentStore.getState().setConnected;
       conn = new AgentConnection(
         {
           onFrame: (frame) => {
+            if (generation !== connectionGeneration) return;
             if (
               frame.type === "browser_view" ||
               frame.type === "browser_closed"
@@ -42,12 +56,17 @@ export function useAgentChat() {
             }
             ingest(frame);
           },
-          onConnected: setConnected,
+          onConnected: (connected) => {
+            if (generation === connectionGeneration) setConnected(connected);
+          },
           onAuthError: () => {
+            if (generation !== connectionGeneration) return;
             void queryClient.invalidateQueries({ queryKey: authKeys.me() });
           },
         },
+        terminalSessionId,
         resumeChatId,
+        forceNewChat,
       );
       conn.connect();
     },
@@ -55,9 +74,28 @@ export function useAgentChat() {
   );
 
   useEffect(() => {
-    if (!panelOpen || conn) return;
-    openConnection(useAgentStore.getState().chatId);
-  }, [panelOpen, openConnection]);
+    if (!activeSessionId) {
+      if (conn) {
+        ++connectionGeneration;
+        conn.dispose();
+        conn = null;
+        connectionTerminalSessionId = null;
+        useAgentStore.getState().setConnected(false);
+      }
+      useBrowserViewStore.getState().clear();
+      useAgentStore.getState().beginTerminalSwitch(null);
+      return;
+    }
+    if (!panelOpen && !conn) return;
+    if (connectionTerminalSessionId === activeSessionId && conn) return;
+
+    const state = useAgentStore.getState();
+    const resumeChatId =
+      state.chatIdsByTerminal[activeSessionId] ?? state.legacyChatId;
+    useBrowserViewStore.getState().clear();
+    state.beginTerminalSwitch(activeSessionId, resumeChatId);
+    openConnection(activeSessionId, resumeChatId ?? null);
+  }, [activeSessionId, panelOpen, openConnection]);
 
   const sendUserMessage = useCallback((text: string, sessionId?: string) => {
     conn?.sendUserMessage(text, sessionId);
@@ -80,30 +118,31 @@ export function useAgentChat() {
   const listChats = useCallback(() => {
     // chat_list clears this flag when the response arrives; until then the
     // history modal shows a loading row instead of "no conversations".
-    useAgentStore.setState({ chatsLoading: true });
-    conn?.listChats();
-  }, []);
+    useAgentStore.setState({ chats: [], chatsLoading: true });
+    if (activeSessionId) conn?.listChats();
+  }, [activeSessionId]);
 
   /** Start a fresh chat (old one stays in history). */
   const newChat = useCallback(() => {
+    if (!activeSessionId) return;
     useBrowserViewStore.getState().clear();
-    useAgentStore.getState().resetForNewChat();
-    openConnection(null);
-  }, [openConnection]);
+    useAgentStore.getState().beginTerminalSwitch(activeSessionId);
+    openConnection(activeSessionId, null, true);
+  }, [activeSessionId, openConnection]);
 
   /** Resume a past chat; its transcript arrives via `chat_history`. */
   const loadChat = useCallback(
     (chatId: string) => {
+      if (!activeSessionId) return;
       if (chatId === useAgentStore.getState().chatId) return;
       useBrowserViewStore.getState().clear();
       // Clear now; chat_history will replace with the reconstructed transcript.
       // loadingChat keeps the panel on "Loading chat…" (not the new-chat empty
       // state) until that replay arrives.
-      useAgentStore.getState().resetForNewChat();
-      useAgentStore.setState({ chatId, loadingChat: true });
-      openConnection(chatId);
+      useAgentStore.getState().beginTerminalSwitch(activeSessionId, chatId);
+      openConnection(activeSessionId, chatId);
     },
-    [openConnection],
+    [activeSessionId, openConnection],
   );
 
   /** Delete a past chat. If it's the active one, drop to a fresh chat. */
@@ -116,6 +155,11 @@ export function useAgentChat() {
       conn?.deleteChat(chatId);
       useAgentStore.setState((s) => ({
         chats: s.chats.filter((c) => c.id !== chatId),
+        chatIdsByTerminal: Object.fromEntries(
+          Object.entries(s.chatIdsByTerminal).filter(
+            ([, mappedChatId]) => mappedChatId !== chatId,
+          ),
+        ),
       }));
       if (chatId === useAgentStore.getState().chatId) newChat();
     },

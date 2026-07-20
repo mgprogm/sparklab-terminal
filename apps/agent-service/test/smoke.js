@@ -2,8 +2,8 @@
 //
 // Spawns a real gateway (open mode, loopback) + the agent service (real Azure
 // creds from .env, but pointed at the open-mode gateway with no auth), opens a
-// WS to /agent, sends one message, auto-approves every write, and asserts the
-// agent actually created a session and ran a command through the gateway.
+// terminal-owned WS to /agent, sends one message, auto-approves every write,
+// and asserts the agent actually created a session through the gateway.
 //
 // This makes ONE real Azure call. Run: pnpm --filter @sparklab/agent-service smoke
 import { spawn, execFileSync } from "node:child_process";
@@ -102,8 +102,13 @@ async function main() {
   await waitFor(agent, "listening on", "agent");
   await sleep(300);
 
-  // 3. Connect (no Origin header, no cookie → open-mode auth passes).
-  const ws = new WebSocket(`ws://127.0.0.1:${AGENT_PORT}/agent`);
+  // 3. Connect (no Origin header, no cookie → open-mode auth passes). Agent
+  // chats are terminal-owned; use a stable synthetic owner and force a clean
+  // chat so an earlier smoke transcript cannot influence this run.
+  const terminalSessionId = "local/smoke-agent-chat";
+  const ws = new WebSocket(
+    `ws://127.0.0.1:${AGENT_PORT}/agent?terminalSessionId=${encodeURIComponent(terminalSessionId)}&newChat=1`,
+  );
   const frames = [];
   let chatStarted = false;
 
@@ -138,7 +143,12 @@ async function main() {
       else if (f.type === "assistant_message")
         console.log(`  ✓ assistant: ${f.text.slice(0, 80)}`);
       else if (f.type !== "assistant_delta") console.log(`  [${f.type}]`);
-      if (f.type === "chat_started") chatStarted = true;
+      if (f.type === "chat_started") {
+        chatStarted = true;
+        if (f.terminalSessionId !== terminalSessionId) {
+          fail(`chat linked to unexpected terminal: ${f.terminalSessionId}`);
+        }
+      }
       if (f.type === "approval_request") {
         ws.send(
           JSON.stringify({
