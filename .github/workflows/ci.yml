@@ -1,10 +1,14 @@
 name: CI
 
+# CI/CD is currently disabled — it runs only on manual dispatch.
+# The push/pull_request triggers below are intentionally commented out;
+# re-enable them to turn automatic CI back on.
 on:
-  push:
-    branches: [main, master, "feat/**"]
-  pull_request:
-    branches: [main, master]
+  workflow_dispatch:
+  # push:
+  #   branches: [main, master, "feat/**"]
+  # pull_request:
+  #   branches: [main, master]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
