@@ -210,7 +210,9 @@ export class AgentLoop {
                   summary,
                   input: publicArgs,
                 }),
-              tc.name !== "browser_act",
+              // browser_act and run_codex are consequential enough that each
+              // invocation is approved individually (no persistent allow-always).
+              tc.name !== "browser_act" && tc.name !== "run_codex",
             );
             if (behavior === "deny") {
               resultContent =

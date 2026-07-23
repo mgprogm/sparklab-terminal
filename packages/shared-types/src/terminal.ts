@@ -318,6 +318,51 @@ export const GitStatusResponseSchema = z.object({
 export type GitStatusResponse = z.infer<typeof GitStatusResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// REST: POST /api/sessions/:id/codex  (run the Codex CLI as an agent tool)
+// ---------------------------------------------------------------------------
+//
+// Runs `codex exec` NON-INTERACTIVELY on the session's server, rooted at the
+// session's current working directory (via `-C <cwd>`). The sandbox is caller-
+// selected but clamped to the two safe modes below — danger-full-access and the
+// `--dangerously-bypass-*` flags are never reachable through this contract, and
+// Codex is given no network or out-of-cwd access. Invocation is approval-gated
+// in the agent (a write tool), so this contract carries no auth of its own
+// beyond the standard cookie + Origin guard applied to every POST.
+
+/** Codex sandbox policy. "read-only" can only read/analyze; "workspace-write"
+ *  may additionally modify files WITHIN the session cwd (never elsewhere). */
+export const CodexSandboxModeSchema = z.enum(["read-only", "workspace-write"]);
+export type CodexSandboxMode = z.infer<typeof CodexSandboxModeSchema>;
+
+/** Request body for POST /api/sessions/:id/codex. */
+export const CodexRunRequestSchema = z.object({
+  /** The task/instruction handed to Codex (piped via stdin, never argv). */
+  prompt: z.string().min(1).max(16384),
+  /** Sandbox policy; the gateway defaults to "read-only" when omitted. */
+  mode: CodexSandboxModeSchema.optional(),
+});
+export type CodexRunRequest = z.infer<typeof CodexRunRequestSchema>;
+
+/** Response body for POST /api/sessions/:id/codex (200 OK). Returned even when
+ *  Codex exits non-zero, so the agent can see what happened; transport-level
+ *  failures (not installed -> 503, timeout -> 504) use error status codes. */
+export const CodexRunResponseSchema = z.object({
+  /** The sandbox policy Codex actually ran under. */
+  mode: CodexSandboxModeSchema,
+  /** The resolved session cwd Codex was rooted at. */
+  cwd: z.string(),
+  /** Codex's process exit code (0 on success; null if it couldn't be captured). */
+  exitCode: z.number().int().nullable(),
+  /** Combined stdout+stderr, capped (see `truncated`). */
+  output: z.string(),
+  /** True when `output` was cut to the output cap. */
+  truncated: z.boolean(),
+  /** Wall-clock duration of the run in milliseconds. */
+  durationMs: z.number().int(),
+});
+export type CodexRunResponse = z.infer<typeof CodexRunResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // REST: Web Push notifications  (/api/push/*)
 // ---------------------------------------------------------------------------
 //

@@ -962,6 +962,79 @@ const FS_UPLOAD_CAP = 8 * 1024 * 1024;
 // Hard stop for a hung download stream.
 const FS_DOWNLOAD_TIMEOUT_MS = 120_000;
 
+// ---- Codex CLI (agent tool) ----
+// The `codex` invocation. Overridable via CODEX_COMMAND (a JSON array like
+// ["codex"] or a plain binary path) so tests can point at a stub — the real
+// default is just `codex`. We always append `exec` + fixed, safe flags; the two
+// sandbox modes below are the ONLY ones accepted (danger-full-access and
+// --dangerously-bypass-* are never reachable through this route).
+const CODEX_COMMAND = (() => {
+  const raw = (process.env.CODEX_COMMAND || "").trim();
+  if (!raw) return ["codex"];
+  if (raw.startsWith("[")) {
+    try {
+      const arr = JSON.parse(raw);
+      if (
+        Array.isArray(arr) &&
+        arr.length > 0 &&
+        arr.every((x) => typeof x === "string")
+      ) {
+        return arr;
+      }
+    } catch {
+      /* fall through to treating raw as a plain path */
+    }
+  }
+  return [raw];
+})();
+const CODEX_SANDBOX_MODES = new Set(["read-only", "workspace-write"]);
+const CODEX_TIMEOUT_MS = Number(process.env.CODEX_TIMEOUT_MS) || 180_000;
+// Max chars accepted in a prompt / returned in output (bounded, model-friendly).
+const CODEX_PROMPT_MAX = 16 * 1024;
+const CODEX_OUTPUT_CAP = 128 * 1024;
+
+// Cap a string to `n` chars, reporting whether it was cut.
+function capText(s, n) {
+  const str = String(s || "");
+  return str.length <= n
+    ? { text: str, truncated: false }
+    : { text: str.slice(0, n), truncated: true };
+}
+
+// Curated env for the Codex child. Codex is an AGENTIC process (it can read its
+// own env and put it in output), so — unlike the fixed find/head/git commands —
+// it must NOT inherit the gateway's full process.env (VAPID keys, the auth
+// password/hash, etc.). We pass only what a CLI needs to run plus Codex's OWN
+// auth/config namespace (CODEX_*/OPENAI_*, where its API key or login lives —
+// that is Codex's credential, not the gateway's). SSH askpass vars are merged so
+// the remote/password-auth path still connects; ssh never forwards this env to
+// the remote host anyway.
+const CODEX_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "SHELL",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+];
+function codexChildEnv(server) {
+  const env = {};
+  for (const k of CODEX_ENV_ALLOWLIST) {
+    if (process.env[k] != null) env[k] = process.env[k];
+  }
+  for (const k of Object.keys(process.env)) {
+    if (/^(CODEX_|OPENAI_)/.test(k)) env[k] = process.env[k];
+  }
+  return { ...env, ...sshEnvFor(server) };
+}
+
 // A path arg must be a non-empty absolute string. This is the user's own shell
 // (full-fs access is the feature); we only require absolute for predictability.
 function isAbsPath(p) {
@@ -1805,6 +1878,155 @@ async function handleApi(req, res, url) {
     }
 
     return sendJson(res, 200, parseGitPorcelain(out));
+  }
+
+  // =========================================================================
+  // POST /api/sessions/:id/codex  — run the Codex CLI as an agent tool.
+  // Non-interactive `codex exec`, rooted at the session cwd, on the session's
+  // own server (local or over ssh via the same serverCmd seam as fs/git). The
+  // sandbox mode is clamped to read-only | workspace-write; the prompt is piped
+  // via STDIN (never argv, so it isn't split by the remote shell nor visible in
+  // `ps`). Approval is enforced upstream in the agent (this is a write tool);
+  // the standard cookie auth + POST Origin/CSRF guard already applied above.
+  // =========================================================================
+  if (
+    req.method === "POST" &&
+    parts.length === 4 &&
+    parts[1] === "sessions" &&
+    parts[3] === "codex"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server, tmuxName } = s;
+
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+
+    const prompt = typeof body.prompt === "string" ? body.prompt : "";
+    if (!prompt.trim()) {
+      return sendJson(res, 400, { error: "prompt is required" });
+    }
+    if (prompt.length > CODEX_PROMPT_MAX) {
+      return sendJson(res, 400, {
+        error: `prompt exceeds ${CODEX_PROMPT_MAX} characters`,
+      });
+    }
+    const mode = body.mode == null ? "read-only" : body.mode;
+    if (!CODEX_SANDBOX_MODES.has(mode)) {
+      return sendJson(res, 400, {
+        error: 'mode must be "read-only" or "workspace-write"',
+      });
+    }
+
+    // Resolve the session cwd (same mechanism as fs/list and git).
+    let dir;
+    try {
+      const r = await serverExec(server, [
+        "display-message",
+        "-p",
+        "-t",
+        tmuxName,
+        "#{pane_current_path}",
+      ]);
+      dir = r.stdout.trim();
+    } catch (err) {
+      console.error(`[api] codex cwd failed: ${err.message}`);
+      return sendJson(res, 502, { error: "failed to resolve session cwd" });
+    }
+    if (!isAbsPath(dir)) {
+      return sendJson(res, 502, { error: "failed to resolve session cwd" });
+    }
+
+    // Fixed, safe invocation. `-` reads the prompt from stdin.
+    const codexArgs = [
+      ...CODEX_COMMAND,
+      "exec",
+      "-C",
+      dir,
+      "--sandbox",
+      mode,
+      "--skip-git-repo-check",
+      "--color",
+      "never",
+      "-",
+    ];
+
+    const startedAt = Date.now();
+    let out;
+    try {
+      out = await serverCmdStdin(server, codexArgs, prompt, {
+        timeout: CODEX_TIMEOUT_MS,
+        // Override childEnvFor's full-env inheritance with a curated allowlist —
+        // Codex must not see the gateway's secrets (see codexChildEnv).
+        env: codexChildEnv(server),
+      });
+    } catch (err) {
+      const stderr = String((err && (err.stderr || err.message)) || "");
+      // Timed out (execFile kills the child on timeout) -> 504. Checked first so
+      // a killed process is never misread as "not installed".
+      if (
+        err &&
+        (err.killed || err.signal === "SIGTERM" || err.code === "ETIMEDOUT")
+      ) {
+        return sendJson(res, 504, {
+          error: `codex timed out after ${CODEX_TIMEOUT_MS} ms`,
+          code: "codex_timeout",
+        });
+      }
+      // Binary missing (local ENOENT, or the remote shell's "command not
+      // found") -> a clear, distinct 503 the agent can surface verbatim.
+      if (
+        (err && err.code === "ENOENT") ||
+        /command not found|not found|not recognized as/i.test(stderr)
+      ) {
+        return sendJson(res, 503, {
+          error: "codex CLI is not installed on this server",
+          code: "codex_unavailable",
+        });
+      }
+      // Codex ran but exited non-zero: still return its (bounded) output + code
+      // so the agent can read the failure, rather than a bare 5xx.
+      const combined = `${(err && err.stdout) || ""}${
+        err && err.stderr ? `\n${err.stderr}` : ""
+      }`;
+      const capped = capText(combined, CODEX_OUTPUT_CAP);
+      return sendJson(res, 200, {
+        mode,
+        cwd: dir,
+        exitCode: typeof (err && err.code) === "number" ? err.code : null,
+        output: capped.text,
+        truncated: capped.truncated,
+        durationMs: Date.now() - startedAt,
+      });
+    }
+
+    const combined = `${out.stdout || ""}${
+      out.stderr ? `\n${out.stderr}` : ""
+    }`;
+    const capped = capText(combined, CODEX_OUTPUT_CAP);
+    return sendJson(res, 200, {
+      mode,
+      cwd: dir,
+      exitCode: 0,
+      output: capped.text,
+      truncated: capped.truncated,
+      durationMs: Date.now() - startedAt,
+    });
   }
 
   // =========================================================================

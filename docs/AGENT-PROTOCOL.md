@@ -98,6 +98,7 @@ immediately; writes pause the loop at the approval gate.
 | `press_keys`        | **write** | `POST …/keys {keys}` (whitelist)                      |
 | `run_command`       | **write** | type + Enter + `wait_idle` (one approval)             |
 | `create_session`    | **write** | `POST /api/sessions`                                  |
+| `run_codex`         | **write** | `POST …/codex` — `codex exec` in the session cwd      |
 | `browser_observe`   | read      | Browser Use MCP page state + bounded snapshot         |
 | `browser_list_tabs` | read      | Browser Use MCP tab list                              |
 | `browser_act`       | **write** | one structured navigate/click/type/scroll/tab action  |
@@ -123,6 +124,22 @@ the UI (the gateway's single `DELETE` call site).
   profile/config directory, and enforcing outbound proxy. Stop/disconnect closes
   its process group and view. The proxy resolves every HTTP/CONNECT destination
   and rejects local, private, reserved, link-local, and metadata addresses.
+- **Codex tool:** `run_codex` runs `codex exec` **non-interactively** on the
+  session's own server, rooted at the session cwd (`-C <cwd>`), via the same
+  gateway `serverCmd` seam as fs/git — the gateway stays the single enforcement
+  point. It is a **write tool approved on every call** (like `browser_act`; a
+  forged `allow_always` is coerced to one-time), and the approval card shows the
+  exact task + mode. The sandbox is **clamped** to `read-only` (default, no file
+  changes) or `workspace-write` (**writes** confined to the cwd);
+  `danger-full-access` and the `--dangerously-bypass-*` flags are unreachable,
+  and Codex gets no network. Note the sandbox governs writes/exec, **not read
+  scope** — Codex can still read files the user can read outside the cwd, so its
+  output is treated like any command output (per-call approval is the control).
+  The
+  prompt is piped via **stdin** (never argv), output is bounded, and there are
+  distinct errors for not-installed (`503 codex_unavailable`) and timeout
+  (`504 codex_timeout`, `CODEX_TIMEOUT_MS`, default 180s). Codex's own auth lives
+  in its `CODEX_HOME`; no credentials cross this contract.
 
 ## Conversation history
 

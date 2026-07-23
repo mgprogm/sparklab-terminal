@@ -13,6 +13,8 @@ import type {
   SendKeysRequest,
   SessionInfo,
   CreateSessionResponse,
+  CodexRunResponse,
+  CodexSandboxMode,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -147,6 +149,25 @@ class GatewayClient {
       }
       throw new GatewayError(res.status, msg);
     }
+  }
+
+  /**
+   * Run the Codex CLI non-interactively in a session's working directory.
+   * The gateway clamps `mode` to read-only|workspace-write and roots Codex at
+   * the session cwd. Not-installed -> 503, timeout -> 504 (both surface as a
+   * GatewayError the caller turns into a clear tool-result string).
+   */
+  async runCodex(
+    sessionId: string,
+    body: { prompt: string; mode?: CodexSandboxMode },
+  ): Promise<CodexRunResponse> {
+    return this.json<CodexRunResponse>(
+      await this.call(`/api/sessions/${encodeURIComponent(sessionId)}/codex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
   }
 
   async createSession(opts: {

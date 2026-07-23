@@ -13,6 +13,7 @@
     "test:fs": "node test/fs-endpoints.js",
     "test:git": "node test/git-endpoints.js",
     "test:push": "node test/push-endpoints.js",
+    "test:codex": "node test/codex-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
     "generate-vapid": "node scripts/generate-vapid.js",
     "dev": "node --env-file-if-exists=.env --watch src/server.js",

@@ -9,7 +9,7 @@
  *   READ  (auto):  list_sessions, read_screen, wait_idle,
  *                  browser_observe, browser_list_tabs
  *   WRITE (ask):   type_text, press_keys, run_command, create_session,
- *                  browser_act
+ *                  run_codex, browser_act
  *
  * There is deliberately no kill_session — destroying a session stays a
  * human-only act in the UI.
@@ -23,6 +23,7 @@ export const WRITE_TOOLS = new Set([
   "press_keys",
   "run_command",
   "create_session",
+  "run_codex",
   "browser_act",
 ]);
 
@@ -220,6 +221,39 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "run_codex",
+      description:
+        "Hand a single self-contained task to the Codex CLI coding agent. It runs NON-INTERACTIVELY, rooted at the selected session's working directory, on that session's server, with no network access. Requires user approval EVERY time — the exact task and mode are shown. Default mode 'read-only' makes no file changes (use for review, explanations, investigation). Pass mode 'workspace-write' ONLY when the user wants Codex to modify files, and say so first — its edits are confined to the session's working directory. Note: Codex can still READ files elsewhere on the server, so treat its output like any command output (it may surface file contents). Returns Codex's output and exit code.",
+      parameters: {
+        type: "object",
+        properties: {
+          session_id: {
+            type: "string",
+            description:
+              "Target session id (web-...). Codex runs in this session's cwd.",
+          },
+          prompt: {
+            type: "string",
+            minLength: 1,
+            maxLength: 16384,
+            description:
+              "The complete instruction for Codex. Be specific; it is one non-interactive run.",
+          },
+          mode: {
+            type: "string",
+            enum: ["read-only", "workspace-write"],
+            description:
+              "Sandbox policy. 'read-only' (default) cannot modify files; 'workspace-write' may edit files within the session cwd only.",
+          },
+        },
+        required: ["session_id", "prompt"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
@@ -231,6 +265,8 @@ export interface ToolArgs {
   command?: string;
   name?: string;
   cwd?: string;
+  prompt?: string;
+  mode?: string;
   history_lines?: number;
   timeout_ms?: number;
   quiet_ms?: number;
@@ -266,6 +302,8 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `run: ${truncate(String(args.command ?? ""))}`;
     case "create_session":
       return `create session${args.name ? ` "${args.name}"` : ""}`;
+    case "run_codex":
+      return `run Codex [${args.mode === "workspace-write" ? "workspace-write" : "read-only"}]: ${truncate(String(args.prompt ?? ""))}`;
     case "browser_observe":
       return "observe browser";
     case "browser_list_tabs":
@@ -417,6 +455,25 @@ export async function executeTool(
           cwd: args.cwd,
         });
         return JSON.stringify({ id: r.id, name: r.name });
+      }
+      case "run_codex": {
+        if (!args.session_id || !args.prompt)
+          return "error: session_id and prompt are required";
+        // Clamp to the two safe modes; anything else -> read-only.
+        const mode =
+          args.mode === "workspace-write" ? "workspace-write" : "read-only";
+        const r = await gateway.runCodex(args.session_id, {
+          prompt: args.prompt,
+          mode,
+        });
+        return JSON.stringify({
+          mode: r.mode,
+          cwd: r.cwd,
+          exitCode: r.exitCode,
+          durationMs: r.durationMs,
+          truncated: r.truncated,
+          output: r.output,
+        });
       }
       default:
         return `error: unknown tool ${tool}`;
