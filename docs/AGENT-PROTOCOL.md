@@ -90,20 +90,37 @@ is reserved for the terminal's `/attach`). Schemas live in
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                      | Kind      | Backing                                                          |
-| ------------------------- | --------- | ---------------------------------------------------------------- |
-| `list_sessions`           | read      | `GET /api/sessions`                                              |
-| `read_screen`             | read      | `GET /api/sessions/:id/screen`                                   |
-| `wait_idle`               | read      | polls `/screen` until a shell prompt / quiescence                |
-| `type_text`               | **write** | `POST /api/sessions/:id/keys {text}` — never executes            |
-| `press_keys`              | **write** | `POST …/keys {keys}` (whitelist)                                 |
-| `run_command`             | **write** | type + Enter + `wait_idle` (one approval)                        |
-| `create_session`          | **write** | `POST /api/sessions`                                             |
-| `run_codex`               | **write** | `POST …/codex` — `codex exec` in the session cwd                 |
-| `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                    |
-| `browser_list_tabs`       | read      | Browser Use MCP tab list                                         |
-| `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action             |
-| `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication |
+| Tool                      | Kind      | Backing                                                             |
+| ------------------------- | --------- | ------------------------------------------------------------------- |
+| `list_sessions`           | read      | `GET /api/sessions`                                                 |
+| `read_screen`             | read      | `GET /api/sessions/:id/screen`                                      |
+| `wait_idle`               | read      | polls `/screen` until a shell prompt / quiescence                   |
+| `type_text`               | **write** | `POST /api/sessions/:id/keys {text}` — never executes               |
+| `press_keys`              | **write** | `POST …/keys {keys}` (whitelist)                                    |
+| `run_command`             | **write** | type + Enter + `wait_idle` (one approval)                           |
+| `create_session`          | **write** | `POST /api/sessions`                                                |
+| `run_codex`               | **write** | `POST …/codex` — `codex exec` in the session cwd                    |
+| `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                       |
+| `browser_list_tabs`       | read      | Browser Use MCP tab list                                            |
+| `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action                |
+| `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication    |
+| `kanban_list`             | read      | `GET /api/kanban/boards`                                            |
+| `kanban_get`              | read      | `GET /api/kanban/boards/:id`                                        |
+| `kanban_create`           | **write** | `POST /api/kanban/boards`                                           |
+| `kanban_add_card`         | **write** | `POST /api/kanban/boards/:id/cards`                                 |
+| `kanban_update_card`      | **write** | `PATCH /api/kanban/cards/:id`                                       |
+| `kanban_move`             | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409) |
+| `kanban_delete`           | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)  |
+
+Kanban tools drive the gateway's `/api/kanban/*` board API (design:
+[`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). Approval tiers (D9): reads run
+immediately; the routine writes (`kanban_create`, `kanban_add_card`,
+`kanban_update_card`, `kanban_move`) are approvable **allow-always**;
+`kanban_delete` (destroying a whole board) is in `ONE_TIME_TOOLS`, so it is
+re-approved on **every** call like `run_codex` / `browser_act`. `kanban_move`
+fetches the board's current `rev` itself and retries once on a `409`, so the
+model never manages revisions. There is deliberately **no card-delete tool** —
+deleting individual cards stays a human action in the board UI.
 
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.

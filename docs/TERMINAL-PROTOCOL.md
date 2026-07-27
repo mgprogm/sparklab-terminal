@@ -207,6 +207,46 @@ Rename or move an entry. Body (`FsRenameRequest`): `{ "from": "/home/me/a", "to"
 
 Deletes a file or directory. A non-empty directory requires `recursive=1` (client must show a strong confirm before setting this). Response (`FsDeleteResponse`): `{ "path": "…" }`. Not found → `404`; permission denied → `403`; non-empty dir without `recursive=1` → `502`.
 
+### Kanban endpoints: `/api/kanban/*`
+
+A gateway-owned, multi-board task tracker (design: [`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). State lives in a `data/kanban.json` sidecar (`src/kanban.js`, atomic write; every mutator is synchronous so a read-modify-write is atomic — no mutex, same as `registry.js`). **Ordering authority is `Column.cardIds[]` only** — a card's `columnId` is derived on GET and never persisted. Each board carries a monotonic `rev` for optimistic concurrency. Schemas: the `Kanban*` block in `packages/shared-types/src/terminal.ts`.
+
+Auth: the existing `gw_session` cookie **or** a scoped `Authorization: Bearer <KANBAN_API_TOKEN>` (this prefix only — lets an external AI CLI drive boards without a cookie login; a CLI request carries no `Origin`, so the CSRF guard is a no-op for it). GET routes are Origin-exempt; state-changing routes get the Origin/CSRF check.
+
+#### `GET /api/kanban/boards` → 200
+
+`{ "boards": KanbanBoardSummary[] }` where a summary is `{id,name,tags,rev,createdAt,updatedAt,columnCount,cardCount}`.
+
+#### `GET /api/kanban/boards/:boardId` → 200
+
+Full `KanbanBoard`: `{id,name,tags,rev,createdAt,updatedAt, columns:[{id,name,cardIds[]}], cards:[{id,title,description,tags,columnId,createdAt,updatedAt}]}`. Unknown board → `404`.
+
+#### `POST /api/kanban/boards` → 201
+
+Body (`CreateBoardRequest`): `{name, tags?, columns?}`. Omitting `columns` seeds Backlog / To Do / In Progress / Done. Returns the created board.
+
+#### `PATCH /api/kanban/boards/:boardId` → 200
+
+Body (`UpdateBoardRequest`): `{name?, tags?}` (at least one). Returns the board.
+
+#### `DELETE /api/kanban/boards/:boardId` → 204
+
+#### `POST /api/kanban/boards/:boardId/cards` → 201
+
+Body (`CreateCardRequest`): `{title, description?, tags?, columnId?}` — defaults to the first column. Returns the created card (with its derived `columnId`).
+
+#### `PATCH /api/kanban/cards/:cardId` → 200
+
+Body (`UpdateCardRequest`): `{boardId, title?, description?, tags?}` (at least one field beyond `boardId`).
+
+#### `POST /api/kanban/cards/:cardId/move` → 200 / 409
+
+Body (`MoveCardRequest`): `{boardId, toColumnId, toIndex, rev}`. Splices the card out of whichever column holds it and into the target at the clamped index — exactly one write. A stale `rev` → `409 { "error": "stale", "board": <current board> }` so the client can reconcile and retry with the fresh `rev`. Unknown card/column → `404`.
+
+#### `DELETE /api/kanban/cards/:cardId?boardId=<id>` → 204
+
+`boardId` via query string or JSON body.
+
 ### Errors (400 / 404 / 500)
 
 Always `{ "error": "<message>" }`.
