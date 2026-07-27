@@ -811,3 +811,166 @@ export const MoveCardRequestSchema = z.object({
   rev: z.number().int(),
 });
 export type MoveCardRequest = z.infer<typeof MoveCardRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: Project-management tool /api/pm/*
+// ---------------------------------------------------------------------------
+// A Kanban-first PM suite (docs/PM-TOOL-PLAN.md), a separate artifact from
+// Kanban. State in data/pm.json (src/pm.js). Like Kanban: Column.taskIds[] is
+// the sole ordering/status authority (a task's `columnId`/`status` are derived
+// on GET, never persisted); per-project `rev` for optimistic concurrency on
+// move. Additions: task fields (assignee/priority/labels/dates), sprints
+// (orthogonal to columns; backlog = sprintId null), and a per-project
+// dependency DAG (dependsOn; a cycle is rejected 400).
+
+export const PmPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
+export type PmPriority = z.infer<typeof PmPrioritySchema>;
+
+/** A task. Persisted shape carries no status/order — position/status come from
+ *  the enclosing Column.taskIds[]. `columnId` is derived on GET. */
+export const PmTaskSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  assignee: z.string().max(128).nullable().default(null),
+  priority: PmPrioritySchema.nullable().default(null),
+  labels: z.array(z.string().min(1).max(64)).default([]),
+  /** Epoch ms (day-level), nullable — drives the Gantt view. */
+  startDate: z.number().nullable().default(null),
+  dueDate: z.number().nullable().default(null),
+  /** Owning sprint, or null for the product backlog (orthogonal to columns). */
+  sprintId: z.string().nullable().default(null),
+  /** Ids of other tasks in THIS project this task depends on (a DAG). */
+  dependsOn: z.array(z.string()).default([]),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** Derived on GET (the column currently holding this task); never persisted. */
+  columnId: z.string().nullable().optional(),
+});
+export type PmTask = z.infer<typeof PmTaskSchema>;
+
+/** A status column. `taskIds` is the ordered, authoritative task sequence. */
+export const PmColumnSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  taskIds: z.array(z.string()),
+});
+export type PmColumn = z.infer<typeof PmColumnSchema>;
+
+/** A sprint / iteration. Orthogonal to columns. */
+export const PmSprintSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  startDate: z.number().nullable().default(null),
+  endDate: z.number().nullable().default(null),
+});
+export type PmSprint = z.infer<typeof PmSprintSchema>;
+
+/** A full project. Returned by GET /api/pm/projects/:id. */
+export const PmProjectSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)),
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columns: z.array(PmColumnSchema),
+  sprints: z.array(PmSprintSchema),
+  tasks: z.array(PmTaskSchema),
+});
+export type PmProject = z.infer<typeof PmProjectSchema>;
+
+/** Lightweight project row for the list view. */
+export const PmProjectSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tags: z.array(z.string()),
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columnCount: z.number().int(),
+  taskCount: z.number().int(),
+  sprintCount: z.number().int(),
+});
+export type PmProjectSummary = z.infer<typeof PmProjectSummarySchema>;
+
+/** Response body for GET /api/pm/projects (200 OK). */
+export const PmListResponseSchema = z.object({
+  projects: z.array(PmProjectSummarySchema),
+});
+export type PmListResponse = z.infer<typeof PmListResponseSchema>;
+
+/** Request body for POST /api/pm/projects. Omitting columns seeds the defaults. */
+export const CreateProjectRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  columns: z.array(z.string().min(1).max(128)).optional(),
+});
+export type CreateProjectRequest = z.infer<typeof CreateProjectRequestSchema>;
+
+/** Request body for PATCH /api/pm/projects/:id. */
+export const UpdateProjectRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine((b) => b.name !== undefined || b.tags !== undefined, {
+    message: "at least one of name/tags is required",
+  });
+export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequestSchema>;
+
+/** Request body for POST /api/pm/projects/:id/tasks. */
+export const CreateTaskRequestSchema = z.object({
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  assignee: z.string().max(128).optional(),
+  priority: PmPrioritySchema.optional(),
+  labels: z.array(z.string().min(1).max(64)).default([]),
+  startDate: z.number().nullable().optional(),
+  dueDate: z.number().nullable().optional(),
+  sprintId: z.string().nullable().optional(),
+  columnId: z.string().optional(),
+  dependsOn: z.array(z.string()).optional(),
+});
+export type CreateTaskRequest = z.infer<typeof CreateTaskRequestSchema>;
+
+/** Request body for PATCH /api/pm/tasks/:id. `projectId` locates the task. */
+export const UpdateTaskRequestSchema = z.object({
+  projectId: z.string(),
+  title: z.string().min(1).max(512).optional(),
+  description: z.string().max(8192).optional(),
+  assignee: z.string().max(128).nullable().optional(),
+  priority: PmPrioritySchema.nullable().optional(),
+  labels: z.array(z.string().min(1).max(64)).optional(),
+  startDate: z.number().nullable().optional(),
+  dueDate: z.number().nullable().optional(),
+  sprintId: z.string().nullable().optional(),
+  dependsOn: z.array(z.string()).optional(),
+});
+export type UpdateTaskRequest = z.infer<typeof UpdateTaskRequestSchema>;
+
+/** Request body for POST /api/pm/tasks/:id/move (rev-guarded — D3). */
+export const MoveTaskRequestSchema = z.object({
+  projectId: z.string(),
+  toColumnId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveTaskRequest = z.infer<typeof MoveTaskRequestSchema>;
+
+/** Request body for POST /api/pm/projects/:id/sprints. */
+export const CreateSprintRequestSchema = z.object({
+  name: z.string().min(1).max(128),
+  startDate: z.number().nullable().optional(),
+  endDate: z.number().nullable().optional(),
+});
+export type CreateSprintRequest = z.infer<typeof CreateSprintRequestSchema>;
+
+/** Request body for PATCH /api/pm/sprints/:id. */
+export const UpdateSprintRequestSchema = z.object({
+  projectId: z.string(),
+  name: z.string().min(1).max(128).optional(),
+  startDate: z.number().nullable().optional(),
+  endDate: z.number().nullable().optional(),
+});
+export type UpdateSprintRequest = z.infer<typeof UpdateSprintRequestSchema>;

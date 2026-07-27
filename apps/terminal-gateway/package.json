@@ -15,6 +15,7 @@
     "test:push": "node test/push-endpoints.js",
     "test:codex": "node test/codex-endpoints.js",
     "test:kanban": "node test/kanban-endpoints.js",
+    "test:pm": "node test/pm-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
     "generate-vapid": "node scripts/generate-vapid.js",
     "dev": "node --env-file-if-exists=.env --watch src/server.js",

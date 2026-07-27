@@ -21,6 +21,7 @@ import metadata from "./metadata.js";
 import registry from "./registry.js";
 import push from "./push.js";
 import kanban from "./kanban.js";
+import pm from "./pm.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -46,10 +47,13 @@ const ALLOWED_ORIGINS = new Set(
     .filter(Boolean),
 );
 const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
-// Optional scoped bearer token for /api/kanban/* ONLY (see docs/KANBAN-PLAN.md
-// D8). Lets an external AI CLI (Claude/Codex) drive the Kanban API without a
-// cookie login. Unset => the external path is simply unavailable (cookie only).
-const KANBAN_API_TOKEN = process.env.KANBAN_API_TOKEN || "";
+// Optional scoped bearer token for the artifact APIs (/api/kanban/* and
+// /api/pm/*). Lets an external AI CLI (Claude/Codex) drive them without a cookie
+// login. Prefers GATEWAY_API_TOKEN (covers both artifacts); the original
+// KANBAN_API_TOKEN remains a backward-compatible fallback so the already-deployed
+// value keeps working unchanged (PM-TOOL-PLAN.md D10). Unset => cookie only.
+const GATEWAY_API_TOKEN =
+  process.env.GATEWAY_API_TOKEN || process.env.KANBAN_API_TOKEN || "";
 
 // The pre-user/pass shared secret is gone. Refusing to start (rather than
 // ignoring the var) keeps an un-migrated deploy from silently coming up with
@@ -181,16 +185,17 @@ function isAuthenticated(req) {
   return validateAuthSession(cookies.gw_session);
 }
 
-// Bearer-token auth scoped to /api/kanban/* (D8). Constant-time compare; only
-// active when KANBAN_API_TOKEN is set. Requests from a CLI carry no Origin
-// header, so the CSRF guard is a no-op for them and the token is the auth.
-function isKanbanBearerAuthorized(req) {
-  if (!KANBAN_API_TOKEN) return false;
+// Bearer-token auth scoped to the artifact APIs (/api/kanban/*, /api/pm/*).
+// Constant-time compare; only active when a token is configured. Requests from a
+// CLI carry no Origin header, so the CSRF guard is a no-op for them and the token
+// is the auth. (PM-TOOL-PLAN.md D10 — one helper for both artifacts.)
+function isArtifactBearerAuthorized(req) {
+  if (!GATEWAY_API_TOKEN) return false;
   const header = req.headers.authorization || "";
   const m = /^Bearer\s+(.+)$/i.exec(header);
   if (!m) return false;
   const provided = Buffer.from(m[1]);
-  const expected = Buffer.from(KANBAN_API_TOKEN);
+  const expected = Buffer.from(GATEWAY_API_TOKEN);
   return (
     provided.length === expected.length &&
     crypto.timingSafeEqual(provided, expected)
@@ -1184,6 +1189,227 @@ async function handleKanban(req, res, url) {
   }
 }
 
+// ---- Project-management tool (/api/pm/*) ----
+// A Kanban-first PM suite (docs/PM-TOOL-PLAN.md). Store: src/pm.js (synchronous
+// mutators => atomic). Maps coded store errors to HTTP: not_found -> 404,
+// stale -> 409, cycle/bad_request -> 400. `seg` = path after /api/pm.
+async function handlePm(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // GET /api/pm/projects — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "projects") {
+      return sendJson(res, 200, { projects: pm.listProjects() });
+    }
+    // GET /api/pm/projects/:id — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "projects") {
+      const project = pm.getProject(seg[1]);
+      if (!project) return sendJson(res, 404, { error: "project not found" });
+      return sendJson(res, 200, project);
+    }
+    // POST /api/pm/projects — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "projects") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name, tags, columns } = r.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      if (columns !== undefined && !Array.isArray(columns)) {
+        return sendJson(res, 400, { error: "columns must be an array" });
+      }
+      return sendJson(
+        res,
+        201,
+        pm.createProject({
+          name: name.trim(),
+          tags: Array.isArray(tags) ? tags : [],
+          columns: Array.isArray(columns) ? columns : undefined,
+        }),
+      );
+    }
+    // PATCH /api/pm/projects/:id — rename / retag
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "projects") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const patch = {};
+      if (r.body.name !== undefined) {
+        if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+          return sendJson(res, 400, {
+            error: "name must be a non-empty string",
+          });
+        }
+        patch.name = r.body.name.trim();
+      }
+      if (r.body.tags !== undefined) {
+        if (!Array.isArray(r.body.tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = r.body.tags;
+      }
+      if (patch.name === undefined && patch.tags === undefined) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, pm.updateProject(seg[1], patch));
+    }
+    // DELETE /api/pm/projects/:id — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "projects") {
+      if (!pm.deleteProject(seg[1])) {
+        return sendJson(res, 404, { error: "project not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/pm/projects/:id/tasks — add task
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.title !== "string" || !r.body.title.trim()) {
+        return sendJson(res, 400, { error: "title is required" });
+      }
+      return sendJson(
+        res,
+        201,
+        pm.createTask(seg[1], { ...r.body, title: r.body.title.trim() }),
+      );
+    }
+    // POST /api/pm/projects/:id/sprints — add sprint
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "sprints"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      return sendJson(
+        res,
+        201,
+        pm.createSprint(seg[1], { ...r.body, name: r.body.name.trim() }),
+      );
+    }
+    // PATCH /api/pm/tasks/:id — edit task fields / dependencies
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "tasks") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      return sendJson(
+        res,
+        200,
+        pm.updateTask(r.body.projectId, seg[1], r.body),
+      );
+    }
+    // POST /api/pm/tasks/:id/move — board move (optimistic concurrency)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { projectId, toColumnId, toIndex, rev } = r.body;
+      if (typeof projectId !== "string" || typeof toColumnId !== "string") {
+        return sendJson(res, 400, {
+          error: "projectId and toColumnId are required",
+        });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      try {
+        return sendJson(
+          res,
+          200,
+          pm.moveTask(projectId, seg[1], {
+            toColumnId,
+            toIndex,
+            expectedRev: typeof rev === "number" ? rev : undefined,
+          }),
+        );
+      } catch (e) {
+        if (e.code === "stale") {
+          return sendJson(res, 409, {
+            error: "stale",
+            project: pm.getProject(projectId) ?? null,
+          });
+        }
+        throw e;
+      }
+    }
+    // DELETE /api/pm/tasks/:id?projectId= — scrubs dependsOn
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "tasks") {
+      let projectId = url.searchParams.get("projectId") || "";
+      if (!projectId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.projectId === "string")
+          projectId = r.body.projectId;
+      }
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (!pm.deleteTask(projectId, seg[1])) {
+        return sendJson(res, 404, { error: "task not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // PATCH /api/pm/sprints/:id — edit sprint
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "sprints") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      return sendJson(
+        res,
+        200,
+        pm.updateSprint(r.body.projectId, seg[1], r.body),
+      );
+    }
+    // DELETE /api/pm/sprints/:id?projectId= — nulls affected sprintId
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "sprints") {
+      let projectId = url.searchParams.get("projectId") || "";
+      if (!projectId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.projectId === "string")
+          projectId = r.body.projectId;
+      }
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (!pm.deleteSprint(projectId, seg[1])) {
+        return sendJson(res, 404, { error: "sprint not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      const status =
+        e.code === "not_found" ? 404 : e.code === "stale" ? 409 : 400;
+      return sendJson(res, status, { error: e.message });
+    }
+    throw e;
+  }
+}
+
 // ---- File Explorer (fs/*) helpers ----
 // Read cap for text preview (bytes). Binary/oversized files are downloaded.
 const FS_READ_CAP = 256 * 1024;
@@ -1647,11 +1873,14 @@ async function handleApi(req, res, url) {
   }
 
   // A2: All other /api/* routes require a valid session (or open mode). The
-  // /api/kanban/* prefix additionally accepts a scoped bearer token (D8) so an
-  // external AI CLI can drive it without a cookie login.
+  // artifact prefixes (/api/kanban/*, /api/pm/*) additionally accept a scoped
+  // bearer token so an external AI CLI can drive them without a cookie login.
   if (
     !isAuthenticated(req) &&
-    !(parts[1] === "kanban" && isKanbanBearerAuthorized(req))
+    !(
+      (parts[1] === "kanban" || parts[1] === "pm") &&
+      isArtifactBearerAuthorized(req)
+    )
   ) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
@@ -1659,6 +1888,11 @@ async function handleApi(req, res, url) {
   // ---- Kanban: /api/kanban/* ----
   if (parts[1] === "kanban") {
     return handleKanban(req, res, url);
+  }
+
+  // ---- Project-management tool: /api/pm/* ----
+  if (parts[1] === "pm") {
+    return handlePm(req, res, url);
   }
 
   // ---- Web Push: /api/push/* ----
