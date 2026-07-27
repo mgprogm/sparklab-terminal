@@ -34,6 +34,7 @@ import {
   Globe2,
   Loader2,
   Menu,
+  SquareGanttChart,
   SquareKanban,
   Unplug,
 } from "lucide-react";
@@ -43,6 +44,7 @@ import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
 import { FileExplorerDialog } from "./file-explorer-dialog";
 import { KanbanDialog } from "./kanban-dialog";
+import { PmDialog } from "./pm-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
@@ -104,6 +106,8 @@ export function TerminalShell() {
     setExplorerOpen,
     kanbanOpen,
     setKanbanOpen,
+    pmOpen,
+    setPmOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -156,6 +160,7 @@ export function TerminalShell() {
   useUrlFlagSync("agent", agentPanelOpen, setAgentPanelOpen);
   useUrlFlagSync("explorer", explorerOpen, setExplorerOpen);
   useUrlFlagSync("kanban", kanbanOpen, setKanbanOpen);
+  useUrlFlagSync("pm", pmOpen, setPmOpen);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
@@ -423,6 +428,21 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Kanban board</TooltipContent>
           </Tooltip>
+          {/* Project management is gateway-global too — always enabled. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Project management"
+                onClick={() => setPmOpen(true)}
+              >
+                <SquareGanttChart className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Project management</TooltipContent>
+          </Tooltip>
           {browserView && !browserVisible && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -547,6 +567,10 @@ export function TerminalShell() {
       {/* Kanban board modal — gateway-global (D7), not session-scoped. Mounted
           once; open state lives in the store (deep-linked via `?kanban`). */}
       <KanbanDialog open={kanbanOpen} onOpenChange={setKanbanOpen} />
+
+      {/* Project management modal — gateway-global, not session-scoped.
+          Mounted once; open state lives in the store (deep-linked via `?pm`). */}
+      <PmDialog open={pmOpen} onOpenChange={setPmOpen} />
     </div>
   );
 }

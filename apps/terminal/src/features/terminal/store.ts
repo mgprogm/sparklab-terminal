@@ -68,6 +68,12 @@ interface TerminalState {
   kanbanOpen: boolean;
   setKanbanOpen: (open: boolean) => void;
 
+  /** Whether the Project management dialog is open. NOT persisted — like the
+   * Kanban/file-explorer/settings modals, a persisted-open dialog would flash
+   * on reload. */
+  pmOpen: boolean;
+  setPmOpen: (open: boolean) => void;
+
   /** Set of collapsed group keys ("org" or "org/project"). Keys present =
    *  collapsed. Default (absent) = expanded. Persisted. */
   collapsedGroups: Record<string, boolean>;
@@ -113,6 +119,9 @@ export const useTerminalStore = create<TerminalState>()(
 
       kanbanOpen: false,
       setKanbanOpen: (open) => set({ kanbanOpen: open }),
+
+      pmOpen: false,
+      setPmOpen: (open) => set({ pmOpen: open }),
 
       collapsedGroups: {},
       toggleGroupCollapsed: (key) =>

@@ -1,0 +1,2120 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Project management</title>
+<!--
+  Pluggable Project-management artifact (PM-TOOL-PLAN.md §5, D7/D8/D11).
+
+  A SINGLE self-contained document — inline <style> + inline <script>, ZERO
+  external requests (no CDN, no fetched web fonts, no imports). Loaded into a
+  same-origin sandboxed <iframe> by components/pm-dialog.tsx; it talks to the
+  gateway over relative /api/pm/* fetches, which carry the app-origin
+  gw_session cookie through the Next proxy.
+
+  Palette/type are hardcoded to mirror DESIGN.md (a documented exception to the
+  "use Tailwind tokens" rule — this isolated document has no access to the app's
+  theme tokens): warm near-charcoal canvas #2b2622, off-white ink #f7f5f0,
+  system font stack, tight radii, one restrained accent.
+
+  One task model, THREE views (Board · List · Sprints). Timeline/Gantt is a
+  later phase — the switcher shows it as a disabled "soon" placeholder.
+
+  Safety: all user-supplied text is injected via textContent / DOM nodes, never
+  innerHTML, so titles/labels/descriptions cannot inject markup.
+
+  Contract notes that diverge from Kanban (load-bearing):
+    - move 409 body key is `project` (not `board`); toIndex uses taskIds.length.
+    - task PATCH body carries `projectId` (not boardId).
+    - Backlog = sprintId:null; clearing a date/sprint sends explicit null.
+    - dates round-trip in UTC (Date.parse in, toISOString().slice(0,10) out).
+    - tasks is an array with a DERIVED columnId; ordering authority = taskIds.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --prio-low: #7fa6a0;
+    --prio-medium: #d8b46a;
+    --prio-high: #e0946a;
+    --prio-urgent: #e07a6a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  select,
+  input,
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+
+  .topbar .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .project-select {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    max-width: 280px;
+  }
+
+  .project-tags {
+    display: inline-flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  /* ---- View switcher ---- */
+  .view-switch {
+    display: inline-flex;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .view-switch button {
+    background: transparent;
+    color: var(--mute);
+    border: 0;
+    padding: 6px 12px;
+    border-right: 1px solid var(--hairline);
+  }
+
+  .view-switch button:last-child {
+    border-right: 0;
+  }
+
+  .view-switch button:hover:not(:disabled):not(.active) {
+    color: var(--ink);
+    background: var(--canvas-softer);
+  }
+
+  .view-switch button.active {
+    background: var(--ink);
+    color: var(--canvas);
+    font-weight: 500;
+  }
+
+  .view-switch button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .btn {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--canvas-softer);
+  }
+
+  .btn-primary {
+    background: var(--ink);
+    color: var(--canvas);
+    border-color: var(--ink);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--mute);
+    padding: 4px 6px;
+  }
+
+  .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .btn-danger:hover {
+    color: var(--danger);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .tag {
+    display: inline-block;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  /* ---- Banner ---- */
+  .banner {
+    display: none;
+    padding: 8px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--danger);
+    font-size: 13px;
+  }
+
+  .banner.show {
+    display: block;
+  }
+
+  /* ---- Content shell ---- */
+  #content {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---- Board (columns) ---- */
+  .board {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .column {
+    flex: 0 0 300px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  .column-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .column-name {
+    font-weight: 500;
+    font-size: 13px;
+    letter-spacing: -0.2px;
+  }
+
+  .column-count {
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .cards {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card-title {
+    font-size: 13px;
+    line-height: 1.35;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
+  .card-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .prio {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .prio::before {
+    content: "\2691"; /* flag */
+    font-size: 12px;
+  }
+
+  .prio-low {
+    color: var(--prio-low);
+  }
+  .prio-medium {
+    color: var(--prio-medium);
+  }
+  .prio-high {
+    color: var(--prio-high);
+  }
+  .prio-urgent {
+    color: var(--prio-urgent);
+  }
+
+  .due {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .due.overdue {
+    color: var(--danger);
+  }
+
+  .deps-badge {
+    color: var(--mute);
+    font-size: 11px;
+  }
+
+  .card-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .card-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .card-actions .grow {
+    flex: 1 1 auto;
+  }
+
+  .move-select {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 3px 6px;
+    max-width: 130px;
+  }
+
+  .add-card {
+    padding: 8px 10px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .add-card-trigger {
+    width: 100%;
+    text-align: left;
+    color: var(--mute);
+    background: transparent;
+    border: 1px dashed var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+  }
+
+  .add-card-trigger:hover {
+    color: var(--ink);
+    border-color: var(--mute);
+  }
+
+  .add-card-form {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .add-card-form.show {
+    display: flex;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  textarea.field {
+    resize: vertical;
+    min-height: 72px;
+    line-height: 1.45;
+  }
+
+  select.field[multiple] {
+    min-height: 96px;
+  }
+
+  .row-end {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .form-grid .full {
+    grid-column: 1 / -1;
+  }
+
+  /* ---- List view (table) ---- */
+  .list-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+    overflow: hidden;
+  }
+
+  .list-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .list-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead th {
+    position: sticky;
+    top: 0;
+    background: var(--canvas-soft);
+    text-align: left;
+    font-weight: 500;
+    color: var(--body);
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--hairline);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  thead th:hover {
+    color: var(--ink);
+  }
+
+  thead th .arrow {
+    color: var(--mute);
+    font-size: 10px;
+    margin-left: 4px;
+  }
+
+  tbody td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--hairline);
+    color: var(--body);
+    vertical-align: middle;
+  }
+
+  tbody tr {
+    cursor: pointer;
+  }
+
+  tbody tr:hover td {
+    background: var(--canvas-soft);
+  }
+
+  tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  /* ---- Sprints view ---- */
+  .sprints {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .lane {
+    flex: 0 0 300px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  .lane-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .lane-name {
+    font-weight: 500;
+    font-size: 13px;
+  }
+
+  .lane-dates {
+    color: var(--mute);
+    font-size: 11px;
+  }
+
+  .lane-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .lane-task {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .lane-task-title {
+    font-size: 13px;
+    word-break: break-word;
+  }
+
+  .sprint-select {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 3px 6px;
+    max-width: 100%;
+  }
+
+  .lane-add {
+    flex: 0 0 300px;
+    display: flex;
+    align-items: flex-start;
+  }
+
+  /* ---- Empty / loading states ---- */
+  .placeholder {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: var(--mute);
+    text-align: center;
+    padding: 32px;
+  }
+
+  .placeholder h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--body);
+  }
+
+  .muted {
+    color: var(--mute);
+  }
+
+  /* ---- Modal ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 10;
+  }
+
+  .overlay.show {
+    display: flex;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 560px;
+    max-height: 88vh;
+    overflow-y: auto;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal.narrow {
+    max-width: 440px;
+  }
+
+  .modal h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--mute);
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 9999px;
+  }
+</style>
+
+<div class="topbar">
+  <select
+    id="project-select"
+    class="project-select"
+    aria-label="Select project"
+  ></select>
+  <span id="project-tags" class="project-tags"></span>
+  <span class="grow"></span>
+  <div class="view-switch" id="view-switch" role="tablist">
+    <button type="button" data-view="board" role="tab">Board</button>
+    <button type="button" data-view="list" role="tab">List</button>
+    <button type="button" data-view="sprints" role="tab">Sprints</button>
+    <button type="button" data-view="timeline" role="tab">Timeline</button>
+  </div>
+  <button id="new-project-btn" class="btn btn-primary" type="button">
+    New project
+  </button>
+  <button
+    id="delete-project-btn"
+    class="btn btn-danger"
+    type="button"
+    title="Delete this project"
+  >
+    Delete project
+  </button>
+</div>
+
+<div id="banner" class="banner" role="alert"></div>
+
+<div id="content"></div>
+
+<!-- New project modal -->
+<div id="new-project-overlay" class="overlay">
+  <form id="new-project-form" class="modal narrow">
+    <h3>New project</h3>
+    <div>
+      <label for="np-name">Name</label>
+      <input
+        id="np-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Payments service"
+        required
+      />
+    </div>
+    <div>
+      <label for="np-tags">Tags</label>
+      <input
+        id="np-tags"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="backend, q3"
+      />
+      <div class="hint">Comma-separated. Optional.</div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-project-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create project</button>
+    </div>
+  </form>
+</div>
+
+<!-- New sprint modal -->
+<div id="new-sprint-overlay" class="overlay">
+  <form id="new-sprint-form" class="modal narrow">
+    <h3>New sprint</h3>
+    <div>
+      <label for="ns-name">Name</label>
+      <input
+        id="ns-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Sprint 14"
+        required
+      />
+    </div>
+    <div class="form-grid">
+      <div>
+        <label for="ns-start">Start date</label>
+        <input id="ns-start" class="field" type="date" />
+      </div>
+      <div>
+        <label for="ns-end">End date</label>
+        <input id="ns-end" class="field" type="date" />
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-sprint-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create sprint</button>
+    </div>
+  </form>
+</div>
+
+<!-- Edit task modal -->
+<div id="edit-task-overlay" class="overlay">
+  <form id="edit-task-form" class="modal">
+    <h3>Edit task</h3>
+    <div>
+      <label for="et-title">Title</label>
+      <input
+        id="et-title"
+        class="field"
+        type="text"
+        autocomplete="off"
+        required
+      />
+    </div>
+    <div>
+      <label for="et-desc">Description</label>
+      <textarea id="et-desc" class="field" placeholder="Optional"></textarea>
+    </div>
+    <div class="form-grid">
+      <div>
+        <label for="et-assignee">Assignee</label>
+        <input id="et-assignee" class="field" type="text" autocomplete="off" />
+      </div>
+      <div>
+        <label for="et-priority">Priority</label>
+        <select id="et-priority" class="field">
+          <option value="">— None —</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="urgent">Urgent</option>
+        </select>
+      </div>
+      <div>
+        <label for="et-start">Start date</label>
+        <input id="et-start" class="field" type="date" />
+      </div>
+      <div>
+        <label for="et-due">Due date</label>
+        <input id="et-due" class="field" type="date" />
+      </div>
+      <div class="full">
+        <label for="et-labels">Labels</label>
+        <input id="et-labels" class="field" type="text" autocomplete="off" />
+        <div class="hint">Comma-separated. Optional.</div>
+      </div>
+      <div>
+        <label for="et-sprint">Sprint</label>
+        <select id="et-sprint" class="field"></select>
+      </div>
+      <div>
+        <label for="et-deps">Dependencies</label>
+        <select id="et-deps" class="field" multiple></select>
+        <div class="hint">Ctrl/⌘-click to select multiple.</div>
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="edit-task-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  var state = {
+    projects: [], // summaries: {id,name,tags,rev,...}
+    projectId: null, // selected project id
+    project: null, // full project {columns, sprints, tasks[], rev, ...}
+    view: "board", // board | list | sprints
+    editingTaskId: null,
+    listSort: { key: "title", dir: 1 }, // dir: 1 asc, -1 desc
+    listFilter: "",
+  };
+
+  var PRIORITY_RANK = { low: 0, medium: 1, high: 2, urgent: 3 };
+  var PRIORITY_LABEL = {
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    urgent: "Urgent",
+  };
+
+  var el = {
+    projectSelect: document.getElementById("project-select"),
+    projectTags: document.getElementById("project-tags"),
+    viewSwitch: document.getElementById("view-switch"),
+    newProjectBtn: document.getElementById("new-project-btn"),
+    deleteProjectBtn: document.getElementById("delete-project-btn"),
+    banner: document.getElementById("banner"),
+    content: document.getElementById("content"),
+    newProjectOverlay: document.getElementById("new-project-overlay"),
+    newProjectForm: document.getElementById("new-project-form"),
+    npName: document.getElementById("np-name"),
+    npTags: document.getElementById("np-tags"),
+    newSprintOverlay: document.getElementById("new-sprint-overlay"),
+    newSprintForm: document.getElementById("new-sprint-form"),
+    nsName: document.getElementById("ns-name"),
+    nsStart: document.getElementById("ns-start"),
+    nsEnd: document.getElementById("ns-end"),
+    editTaskOverlay: document.getElementById("edit-task-overlay"),
+    editTaskForm: document.getElementById("edit-task-form"),
+    etTitle: document.getElementById("et-title"),
+    etDesc: document.getElementById("et-desc"),
+    etAssignee: document.getElementById("et-assignee"),
+    etPriority: document.getElementById("et-priority"),
+    etStart: document.getElementById("et-start"),
+    etDue: document.getElementById("et-due"),
+    etLabels: document.getElementById("et-labels"),
+    etSprint: document.getElementById("et-sprint"),
+    etDeps: document.getElementById("et-deps"),
+  };
+
+  // ---------------------------------------------------------------------------
+  // API layer (base path /api/pm — otherwise identical to the kanban artifact)
+  // ---------------------------------------------------------------------------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message || "Request failed";
+  }
+  ApiError.prototype = Object.create(Error.prototype);
+
+  // Performs a same-origin JSON fetch. On non-2xx, throws ApiError with the
+  // parsed body attached (`.body`) so 409-stale handling can read the project.
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) {
+      opts.headers["content-type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    var res;
+    try {
+      res = await fetch("/api/pm" + path, opts);
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = null;
+      }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Request failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function parseCsv(raw) {
+    return raw
+      .split(",")
+      .map(function (t) {
+        return t.trim();
+      })
+      .filter(function (t) {
+        return t.length > 0;
+      });
+  }
+
+  // ---- Date round-trip (both ends UTC, per the contract) --------------------
+  // ms -> <input type=date> value ("YYYY-MM-DD"); null/undefined -> "".
+  function msToDateInput(ms) {
+    if (ms == null || isNaN(ms)) return "";
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+  // <input type=date> value -> epoch ms (UTC midnight); "" -> null.
+  function dateInputToMs(v) {
+    if (!v) return null;
+    var ms = Date.parse(v);
+    return isNaN(ms) ? null : ms;
+  }
+  // ms -> compact human date for display; "" when absent.
+  function fmtDate(ms) {
+    if (ms == null || isNaN(ms)) return "";
+    var d = new Date(ms);
+    var months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // UTC getters so the label matches the stored UTC-midnight day.
+    return months[d.getUTCMonth()] + " " + d.getUTCDate();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error / banner handling
+  // ---------------------------------------------------------------------------
+  function showBanner(message) {
+    el.banner.textContent = message;
+    el.banner.classList.add("show");
+  }
+
+  function clearBanner() {
+    el.banner.textContent = "";
+    el.banner.classList.remove("show");
+  }
+
+  function handleError(e) {
+    if (e && e.status === 401) {
+      showBanner("Session expired — reload the page to sign in again.");
+      return;
+    }
+    showBanner((e && e.message) || "Something went wrong.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOM helpers (textContent-only; never innerHTML with user data)
+  // ---------------------------------------------------------------------------
+  function elem(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function tagChips(container, tags) {
+    (tags || []).forEach(function (t) {
+      container.appendChild(elem("span", "tag", t));
+    });
+  }
+
+  // Build id -> task and columnId -> column-name lookups for the current project.
+  function taskIndex(project) {
+    var byId = {};
+    (project.tasks || []).forEach(function (t) {
+      byId[t.id] = t;
+    });
+    return byId;
+  }
+
+  function columnNameIndex(project) {
+    var byId = {};
+    (project.columns || []).forEach(function (c) {
+      byId[c.id] = c.name;
+    });
+    return byId;
+  }
+
+  function sprintNameIndex(project) {
+    var byId = {};
+    (project.sprints || []).forEach(function (s) {
+      byId[s.id] = s.name;
+    });
+    return byId;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+  async function loadProjects(preferId) {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/projects");
+    } catch (e) {
+      handleError(e);
+      renderContent();
+      return;
+    }
+    state.projects = (data && data.projects) || [];
+    if (state.projects.length === 0) {
+      state.projectId = null;
+      state.project = null;
+      renderProjectSelect();
+      renderProjectTags();
+      renderContent();
+      return;
+    }
+    var ids = state.projects.map(function (p) {
+      return p.id;
+    });
+    var next =
+      (preferId && ids.indexOf(preferId) >= 0 && preferId) ||
+      (state.projectId && ids.indexOf(state.projectId) >= 0 && state.projectId) ||
+      state.projects[0].id;
+    state.projectId = next;
+    renderProjectSelect();
+    await loadProject(next);
+  }
+
+  async function loadProject(projectId) {
+    clearBanner();
+    try {
+      state.project = await api(
+        "GET",
+        "/projects/" + encodeURIComponent(projectId),
+      );
+      state.projectId = projectId;
+    } catch (e) {
+      state.project = null;
+      handleError(e);
+    }
+    renderProjectTags();
+    renderContent();
+  }
+
+  // Adopt a project object returned from a write, keeping local rev in sync.
+  function adoptProject(project) {
+    if (!project) return;
+    state.project = project;
+    state.projectId = project.id;
+    renderProjectTags();
+    renderContent();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------------------------------
+  async function createProject(name, tags) {
+    var project = await api("POST", "/projects", { name: name, tags: tags });
+    await loadProjects(project.id);
+  }
+
+  async function deleteProject(projectId) {
+    await api("DELETE", "/projects/" + encodeURIComponent(projectId));
+    if (state.projectId === projectId) {
+      state.projectId = null;
+      state.project = null;
+    }
+    await loadProjects();
+  }
+
+  async function addTask(columnId, title) {
+    var project = state.project;
+    if (!project) return;
+    await api("POST", "/projects/" + encodeURIComponent(project.id) + "/tasks", {
+      title: title,
+      columnId: columnId,
+    });
+    await loadProject(project.id); // returns the task — refetch to re-render
+  }
+
+  // patch: any subset of task fields. `projectId` is injected here. Send
+  // explicit null (not undefined) to clear a date or the sprint.
+  async function updateTask(taskId, patch) {
+    var project = state.project;
+    if (!project) return;
+    patch.projectId = project.id;
+    await api("PATCH", "/tasks/" + encodeURIComponent(taskId), patch);
+    await loadProject(project.id);
+  }
+
+  async function deleteTask(taskId) {
+    var project = state.project;
+    if (!project) return;
+    await api(
+      "DELETE",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "?projectId=" +
+        encodeURIComponent(project.id),
+    );
+    await loadProject(project.id);
+  }
+
+  // Move a task to the END of the target column. rev-guarded: on 409 stale,
+  // adopt the fresh project the server returned and retry ONCE.
+  async function moveTask(taskId, toColumnId) {
+    var project = state.project;
+    if (!project) return;
+
+    function attempt(rev, targetColId, fromProject) {
+      var target = null;
+      for (var i = 0; i < fromProject.columns.length; i++) {
+        if (fromProject.columns[i].id === targetColId)
+          target = fromProject.columns[i];
+      }
+      var toIndex = target ? target.taskIds.length : 0;
+      return api("POST", "/tasks/" + encodeURIComponent(taskId) + "/move", {
+        projectId: fromProject.id,
+        toColumnId: targetColId,
+        toIndex: toIndex,
+        rev: rev,
+      });
+    }
+
+    try {
+      var updated = await attempt(project.rev, toColumnId, project);
+      adoptProject(updated);
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.project) {
+        var fresh = e.body.project;
+        state.project = fresh;
+        try {
+          var retried = await attempt(fresh.rev, toColumnId, fresh);
+          adoptProject(retried);
+        } catch (e2) {
+          handleError(e2);
+          adoptProject(fresh); // re-render with the server's fresh project
+        }
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  async function createSprint(name, startDate, endDate) {
+    var project = state.project;
+    if (!project) return;
+    var body = { name: name };
+    if (startDate != null) body.startDate = startDate;
+    if (endDate != null) body.endDate = endDate;
+    await api(
+      "POST",
+      "/projects/" + encodeURIComponent(project.id) + "/sprints",
+      body,
+    );
+    await loadProject(project.id);
+  }
+
+  async function deleteSprint(sprintId) {
+    var project = state.project;
+    if (!project) return;
+    await api(
+      "DELETE",
+      "/sprints/" +
+        encodeURIComponent(sprintId) +
+        "?projectId=" +
+        encodeURIComponent(project.id),
+    );
+    await loadProject(project.id);
+  }
+
+  // Field edit (LWW, NOT rev-guarded): move a task between sprint lanes.
+  // sprintId "" / null -> backlog (send explicit null).
+  async function setTaskSprint(taskId, sprintId) {
+    await updateTask(taskId, { sprintId: sprintId || null });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Top-bar rendering
+  // ---------------------------------------------------------------------------
+  function renderProjectSelect() {
+    var sel = el.projectSelect;
+    sel.textContent = "";
+    if (state.projects.length === 0) {
+      var opt = elem("option", null, "No projects");
+      opt.value = "";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      el.deleteProjectBtn.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    el.deleteProjectBtn.disabled = false;
+    state.projects.forEach(function (p) {
+      var opt = elem("option", null, p.name);
+      opt.value = p.id;
+      if (p.id === state.projectId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderProjectTags() {
+    el.projectTags.textContent = "";
+    var project = state.project;
+    if (project && project.tags) tagChips(el.projectTags, project.tags);
+  }
+
+  function renderViewSwitch() {
+    var btns = el.viewSwitch.querySelectorAll("button[data-view]");
+    btns.forEach(function (b) {
+      if (b.getAttribute("data-view") === state.view) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Content rendering (switches on state.view)
+  // ---------------------------------------------------------------------------
+  function renderContent() {
+    renderViewSwitch();
+    var root = el.content;
+    root.textContent = "";
+
+    if (state.projects.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No projects yet"));
+      empty.appendChild(
+        elem("div", null, 'Create your first project with "New project" above.'),
+      );
+      root.appendChild(empty);
+      return;
+    }
+
+    if (!state.project) {
+      var loading = elem("div", "placeholder");
+      loading.appendChild(elem("div", null, "Loading project…"));
+      root.appendChild(loading);
+      return;
+    }
+
+    if (state.view === "board") root.appendChild(renderBoard(state.project));
+    else if (state.view === "list") root.appendChild(renderList(state.project));
+    else if (state.view === "sprints")
+      root.appendChild(renderSprints(state.project));
+    else if (state.view === "timeline")
+      root.appendChild(renderTimeline(state.project));
+  }
+
+  // ---- Board view -----------------------------------------------------------
+  function renderBoard(project) {
+    var byId = taskIndex(project);
+    var boardEl = elem("div", "board");
+    project.columns.forEach(function (col) {
+      boardEl.appendChild(renderColumn(project, col, byId));
+    });
+    return boardEl;
+  }
+
+  function renderColumn(project, col, byId) {
+    var colEl = elem("div", "column");
+
+    var head = elem("div", "column-head");
+    head.appendChild(elem("span", "column-name", col.name));
+    var count = elem("span", "column-count", String(col.taskIds.length));
+    count.style.marginLeft = "auto";
+    head.appendChild(count);
+    colEl.appendChild(head);
+
+    var cardsEl = elem("div", "cards");
+    col.taskIds.forEach(function (taskId) {
+      var task = byId[taskId];
+      if (task) cardsEl.appendChild(renderCard(project, col, task));
+    });
+    colEl.appendChild(cardsEl);
+
+    colEl.appendChild(renderAddTask(col));
+    return colEl;
+  }
+
+  function renderCard(project, col, task) {
+    var cardEl = elem("div", "card");
+
+    cardEl.appendChild(elem("div", "card-title", task.title));
+
+    // Meta row: assignee, priority, due, deps count.
+    var meta = elem("div", "card-meta");
+    if (task.assignee) meta.appendChild(elem("span", "chip", task.assignee));
+    if (task.priority && PRIORITY_LABEL[task.priority]) {
+      meta.appendChild(
+        elem("span", "prio prio-" + task.priority, PRIORITY_LABEL[task.priority]),
+      );
+    }
+    if (task.dueDate != null) {
+      var overdue = task.dueDate < Date.now();
+      meta.appendChild(
+        elem("span", "due" + (overdue ? " overdue" : ""), "due " + fmtDate(task.dueDate)),
+      );
+    }
+    if (task.dependsOn && task.dependsOn.length) {
+      meta.appendChild(
+        elem("span", "deps-badge", "deps: " + task.dependsOn.length),
+      );
+    }
+    if (meta.childNodes.length) cardEl.appendChild(meta);
+
+    if (task.labels && task.labels.length) {
+      var labelsEl = elem("div", "card-tags");
+      tagChips(labelsEl, task.labels);
+      cardEl.appendChild(labelsEl);
+    }
+
+    var actions = elem("div", "card-actions");
+
+    // Move dropdown: lists the OTHER columns; append to end of target.
+    var others = project.columns.filter(function (c) {
+      return c.id !== col.id;
+    });
+    if (others.length) {
+      var moveSel = elem("select", "move-select");
+      moveSel.setAttribute("aria-label", "Move task");
+      var placeholder = elem("option", null, "Move ▾");
+      placeholder.value = "";
+      placeholder.selected = true;
+      moveSel.appendChild(placeholder);
+      others.forEach(function (c) {
+        var opt = elem("option", null, c.name);
+        opt.value = c.id;
+        moveSel.appendChild(opt);
+      });
+      moveSel.addEventListener("change", function () {
+        var toColumnId = moveSel.value;
+        moveSel.selectedIndex = 0;
+        if (toColumnId) void moveTask(task.id, toColumnId);
+      });
+      actions.appendChild(moveSel);
+    }
+
+    actions.appendChild(elem("span", "grow"));
+
+    var editBtn = elem("button", "btn btn-ghost", "Edit");
+    editBtn.type = "button";
+    editBtn.addEventListener("click", function () {
+      openEditTask(task);
+    });
+    actions.appendChild(editBtn);
+
+    var delBtn = elem("button", "btn btn-ghost btn-danger", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm('Delete task "' + task.title + '"?')) {
+        deleteTask(task.id).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+
+    cardEl.appendChild(actions);
+    return cardEl;
+  }
+
+  function renderAddTask(col) {
+    var wrap = elem("div", "add-card");
+
+    var trigger = elem("button", "add-card-trigger", "+ Add task");
+    trigger.type = "button";
+
+    var form = elem("form", "add-card-form");
+    var input = elem("input", "field");
+    input.type = "text";
+    input.placeholder = "Task title";
+    input.setAttribute("autocomplete", "off");
+    var rowEnd = elem("div", "row-end");
+    var cancel = elem("button", "btn", "Cancel");
+    cancel.type = "button";
+    var add = elem("button", "btn btn-primary", "Add");
+    add.type = "submit";
+    rowEnd.appendChild(cancel);
+    rowEnd.appendChild(add);
+    form.appendChild(input);
+    form.appendChild(rowEnd);
+
+    function open() {
+      trigger.style.display = "none";
+      form.classList.add("show");
+      input.focus();
+    }
+    function close() {
+      form.classList.remove("show");
+      trigger.style.display = "";
+      input.value = "";
+    }
+
+    trigger.addEventListener("click", open);
+    cancel.addEventListener("click", close);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var title = input.value.trim();
+      if (!title) return;
+      close();
+      addTask(col.id, title).catch(handleError);
+    });
+
+    wrap.appendChild(trigger);
+    wrap.appendChild(form);
+    return wrap;
+  }
+
+  // ---- List view ------------------------------------------------------------
+  var LIST_COLUMNS = [
+    { key: "title", label: "Title" },
+    { key: "status", label: "Status" },
+    { key: "assignee", label: "Assignee" },
+    { key: "priority", label: "Priority" },
+    { key: "dueDate", label: "Due" },
+    { key: "sprint", label: "Sprint" },
+    { key: "deps", label: "#deps" },
+  ];
+
+  function renderList(project) {
+    var colName = columnNameIndex(project);
+    var sprName = sprintNameIndex(project);
+
+    // Build flattened rows with derived fields for sort/filter.
+    var rows = (project.tasks || []).map(function (t) {
+      return {
+        task: t,
+        title: t.title || "",
+        status: colName[t.columnId] || "",
+        assignee: t.assignee || "",
+        priority: t.priority || "",
+        dueDate: t.dueDate != null ? t.dueDate : null,
+        sprint: t.sprintId ? sprName[t.sprintId] || "" : "",
+        deps: (t.dependsOn && t.dependsOn.length) || 0,
+      };
+    });
+
+    var filter = state.listFilter.trim().toLowerCase();
+    if (filter) {
+      rows = rows.filter(function (r) {
+        return (
+          r.title.toLowerCase().indexOf(filter) >= 0 ||
+          r.assignee.toLowerCase().indexOf(filter) >= 0 ||
+          r.status.toLowerCase().indexOf(filter) >= 0 ||
+          r.sprint.toLowerCase().indexOf(filter) >= 0
+        );
+      });
+    }
+
+    var sort = state.listSort;
+    rows.sort(function (a, b) {
+      var av, bv;
+      if (sort.key === "priority") {
+        av = a.priority ? PRIORITY_RANK[a.priority] : -1;
+        bv = b.priority ? PRIORITY_RANK[b.priority] : -1;
+      } else if (sort.key === "dueDate") {
+        av = a.dueDate != null ? a.dueDate : Infinity;
+        bv = b.dueDate != null ? b.dueDate : Infinity;
+      } else if (sort.key === "deps") {
+        av = a.deps;
+        bv = b.deps;
+      } else {
+        av = String(a[sort.key]).toLowerCase();
+        bv = String(b[sort.key]).toLowerCase();
+      }
+      if (av < bv) return -1 * sort.dir;
+      if (av > bv) return 1 * sort.dir;
+      return 0;
+    });
+
+    var wrap = elem("div", "list-wrap");
+
+    var toolbar = elem("div", "list-toolbar");
+    var filterInput = elem("input", "field");
+    filterInput.type = "text";
+    filterInput.placeholder = "Filter tasks…";
+    filterInput.value = state.listFilter;
+    filterInput.style.maxWidth = "260px";
+    filterInput.setAttribute("autocomplete", "off");
+    filterInput.addEventListener("input", function () {
+      state.listFilter = filterInput.value;
+      renderContent();
+      // Restore focus + caret after re-render.
+      var again = el.content.querySelector(".list-toolbar .field");
+      if (again) {
+        again.focus();
+        var len = again.value.length;
+        again.setSelectionRange(len, len);
+      }
+    });
+    toolbar.appendChild(filterInput);
+    var count = elem("span", "muted", rows.length + " task" + (rows.length === 1 ? "" : "s"));
+    toolbar.appendChild(count);
+    wrap.appendChild(toolbar);
+
+    var scroll = elem("div", "list-scroll");
+    var table = elem("table");
+    var thead = elem("thead");
+    var htr = elem("tr");
+    LIST_COLUMNS.forEach(function (c) {
+      var th = elem("th", null, c.label);
+      if (sort.key === c.key) {
+        th.appendChild(elem("span", "arrow", sort.dir > 0 ? "▲" : "▼"));
+      }
+      th.addEventListener("click", function () {
+        if (state.listSort.key === c.key) state.listSort.dir *= -1;
+        else state.listSort = { key: c.key, dir: 1 };
+        renderContent();
+      });
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+
+    var tbody = elem("tbody");
+    if (rows.length === 0) {
+      var tr = elem("tr");
+      var td = elem("td", "muted", "No tasks match.");
+      td.setAttribute("colspan", String(LIST_COLUMNS.length));
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    } else {
+      rows.forEach(function (r) {
+        var tr = elem("tr");
+        tr.appendChild(elem("td", null, r.title));
+        tr.appendChild(elem("td", null, r.status || "—"));
+        tr.appendChild(elem("td", null, r.assignee || "—"));
+        var ptd = elem("td");
+        if (r.priority) {
+          ptd.appendChild(
+            elem("span", "prio prio-" + r.priority, PRIORITY_LABEL[r.priority]),
+          );
+        } else {
+          ptd.textContent = "—";
+        }
+        tr.appendChild(ptd);
+        tr.appendChild(elem("td", null, r.dueDate != null ? fmtDate(r.dueDate) : "—"));
+        tr.appendChild(elem("td", null, r.sprint || "—"));
+        tr.appendChild(elem("td", null, String(r.deps)));
+        tr.addEventListener("click", function () {
+          openEditTask(r.task);
+        });
+        tbody.appendChild(tr);
+      });
+    }
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    wrap.appendChild(scroll);
+    return wrap;
+  }
+
+  // ---- Sprints view ---------------------------------------------------------
+  // ---- Timeline / Gantt view (D7: dependency-free raw SVG) -----------------
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var DAY_MS = 86400000;
+  function svgEl(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function priorityFill(p) {
+    return p === "urgent"
+      ? "#7a3b2e"
+      : p === "high"
+        ? "#8a5a2b"
+        : p === "medium"
+          ? "#5c5348"
+          : "#4a453d"; // low / none
+  }
+
+  function renderTimeline(project) {
+    var wrap = elem("div", "timeline");
+    var scheduled = [];
+    var unscheduled = [];
+    project.tasks.forEach(function (t) {
+      if (t.startDate != null && t.dueDate != null && t.dueDate >= t.startDate)
+        scheduled.push(t);
+      else unscheduled.push(t);
+    });
+
+    if (scheduled.length === 0) {
+      var ph = elem("div", "placeholder");
+      ph.appendChild(
+        elem("div", null, "No scheduled tasks. Give a task a start and due date to see it here."),
+      );
+      wrap.appendChild(ph);
+    } else {
+      // Group by sprint (in order), then a Backlog group (sprintId null).
+      var groups = [];
+      project.sprints.forEach(function (s) {
+        var ts = scheduled.filter(function (t) {
+          return t.sprintId === s.id;
+        });
+        if (ts.length) groups.push({ name: s.name, tasks: ts });
+      });
+      var backlog = scheduled.filter(function (t) {
+        return !t.sprintId;
+      });
+      if (backlog.length) groups.push({ name: "Backlog", tasks: backlog });
+
+      // Padded date range across scheduled tasks + sprint bounds.
+      var minMs = Infinity;
+      var maxMs = -Infinity;
+      scheduled.forEach(function (t) {
+        if (t.startDate < minMs) minMs = t.startDate;
+        if (t.dueDate > maxMs) maxMs = t.dueDate;
+      });
+      project.sprints.forEach(function (s) {
+        if (s.startDate != null && s.startDate < minMs) minMs = s.startDate;
+        if (s.endDate != null && s.endDate > maxMs) maxMs = s.endDate;
+      });
+      minMs -= DAY_MS;
+      maxMs += DAY_MS;
+      var days = Math.max(1, Math.round((maxMs - minMs) / DAY_MS));
+      var PX = days > 90 ? 8 : days > 45 ? 14 : 22; // adaptive px/day
+      var LABEL_W = 200;
+      var ROW_H = 28;
+      var HEADER_H = 26;
+      var PAD = 8;
+      var chartW = days * PX;
+      var totalW = LABEL_W + chartW + PAD * 2;
+
+      var rows = [];
+      groups.forEach(function (g) {
+        rows.push({ type: "group", name: g.name });
+        g.tasks.sort(function (a, b) {
+          return a.startDate - b.startDate;
+        });
+        g.tasks.forEach(function (t) {
+          rows.push({ type: "task", task: t });
+        });
+      });
+      var totalH = HEADER_H + rows.length * ROW_H + PAD * 2;
+      function xOf(ms) {
+        return LABEL_W + PAD + ((ms - minMs) / DAY_MS) * PX;
+      }
+
+      var svg = svgEl("svg", {
+        width: totalW,
+        height: totalH,
+        viewBox: "0 0 " + totalW + " " + totalH,
+      });
+      var defs = svgEl("defs");
+      var marker = svgEl("marker", {
+        id: "pm-arrow",
+        markerWidth: 7,
+        markerHeight: 7,
+        refX: 6,
+        refY: 3,
+        orient: "auto",
+      });
+      marker.appendChild(svgEl("path", { d: "M0,0 L6,3 L0,6 Z", fill: "#c96f4a" }));
+      defs.appendChild(marker);
+      svg.appendChild(defs);
+
+      // Weekly gridlines (Mondays) with date labels.
+      for (var ms = minMs; ms <= maxMs; ms += DAY_MS) {
+        if (new Date(ms).getUTCDay() === 1) {
+          var gx = xOf(ms);
+          svg.appendChild(
+            svgEl("line", { x1: gx, y1: HEADER_H, x2: gx, y2: totalH - PAD, stroke: "#3a352f", "stroke-width": 1 }),
+          );
+          var lbl = svgEl("text", { x: gx + 2, y: 16, fill: "#8a7f6f", "font-size": 10 });
+          lbl.textContent = fmtDate(ms);
+          svg.appendChild(lbl);
+        }
+      }
+      // Sprint markers (dashed verticals at start/end).
+      project.sprints.forEach(function (s) {
+        [s.startDate, s.endDate].forEach(function (m) {
+          if (m == null) return;
+          var mx = xOf(m);
+          svg.appendChild(
+            svgEl("line", { x1: mx, y1: HEADER_H, x2: mx, y2: totalH - PAD, stroke: "#7a6f60", "stroke-width": 1, "stroke-dasharray": "3 3" }),
+          );
+        });
+      });
+
+      // Rows: group headers + task labels + bars.
+      var barOf = {}; // taskId -> {x1,x2,ymid}
+      rows.forEach(function (r, i) {
+        var y = HEADER_H + i * ROW_H;
+        if (r.type === "group") {
+          var gt = svgEl("text", { x: PAD, y: y + 18, fill: "#f7f5f0", "font-size": 12, "font-weight": 600 });
+          gt.textContent = r.name;
+          svg.appendChild(gt);
+          return;
+        }
+        var t = r.task;
+        var tl = svgEl("text", { x: PAD + 12, y: y + 18, fill: "#d9cfc0", "font-size": 11 });
+        tl.textContent = t.title.length > 26 ? t.title.slice(0, 25) + "…" : t.title;
+        var tlTitle = svgEl("title");
+        tlTitle.textContent = t.title;
+        tl.appendChild(tlTitle);
+        svg.appendChild(tl);
+
+        var bx = xOf(t.startDate);
+        var bw = Math.max(PX * 0.6, xOf(t.dueDate + DAY_MS) - bx); // due day inclusive
+        var rect = svgEl("rect", {
+          x: bx,
+          y: y + 6,
+          width: bw,
+          height: ROW_H - 12,
+          rx: 3,
+          fill: priorityFill(t.priority),
+          stroke: "#7a6f60",
+          "stroke-width": 1,
+        });
+        rect.style.cursor = "pointer";
+        var rt = svgEl("title");
+        rt.textContent = t.title + " · " + fmtDate(t.startDate) + "–" + fmtDate(t.dueDate);
+        rect.appendChild(rt);
+        rect.addEventListener("click", function () {
+          openEditTask(t);
+        });
+        svg.appendChild(rect);
+        barOf[t.id] = { x1: bx, x2: bx + bw, ymid: y + ROW_H / 2 };
+      });
+
+      // Dependency connectors: predecessor end -> successor start, only when
+      // both endpoints are scheduled (on the chart). Date-less endpoints are
+      // surfaced in the Unscheduled tray + the task's dep count instead.
+      rows.forEach(function (r) {
+        if (r.type !== "task") return;
+        (r.task.dependsOn || []).forEach(function (depId) {
+          var from = barOf[depId];
+          var to = barOf[r.task.id];
+          if (!from || !to) return;
+          svg.appendChild(
+            svgEl("line", {
+              x1: from.x2,
+              y1: from.ymid,
+              x2: to.x1 - 2,
+              y2: to.ymid,
+              stroke: "#c96f4a",
+              "stroke-width": 1.5,
+              "marker-end": "url(#pm-arrow)",
+            }),
+          );
+        });
+      });
+
+      var scroller = elem("div", "gantt-scroll");
+      scroller.style.cssText =
+        "overflow-x:auto;overflow-y:hidden;border:1px solid #3a352f;border-radius:6px;background:#241f1b;padding:2px;";
+      scroller.appendChild(svg);
+      wrap.appendChild(scroller);
+    }
+
+    // Unscheduled tray.
+    if (unscheduled.length) {
+      var tray = elem("div", "gantt-tray");
+      tray.style.cssText = "margin-top:14px;";
+      tray.appendChild(elem("h3", null, "Unscheduled (" + unscheduled.length + ")"));
+      var hint = elem("div", null, "Tasks missing a start or due date. Click one to schedule it.");
+      hint.style.cssText = "color:#8a7f6f;font-size:11px;margin:2px 0 6px;";
+      tray.appendChild(hint);
+      unscheduled.forEach(function (t) {
+        var chip = elem("button", null, t.title);
+        chip.type = "button";
+        chip.style.cssText =
+          "display:inline-block;margin:3px;padding:4px 8px;border:1px solid #7a6f60;border-radius:12px;background:#332e28;color:#d9cfc0;cursor:pointer;font-size:11px;";
+        if (t.dependsOn && t.dependsOn.length) {
+          chip.appendChild(elem("span", null, " · deps: " + t.dependsOn.length));
+        }
+        chip.addEventListener("click", function () {
+          openEditTask(t);
+        });
+        tray.appendChild(chip);
+      });
+      wrap.appendChild(tray);
+    }
+    return wrap;
+  }
+
+  function renderSprints(project) {
+    var byId = taskIndex(project);
+
+    // Group tasks by sprintId. Order within a lane follows tasks[] order.
+    var backlog = [];
+    var bySprint = {};
+    (project.sprints || []).forEach(function (s) {
+      bySprint[s.id] = [];
+    });
+    (project.tasks || []).forEach(function (t) {
+      if (t.sprintId && bySprint[t.sprintId]) bySprint[t.sprintId].push(t);
+      else backlog.push(t);
+    });
+
+    var wrap = elem("div", "sprints");
+
+    wrap.appendChild(renderLane(project, null, "Backlog", null, null, backlog));
+    (project.sprints || []).forEach(function (s) {
+      wrap.appendChild(
+        renderLane(project, s.id, s.name, s.startDate, s.endDate, bySprint[s.id] || []),
+      );
+    });
+
+    // Trailing "New sprint" affordance.
+    var addLane = elem("div", "lane-add");
+    var addBtn = elem("button", "btn", "+ New sprint");
+    addBtn.type = "button";
+    addBtn.addEventListener("click", openNewSprint);
+    addLane.appendChild(addBtn);
+    wrap.appendChild(addLane);
+
+    return wrap;
+  }
+
+  function renderLane(project, sprintId, name, startDate, endDate, tasks) {
+    var lane = elem("div", "lane");
+
+    var head = elem("div", "lane-head");
+    head.appendChild(elem("span", "lane-name", name));
+    if (startDate != null || endDate != null) {
+      var range =
+        (startDate != null ? fmtDate(startDate) : "…") +
+        " – " +
+        (endDate != null ? fmtDate(endDate) : "…");
+      head.appendChild(elem("span", "lane-dates", range));
+    }
+    var spacer = elem("span");
+    spacer.style.marginLeft = "auto";
+    head.appendChild(spacer);
+    head.appendChild(elem("span", "lane-dates", String(tasks.length)));
+    if (sprintId) {
+      var del = elem("button", "btn btn-ghost btn-danger", "×");
+      del.type = "button";
+      del.title = "Delete sprint";
+      del.style.marginLeft = "6px";
+      del.addEventListener("click", function () {
+        if (
+          window.confirm(
+            'Delete sprint "' +
+              name +
+              '"? Its tasks move back to the backlog.',
+          )
+        ) {
+          deleteSprint(sprintId).catch(handleError);
+        }
+      });
+      head.appendChild(del);
+    }
+    lane.appendChild(head);
+
+    var body = elem("div", "lane-body");
+    if (tasks.length === 0) {
+      body.appendChild(elem("div", "muted", "No tasks."));
+    }
+    tasks.forEach(function (t) {
+      body.appendChild(renderLaneTask(project, t, sprintId));
+    });
+    lane.appendChild(body);
+    return lane;
+  }
+
+  function renderLaneTask(project, task, currentSprintId) {
+    var node = elem("div", "lane-task");
+
+    var title = elem("div", "lane-task-title", task.title);
+    node.appendChild(title);
+
+    if (task.priority && PRIORITY_LABEL[task.priority]) {
+      var meta = elem("div", "card-meta");
+      meta.appendChild(
+        elem("span", "prio prio-" + task.priority, PRIORITY_LABEL[task.priority]),
+      );
+      node.appendChild(meta);
+    }
+
+    // Sprint move select (field edit, LWW): Backlog + each sprint.
+    var sel = elem("select", "sprint-select");
+    sel.setAttribute("aria-label", "Move task to sprint");
+    var backOpt = elem("option", null, "— Backlog —");
+    backOpt.value = "";
+    if (!currentSprintId) backOpt.selected = true;
+    sel.appendChild(backOpt);
+    (project.sprints || []).forEach(function (s) {
+      var opt = elem("option", null, s.name);
+      opt.value = s.id;
+      if (s.id === currentSprintId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener("change", function () {
+      var next = sel.value || null;
+      if (next !== (currentSprintId || null)) {
+        setTaskSprint(task.id, next).catch(handleError);
+      }
+    });
+    node.appendChild(sel);
+
+    return node;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modals
+  // ---------------------------------------------------------------------------
+  function openOverlay(overlay) {
+    overlay.classList.add("show");
+  }
+  function closeOverlay(overlay) {
+    overlay.classList.remove("show");
+  }
+
+  document.querySelectorAll("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      closeOverlay(document.getElementById(btn.getAttribute("data-close")));
+    });
+  });
+  [el.newProjectOverlay, el.newSprintOverlay, el.editTaskOverlay].forEach(
+    function (ov) {
+      ov.addEventListener("mousedown", function (e) {
+        if (e.target === ov) closeOverlay(ov);
+      });
+    },
+  );
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      closeOverlay(el.newProjectOverlay);
+      closeOverlay(el.newSprintOverlay);
+      closeOverlay(el.editTaskOverlay);
+    }
+  });
+
+  function openNewSprint() {
+    if (!state.project) return;
+    el.nsName.value = "";
+    el.nsStart.value = "";
+    el.nsEnd.value = "";
+    openOverlay(el.newSprintOverlay);
+    el.nsName.focus();
+  }
+
+  function openEditTask(task) {
+    var project = state.project;
+    if (!project) return;
+    state.editingTaskId = task.id;
+    el.etTitle.value = task.title || "";
+    el.etDesc.value = task.description || "";
+    el.etAssignee.value = task.assignee || "";
+    el.etPriority.value = task.priority || "";
+    el.etStart.value = msToDateInput(task.startDate);
+    el.etDue.value = msToDateInput(task.dueDate);
+    el.etLabels.value = (task.labels || []).join(", ");
+
+    // Sprint select: Backlog + each sprint.
+    el.etSprint.textContent = "";
+    var back = elem("option", null, "— Backlog —");
+    back.value = "";
+    el.etSprint.appendChild(back);
+    (project.sprints || []).forEach(function (s) {
+      var opt = elem("option", null, s.name);
+      opt.value = s.id;
+      el.etSprint.appendChild(opt);
+    });
+    el.etSprint.value = task.sprintId || "";
+
+    // Dependencies multi-select: OTHER tasks in the project.
+    el.etDeps.textContent = "";
+    var deps = task.dependsOn || [];
+    (project.tasks || []).forEach(function (t) {
+      if (t.id === task.id) return;
+      var opt = elem("option", null, t.title);
+      opt.value = t.id;
+      if (deps.indexOf(t.id) >= 0) opt.selected = true;
+      el.etDeps.appendChild(opt);
+    });
+
+    openOverlay(el.editTaskOverlay);
+    el.etTitle.focus();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  el.projectSelect.addEventListener("change", function () {
+    var id = el.projectSelect.value;
+    if (id) void loadProject(id);
+  });
+
+  el.viewSwitch.querySelectorAll("button[data-view]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var v = btn.getAttribute("data-view");
+      if (v && v !== state.view) {
+        state.view = v;
+        renderContent();
+      }
+    });
+  });
+
+  el.newProjectBtn.addEventListener("click", function () {
+    el.npName.value = "";
+    el.npTags.value = "";
+    openOverlay(el.newProjectOverlay);
+    el.npName.focus();
+  });
+
+  el.deleteProjectBtn.addEventListener("click", function () {
+    if (!state.project) return;
+    if (
+      window.confirm(
+        'Delete project "' +
+          state.project.name +
+          '" and all its tasks? This cannot be undone.',
+      )
+    ) {
+      deleteProject(state.project.id).catch(handleError);
+    }
+  });
+
+  el.newProjectForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.npName.value.trim();
+    if (!name) return;
+    var tags = parseCsv(el.npTags.value);
+    closeOverlay(el.newProjectOverlay);
+    createProject(name, tags).catch(handleError);
+  });
+
+  el.newSprintForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.nsName.value.trim();
+    if (!name) return;
+    var start = dateInputToMs(el.nsStart.value);
+    var end = dateInputToMs(el.nsEnd.value);
+    closeOverlay(el.newSprintOverlay);
+    createSprint(name, start, end).catch(handleError);
+  });
+
+  el.editTaskForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var id = state.editingTaskId;
+    if (!id) return;
+    var title = el.etTitle.value.trim();
+    if (!title) return;
+    // Explicit nulls clear dates/sprint; JSON keeps null, drops undefined.
+    var patch = {
+      title: title,
+      description: el.etDesc.value,
+      assignee: el.etAssignee.value.trim(),
+      priority: el.etPriority.value || null,
+      labels: parseCsv(el.etLabels.value),
+      startDate: dateInputToMs(el.etStart.value),
+      dueDate: dateInputToMs(el.etDue.value),
+      sprintId: el.etSprint.value || null,
+      dependsOn: Array.from(el.etDeps.selectedOptions).map(function (o) {
+        return o.value;
+      }),
+    };
+    closeOverlay(el.editTaskOverlay);
+    updateTask(id, patch).catch(handleError);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  renderViewSwitch();
+  void loadProjects();
+</script>

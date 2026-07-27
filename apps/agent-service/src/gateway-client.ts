@@ -23,6 +23,16 @@ import type {
   UpdateBoardRequest,
   CreateCardRequest,
   UpdateCardRequest,
+  PmProject,
+  PmProjectSummary,
+  PmTask,
+  PmSprint,
+  PmListResponse,
+  CreateProjectRequest,
+  UpdateProjectRequest,
+  CreateTaskRequest,
+  UpdateTaskRequest,
+  CreateSprintRequest,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -317,6 +327,131 @@ class GatewayClient {
       { method: "DELETE" },
     );
     if (res.status !== 204) throw await this.error(res);
+  }
+
+  // --- Project management (PM) -------------------------------------------
+  // Same posture as Kanban: the agent drives the gateway-owned PM store purely
+  // as a REST client. The gateway remains the single store of record and the
+  // one enforcement point (auth, CSRF, rev-guarded move).
+
+  async listPmProjects(): Promise<PmProjectSummary[]> {
+    const r = await this.json<PmListResponse>(
+      await this.call("/api/pm/projects"),
+    );
+    return r.projects;
+  }
+
+  async getPmProject(projectId: string): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(`/api/pm/projects/${encodeURIComponent(projectId)}`),
+    );
+  }
+
+  async createPmProject(body: CreateProjectRequest): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call("/api/pm/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  async updatePmProject(
+    projectId: string,
+    body: UpdateProjectRequest,
+  ): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(`/api/pm/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  /** Delete a whole project. Gateway returns 204 on success (no body). */
+  async deletePmProject(projectId: string): Promise<void> {
+    const res = await this.call(
+      `/api/pm/projects/${encodeURIComponent(projectId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async addPmTask(projectId: string, body: CreateTaskRequest): Promise<PmTask> {
+    return this.json<PmTask>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/tasks`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  /**
+   * Update a task's fields and/or its dependency set. The client injects
+   * `projectId` (which locates the task) into the body so callers only pass the
+   * fields they want to change. A dependency cycle comes back as
+   * `400 {error:"dependency cycle"}` → surfaced as a GatewayError.
+   */
+  async updatePmTask(
+    projectId: string,
+    taskId: string,
+    body: Omit<UpdateTaskRequest, "projectId">,
+  ): Promise<PmTask> {
+    return this.json<PmTask>(
+      await this.call(`/api/pm/tasks/${encodeURIComponent(taskId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      }),
+    );
+  }
+
+  /**
+   * Move (or reorder) a task. The gateway rejects a stale `rev` with 409 and
+   * echoes the current project; we surface that as `{ stale: true, project }`
+   * so the tool executor can refetch the fresh rev and retry once — the model
+   * never has to manage rev itself (mirrors moveKanbanCard).
+   */
+  async movePmTask(
+    projectId: string,
+    taskId: string,
+    body: { toColumnId: string; toIndex: number; rev: number },
+  ): Promise<{ stale: boolean; project: PmProject }> {
+    const res = await this.call(
+      `/api/pm/tasks/${encodeURIComponent(taskId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as { error?: string; project: PmProject };
+      return { stale: true, project: b.project };
+    }
+    return { stale: false, project: await this.json<PmProject>(res) };
+  }
+
+  async addPmSprint(
+    projectId: string,
+    body: CreateSprintRequest,
+  ): Promise<PmSprint> {
+    return this.json<PmSprint>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/sprints`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
   }
 
   /** Build a GatewayError from a non-2xx response (used by the 204 methods). */

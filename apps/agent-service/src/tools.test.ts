@@ -220,3 +220,100 @@ test("kanban_get requires board_id (no gateway call when missing)", async () => 
     "error: board_id is required",
   );
 });
+
+// ---- Project-management (PM) tools ------------------------------------------
+
+const PM_READ_TOOLS = ["pm_list_projects", "pm_get_project"];
+const PM_WRITE_TOOLS = [
+  "pm_create_project",
+  "pm_delete_project",
+  "pm_add_task",
+  "pm_update_task",
+  "pm_move_task",
+  "pm_add_sprint",
+];
+const PM_TOOLS = [...PM_READ_TOOLS, ...PM_WRITE_TOOLS];
+
+test("all eight PM tools are exposed", () => {
+  const names = toolNames();
+  for (const t of PM_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("there is no pm_delete_task tool (task deletion stays human-only)", () => {
+  assert.ok(!toolNames().includes("pm_delete_task"));
+});
+
+test("every PM tool has a closed parameters schema", () => {
+  for (const name of PM_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("PM reads are auto (NOT write tools)", () => {
+  for (const t of PM_READ_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), false, `${t} should NOT be a WRITE tool`);
+  }
+});
+
+test("the six PM writes are WRITE tools", () => {
+  for (const t of PM_WRITE_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+  }
+});
+
+test("pm_delete_project is approval-gated AND coerced one-time (D12)", () => {
+  assert.equal(WRITE_TOOLS.has("pm_delete_project"), true);
+  assert.equal(ONE_TIME_TOOLS.has("pm_delete_project"), true);
+});
+
+test("the routine PM writes are NOT in the one-time set (allow-always ok)", () => {
+  for (const t of [
+    "pm_create_project",
+    "pm_add_task",
+    "pm_update_task",
+    "pm_move_task",
+    "pm_add_sprint",
+  ]) {
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      false,
+      `${t} should permit allow-always`,
+    );
+  }
+});
+
+test("describeCall returns a non-empty summary for each PM tool", () => {
+  const args = {
+    project_id: "pm-1",
+    task_id: "task-1",
+    to_column_id: "col-2",
+    to_index: 1,
+    name: "My Project",
+    title: "My Task",
+  };
+  for (const t of PM_TOOLS) {
+    const s = describeCall(t, args);
+    assert.equal(typeof s, "string");
+    assert.ok(s.length > 0, `${t} produced an empty describeCall`);
+  }
+});
+
+test("pm_get_project requires project_id (no gateway call when missing)", async () => {
+  assert.equal(
+    await executeTool("pm_get_project", {}),
+    "error: project_id is required",
+  );
+});

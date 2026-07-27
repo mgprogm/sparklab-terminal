@@ -33,6 +33,15 @@ export const WRITE_TOOLS = new Set([
   "kanban_add_card",
   "kanban_update_card",
   "kanban_delete",
+  // PM writes (D12). The routine five permit allow-always; pm_delete_project is
+  // additionally in ONE_TIME_TOOLS so it is re-approved on every call. The two
+  // PM reads (pm_list_projects, pm_get_project) are deliberately absent.
+  "pm_create_project",
+  "pm_delete_project",
+  "pm_add_task",
+  "pm_update_task",
+  "pm_move_task",
+  "pm_add_sprint",
 ]);
 
 /**
@@ -48,6 +57,9 @@ export const ONE_TIME_TOOLS = new Set([
   "browser_request_handoff",
   "run_codex",
   "kanban_delete",
+  // Destroying a whole project is coerced one-time (D12), like kanban_delete.
+  // The routine PM writes are NOT listed and so may be allowed-always.
+  "pm_delete_project",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
@@ -443,6 +455,233 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // --- Project management (PM) ---------------------------------------------
+  // A richer sibling of Kanban: projects hold tasks with assignee, priority,
+  // labels, start/due dates, an optional sprint, and dependencies on other
+  // tasks in the same project. Reads are auto; writes are approval-gated.
+  {
+    type: "function",
+    function: {
+      name: "pm_list_projects",
+      description:
+        "List all project-management projects (id, name, tags, rev, column/task/sprint counts). Read-only. Call this first to discover which projects exist before getting or mutating one.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_get_project",
+      description:
+        "Get one project in full: its columns (with ordered taskIds), sprints, all tasks (each with its derived columnId), and the project's current rev. Read-only. Use before adding, moving, or editing tasks so you know the column ids, sprint ids, and task ids.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: {
+            type: "string",
+            description: "Target project id (pm-...).",
+          },
+        },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_create_project",
+      description:
+        "Create a new project. Columns default to Backlog / To Do / In Progress / Done when not supplied. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 200 },
+          tags: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+          columns: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 128 },
+            description:
+              "Optional ordered column names; omit for the defaults.",
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_delete_project",
+      description:
+        "Delete an entire project and all its tasks and sprints. This is destructive and requires user approval EVERY time (no allow-always). Confirm the project id first.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: {
+            type: "string",
+            description: "Project id to delete (pm-...).",
+          },
+        },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_add_task",
+      description:
+        "Add a task to a project. Lands in the given column, or the first column (Backlog) when column_id is omitted. Optional fields: assignee, priority, labels, start/due dates (epoch ms, day-level), a sprint, and dependencies on other tasks in the same project. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          title: { type: "string", minLength: 1, maxLength: 512 },
+          description: { type: "string", maxLength: 8192 },
+          assignee: { type: "string", maxLength: 128 },
+          priority: {
+            type: "string",
+            enum: ["low", "medium", "high", "urgent"],
+          },
+          labels: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+          start_date: {
+            type: ["number", "null"],
+            description: "Start date as epoch ms (day-level), or null.",
+          },
+          due_date: {
+            type: ["number", "null"],
+            description: "Due date as epoch ms (day-level), or null.",
+          },
+          sprint_id: {
+            type: ["string", "null"],
+            description: "Owning sprint id, or null for the backlog.",
+          },
+          column_id: {
+            type: "string",
+            description:
+              "Optional destination column id; omit for the first column.",
+          },
+          depends_on: {
+            type: "array",
+            items: { type: "string" },
+            description: "Ids of tasks in this project this task depends on.",
+          },
+        },
+        required: ["project_id", "title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_update_task",
+      description:
+        "Update a task's fields and/or its dependency set. Provide at least one field to change. Set depends_on to the FULL list of task ids this task should depend on (it replaces the existing set). A change that would create a dependency cycle is rejected. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          title: { type: "string", minLength: 1, maxLength: 512 },
+          description: { type: "string", maxLength: 8192 },
+          assignee: { type: ["string", "null"], maxLength: 128 },
+          priority: {
+            type: ["string", "null"],
+            enum: ["low", "medium", "high", "urgent", null],
+          },
+          labels: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+          start_date: {
+            type: ["number", "null"],
+            description: "Start date as epoch ms (day-level), or null.",
+          },
+          due_date: {
+            type: ["number", "null"],
+            description: "Due date as epoch ms (day-level), or null.",
+          },
+          sprint_id: {
+            type: ["string", "null"],
+            description: "Owning sprint id, or null for the backlog.",
+          },
+          depends_on: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Full replacement list of task ids this task depends on.",
+          },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_move_task",
+      description:
+        "Move a task to a column at a given position (also used to reorder within a column — this is how you change a task's status). You supply project_id, task_id, to_column_id, and to_index; you do NOT manage the project rev — the tool reads it and retries on a concurrent change. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          to_column_id: {
+            type: "string",
+            description: "Destination column id (from pm_get_project).",
+          },
+          to_index: {
+            type: "integer",
+            minimum: 0,
+            description: "0-based position within the destination column.",
+          },
+        },
+        required: ["project_id", "task_id", "to_column_id", "to_index"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_add_sprint",
+      description:
+        "Add a sprint / iteration to a project. Sprints are orthogonal to columns — a task can be In Progress and in a sprint at once. Optional start/end dates are epoch ms (day-level). Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          name: { type: "string", minLength: 1, maxLength: 128 },
+          start_date: {
+            type: ["number", "null"],
+            description: "Sprint start as epoch ms (day-level), or null.",
+          },
+          end_date: {
+            type: ["number", "null"],
+            description: "Sprint end as epoch ms (day-level), or null.",
+          },
+        },
+        required: ["project_id", "name"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
@@ -475,6 +714,17 @@ export interface ToolArgs {
   description?: string;
   tags?: string[];
   columns?: string[];
+  // PM
+  project_id?: string;
+  task_id?: string;
+  assignee?: string | null;
+  priority?: string | null;
+  labels?: string[];
+  start_date?: number | null;
+  due_date?: number | null;
+  end_date?: number | null;
+  sprint_id?: string | null;
+  depends_on?: string[];
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -537,6 +787,22 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `add card "${truncate(String(args.title ?? ""), 80)}"`;
     case "kanban_update_card":
       return `update card ${args.card_id ?? ""}`.trimEnd();
+    case "pm_list_projects":
+      return "list projects";
+    case "pm_get_project":
+      return `get project ${args.project_id ?? ""}`.trimEnd();
+    case "pm_create_project":
+      return `create project "${truncate(String(args.name ?? ""), 80)}"`;
+    case "pm_delete_project":
+      return `delete project ${args.project_id ?? ""}`.trimEnd();
+    case "pm_add_task":
+      return `add task "${truncate(String(args.title ?? ""), 80)}"`;
+    case "pm_update_task":
+      return `update task ${args.task_id ?? ""}${args.depends_on ? " (set dependencies)" : ""}`.trimEnd();
+    case "pm_move_task":
+      return `move task ${args.task_id ?? ""} to column ${args.to_column_id ?? ""} (index ${args.to_index ?? 0})`;
+    case "pm_add_sprint":
+      return `add sprint "${truncate(String(args.name ?? ""), 80)}"`;
     default:
       return tool;
   }
@@ -762,6 +1028,113 @@ export async function executeTool(
         if (r.stale)
           return "error: board changed concurrently; refetch and retry";
         return JSON.stringify(r.board);
+      }
+      case "pm_list_projects": {
+        const projects = await gateway.listPmProjects();
+        return JSON.stringify(projects);
+      }
+      case "pm_get_project": {
+        if (!args.project_id) return "error: project_id is required";
+        const p = await gateway.getPmProject(args.project_id);
+        return JSON.stringify(p);
+      }
+      case "pm_create_project": {
+        if (!args.name) return "error: name is required";
+        const p = await gateway.createPmProject({
+          name: args.name,
+          tags: args.tags ?? [],
+          ...(args.columns ? { columns: args.columns } : {}),
+        });
+        return JSON.stringify(p);
+      }
+      case "pm_delete_project": {
+        if (!args.project_id) return "error: project_id is required";
+        await gateway.deletePmProject(args.project_id);
+        return `ok: project ${args.project_id} deleted`;
+      }
+      case "pm_add_task": {
+        if (!args.project_id || !args.title)
+          return "error: project_id and title are required";
+        const t = await gateway.addPmTask(args.project_id, {
+          title: args.title,
+          description: args.description ?? "",
+          ...(args.assignee != null ? { assignee: args.assignee } : {}),
+          ...(args.priority != null
+            ? { priority: args.priority as never }
+            : {}),
+          labels: args.labels ?? [],
+          ...(args.start_date !== undefined
+            ? { startDate: args.start_date }
+            : {}),
+          ...(args.due_date !== undefined ? { dueDate: args.due_date } : {}),
+          ...(args.sprint_id !== undefined ? { sprintId: args.sprint_id } : {}),
+          ...(args.column_id ? { columnId: args.column_id } : {}),
+          ...(args.depends_on ? { dependsOn: args.depends_on } : {}),
+        });
+        return JSON.stringify(t);
+      }
+      case "pm_update_task": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        // A dependency cycle comes back as 400 {error:"dependency cycle"} and
+        // surfaces via the GatewayError catch below — not a crash.
+        const t = await gateway.updatePmTask(args.project_id, args.task_id, {
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.description !== undefined
+            ? { description: args.description }
+            : {}),
+          ...(args.assignee !== undefined ? { assignee: args.assignee } : {}),
+          ...(args.priority !== undefined
+            ? { priority: args.priority as never }
+            : {}),
+          ...(args.labels ? { labels: args.labels } : {}),
+          ...(args.start_date !== undefined
+            ? { startDate: args.start_date }
+            : {}),
+          ...(args.due_date !== undefined ? { dueDate: args.due_date } : {}),
+          ...(args.sprint_id !== undefined ? { sprintId: args.sprint_id } : {}),
+          ...(args.depends_on ? { dependsOn: args.depends_on } : {}),
+        });
+        return JSON.stringify(t);
+      }
+      case "pm_move_task": {
+        if (
+          !args.project_id ||
+          !args.task_id ||
+          !args.to_column_id ||
+          typeof args.to_index !== "number"
+        )
+          return "error: project_id, task_id, to_column_id and to_index are required";
+        // The model does not manage rev: read the project's current rev, move,
+        // and on a 409 (stale) retry ONCE using the fresh project the gateway
+        // echoed back in the 409 body.
+        const project = await gateway.getPmProject(args.project_id);
+        const move = { toColumnId: args.to_column_id, toIndex: args.to_index };
+        let r = await gateway.movePmTask(args.project_id, args.task_id, {
+          ...move,
+          rev: project.rev,
+        });
+        if (r.stale) {
+          r = await gateway.movePmTask(args.project_id, args.task_id, {
+            ...move,
+            rev: r.project.rev,
+          });
+        }
+        if (r.stale)
+          return "error: project changed concurrently; refetch and retry";
+        return JSON.stringify(r.project);
+      }
+      case "pm_add_sprint": {
+        if (!args.project_id || !args.name)
+          return "error: project_id and name are required";
+        const s = await gateway.addPmSprint(args.project_id, {
+          name: args.name,
+          ...(args.start_date !== undefined
+            ? { startDate: args.start_date }
+            : {}),
+          ...(args.end_date !== undefined ? { endDate: args.end_date } : {}),
+        });
+        return JSON.stringify(s);
       }
       default:
         return `error: unknown tool ${tool}`;
