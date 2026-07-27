@@ -249,6 +249,27 @@ Body (`MoveCardRequest`): `{boardId, toColumnId, toIndex, rev}`. Splices the car
 
 `boardId` via query string or JSON body.
 
+### Project-management endpoints: `/api/pm/*`
+
+A Kanban-first PM suite (design: [`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md)), a **separate** artifact from Kanban. State in `data/pm.json` (`src/pm.js`, synchronous mutators ⇒ atomic, no mutex). Like Kanban: `Column.taskIds[]` is the sole ordering/status authority (`columnId` derived on GET). Adds tasks with fields (assignee/priority/labels/start+due dates), **sprints** (orthogonal to columns; backlog = `sprintId:null`), and a per-project **dependency DAG** (`dependsOn`; a cycle → `400`). Auth: cookie **or** the shared bearer (`GATEWAY_API_TOKEN` / legacy `KANBAN_API_TOKEN`). GET Origin-exempt; writes Origin/CSRF-checked. Schemas: the `Pm*` block in `shared-types/src/terminal.ts`.
+
+| Method + route                          | Body                                                                                                           | Result                                                                       |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET /api/pm/projects`                  | —                                                                                                              | `{projects: PmProjectSummary[]}`                                             |
+| `GET /api/pm/projects/:id`              | —                                                                                                              | full `PmProject` (columns, sprints, tasks[+derived `columnId`]); 404 unknown |
+| `POST /api/pm/projects`                 | `{name, tags?, columns?}`                                                                                      | 201 project (omitting columns seeds Backlog/To Do/In Progress/Done)          |
+| `PATCH /api/pm/projects/:id`            | `{name?, tags?}`                                                                                               | 200 project                                                                  |
+| `DELETE /api/pm/projects/:id`           | —                                                                                                              | 204                                                                          |
+| `POST /api/pm/projects/:id/tasks`       | `{title, description?, assignee?, priority?, labels?, startDate?, dueDate?, sprintId?, columnId?, dependsOn?}` | 201 task                                                                     |
+| `PATCH /api/pm/tasks/:id`               | `{projectId, …field, dependsOn?}`                                                                              | 200 task; **cycle → 400** `{error:"dependency cycle"}`                       |
+| `POST /api/pm/tasks/:id/move`           | `{projectId, toColumnId, toIndex, rev}`                                                                        | 200 project / **409** `{error:"stale", project}`                             |
+| `DELETE /api/pm/tasks/:id?projectId=`   | —                                                                                                              | 204 (scrubs the id from every other task's `dependsOn`)                      |
+| `POST /api/pm/projects/:id/sprints`     | `{name, startDate?, endDate?}`                                                                                 | 201 sprint                                                                   |
+| `PATCH /api/pm/sprints/:id`             | `{projectId, name?, startDate?, endDate?}`                                                                     | 200 sprint                                                                   |
+| `DELETE /api/pm/sprints/:id?projectId=` | —                                                                                                              | 204 (affected tasks → `sprintId:null`)                                       |
+
+Priority ∈ `low|medium|high|urgent`; dates are epoch ms (day-level) or null. `move` is `rev`-guarded; field/dependency/sprint edits are last-writer-wins (v1). An MCP wrapper lives at `tools/pm-mcp/` (see its README).
+
 ### Errors (400 / 404 / 500)
 
 Always `{ "error": "<message>" }`.

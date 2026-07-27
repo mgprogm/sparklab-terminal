@@ -122,6 +122,22 @@ fetches the board's current `rev` itself and retries once on a `409`, so the
 model never manages revisions. There is deliberately **no card-delete tool** —
 deleting individual cards stays a human action in the board UI.
 
+| `pm_list_projects` | read | `GET /api/pm/projects` |
+| `pm_get_project` | read | `GET /api/pm/projects/:id` |
+| `pm_create_project` | **write** | `POST /api/pm/projects` |
+| `pm_add_task` | **write** | `POST /api/pm/projects/:id/tasks` |
+| `pm_update_task` | **write** | `PATCH /api/pm/tasks/:id` (fields + `dependsOn`; cycle→error) |
+| `pm_move_task` | **write** | `POST /api/pm/tasks/:id/move` (auto-manages `rev`, retries 409) |
+| `pm_add_sprint` | **write** | `POST /api/pm/projects/:id/sprints` |
+| `pm_delete_project` | **write** | `DELETE /api/pm/projects/:id` — project delete (one-time approval) |
+
+The PM tools drive the project-management artifact's `/api/pm/*` API (design:
+[`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md)) — a separate artifact from Kanban, same
+approval model: reads auto; routine writes allow-always; `pm_delete_project` in
+`ONE_TIME_TOOLS` (re-approved every call). `pm_update_task` sets task fields and
+dependencies (a cycle comes back as a gateway 400, surfaced as an error string).
+There is **no pm_delete_task** tool — task deletion stays human-only in the UI.
+
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.
 It does not create a second browser, token, socket, cookie jar, or timeout.
