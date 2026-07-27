@@ -64,12 +64,20 @@ export function BrowserViewOverlay() {
   );
   const idleExpiresAt = useBrowserHandoffStore((state) => state.idleExpiresAt);
   const hardExpiresAt = useBrowserHandoffStore((state) => state.hardExpiresAt);
+  const transport = useBrowserHandoffStore((state) => state.transport);
+  const transportState = useBrowserHandoffStore(
+    (state) => state.transportState,
+  );
+  const transportReason = useBrowserHandoffStore(
+    (state) => state.transportReason,
+  );
   const [connection, setConnection] = useState<BrowserHandoffConnection | null>(
     null,
   );
   const [takeoverWarningOpen, setTakeoverWarningOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const backRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -90,11 +98,16 @@ export function BrowserViewOverlay() {
         onConnectionState: useBrowserHandoffStore.getState().setConnectionState,
         onAuthenticated: useBrowserHandoffStore.getState().consumeToken,
         onExpiry: useBrowserHandoffStore.getState().updateExpiry,
+        onTransportState: useBrowserHandoffStore.getState().setTransportState,
+        onMediaStream: setMediaStream,
       },
     );
     setConnection(next);
     next.connect();
-    return () => next.dispose();
+    return () => {
+      setMediaStream(null);
+      next.dispose();
+    };
   }, [handoffId]);
 
   useEffect(() => {
@@ -205,6 +218,16 @@ export function BrowserViewOverlay() {
             <span>Hard limit {formatRemaining(countdown.hard)}</span>
           )}
           <span className="ml-auto flex items-center gap-1">
+            <span title={transportReason ?? undefined}>
+              {transport === "webrtc" && transportState === "connected"
+                ? "WebRTC video"
+                : transportState === "negotiating"
+                  ? "Negotiating WebRTC"
+                  : transportState === "fallback"
+                    ? "JPEG fallback"
+                    : "JPEG stream"}
+            </span>
+            <span aria-hidden="true">·</span>
             {connectionState === "connected" ? (
               <>Connected</>
             ) : connectionState === "reconnecting" ? (
@@ -231,6 +254,7 @@ export function BrowserViewOverlay() {
           <InteractiveBrowser
             connection={connection}
             enabled={connectionState === "connected"}
+            mediaStream={mediaStream}
           />
         ) : pending ? (
           <div className="text-muted-foreground flex items-center gap-2 text-sm">

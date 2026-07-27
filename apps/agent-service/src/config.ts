@@ -22,6 +22,46 @@ function optional(name: string, fallback: string): string {
   return v && v.trim() ? v.trim() : fallback;
 }
 
+function positiveInt(name: string, fallback: number, max: number): number {
+  const raw = optional(name, String(fallback));
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > max)
+    throw new Error(`${name} must be an integer between 1 and ${max}`);
+  return value;
+}
+
+function urls(name: string, allowed: ReadonlySet<string>): string[] {
+  const values = (process.env[name] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length > 8) throw new Error(`${name} accepts at most 8 URLs`);
+  for (const value of values) {
+    const scheme = value.slice(0, value.indexOf(":"));
+    if (!allowed.has(scheme) || value.length > 2048)
+      throw new Error(`${name} contains an unsupported URL`);
+  }
+  return values;
+}
+
+const handoffTransport = optional("BROWSER_HANDOFF_TRANSPORT", "jpeg");
+if (handoffTransport !== "jpeg" && handoffTransport !== "webrtc-preferred")
+  throw new Error("BROWSER_HANDOFF_TRANSPORT must be jpeg or webrtc-preferred");
+const stunUrls = urls("BROWSER_HANDOFF_STUN_URLS", new Set(["stun", "stuns"]));
+const turnUrls = urls("BROWSER_HANDOFF_TURN_URLS", new Set(["turn", "turns"]));
+const turnSecret = process.env.BROWSER_HANDOFF_TURN_SECRET?.trim() || "";
+if (turnUrls.length > 0 && !turnSecret)
+  throw new Error(
+    "BROWSER_HANDOFF_TURN_SECRET is required when TURN URLs are configured",
+  );
+const gatewayAuthUser = process.env.GATEWAY_AUTH_USER?.trim() || "";
+const gatewayAuthPassword = process.env.GATEWAY_AUTH_PASSWORD?.trim() || "";
+const allowMissingOrigin =
+  optional(
+    "AGENT_ALLOW_MISSING_ORIGIN",
+    gatewayAuthUser || gatewayAuthPassword ? "false" : "true",
+  ) === "true";
+
 export const config = {
   azure: {
     endpoint: required("AZURE_OPENAI_ENDPOINT"),
@@ -30,6 +70,7 @@ export const config = {
     deployment: required("GPT56SOL_DEPLOYMENT"),
   },
   port: Number(optional("AGENT_PORT", "3009")),
+  host: optional("AGENT_HOST", "127.0.0.1"),
   gatewayUrl: optional("GATEWAY_URL", "http://127.0.0.1:3007").replace(
     /\/$/,
     "",
@@ -46,13 +87,31 @@ export const config = {
   gatewayAuth: {
     // Optional: only sent when the gateway runs with auth enabled. When the
     // gateway is in open mode these can be blank and login is skipped.
-    user: process.env.GATEWAY_AUTH_USER?.trim() || "",
-    password: process.env.GATEWAY_AUTH_PASSWORD?.trim() || "",
+    user: gatewayAuthUser,
+    password: gatewayAuthPassword,
   },
+  allowMissingOrigin,
+  maxConnections: positiveInt("MAX_AGENT_CONNECTIONS", 32, 512),
   browser: {
     project: process.env.BROWSER_USE_PROJECT?.trim() || "",
     headless: optional("BROWSER_USE_HEADLESS", "true") !== "false",
     executablePath: process.env.BROWSER_USE_EXECUTABLE_PATH?.trim() || "",
+    maxSessions: positiveInt("MAX_BROWSER_SESSIONS", 4, 64),
+    maxConcurrentLaunches: positiveInt("MAX_BROWSER_LAUNCHES", 2, 16),
+  },
+  handoff: {
+    transport: handoffTransport as "jpeg" | "webrtc-preferred",
+    maxConnections: positiveInt("MAX_HANDOFF_CONNECTIONS", 16, 256),
+    maxPeerConnections: positiveInt("MAX_WEBRTC_PEERS", 4, 64),
+    negotiationTimeoutMs: positiveInt(
+      "BROWSER_HANDOFF_WEBRTC_TIMEOUT_MS",
+      8_000,
+      30_000,
+    ),
+    stunUrls,
+    turnUrls,
+    turnSecret,
+    turnTtlSeconds: positiveInt("BROWSER_HANDOFF_TURN_TTL_SECONDS", 600, 3600),
   },
 } as const;
 

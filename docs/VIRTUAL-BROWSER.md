@@ -4,6 +4,9 @@ For the implemented interactive authentication handoff design, see
 [`BROWSER-HANDOFF-DESIGN.md`](./BROWSER-HANDOFF-DESIGN.md).
 For production diagnosis and the exact meaning of virtual-mouse/ACK signals,
 see [`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md).
+For the rollback-safe WebRTC migration decision and current media-provider
+blocker, see
+[`ADR-BROWSER-HANDOFF-WEBRTC.md`](./ADR-BROWSER-HANDOFF-WEBRTC.md).
 
 The Agent Chat can open public websites in an isolated, headless Chromium instance and show a read-only screenshot above the terminal. Browser sessions start lazily per chat and are destroyed on Stop, disconnect, or service shutdown.
 

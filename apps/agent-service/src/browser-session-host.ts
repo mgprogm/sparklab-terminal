@@ -14,6 +14,18 @@ import { SafeBrowserProxy } from "./browser-proxy.js";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const CDP_CALL_TIMEOUT_MS = 10_000;
+export const INTERACTIVE_VIEWPORT = { width: 1280, height: 720 } as const;
+
+export function interactiveViewportOverrideParams(
+  viewport: { width: number; height: number } = INTERACTIVE_VIEWPORT,
+): Record<string, unknown> {
+  return {
+    width: viewport.width,
+    height: viewport.height,
+    deviceScaleFactor: 1,
+    mobile: false,
+  };
+}
 
 export class BrowserSessionHost {
   private chromium: ChildProcessWithoutNullStreams | null = null;
@@ -106,6 +118,9 @@ export class BrowserSessionHost {
   }
 
   async prepareAgentReturn(): Promise<void> {
+    // Restore the viewport Browser Use owned before reloading away transient
+    // password/OTP form state. close() is idempotent with this restoration.
+    await this.cdp?.restoreViewport();
     await this.cdp?.reload();
   }
 
@@ -136,8 +151,10 @@ class CdpPage {
   private nextId = 1;
   private pending = new Map<
     number,
-    { resolve: () => void; reject: (e: Error) => void }
+    { resolve: (result: unknown) => void; reject: (e: Error) => void }
   >();
+  private originalViewport: { width: number; height: number } | null = null;
+  private viewportNormalized = false;
   private constructor(
     private ws: WebSocket,
     private onFrame: (frame: Buffer) => void,
@@ -172,14 +189,33 @@ class CdpPage {
 
   async start(): Promise<void> {
     await this.call("Page.enable", {});
+    const metrics = await this.call<{
+      cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+      cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
+    }>("Page.getLayoutMetrics", {});
+    const viewport = metrics.cssVisualViewport ?? metrics.cssLayoutViewport;
+    const width = Math.round(viewport?.clientWidth ?? 0);
+    const height = Math.round(viewport?.clientHeight ?? 0);
+    if (width > 0 && height > 0) this.originalViewport = { width, height };
+
+    // Page.startScreencast scales a large CSS viewport down to maxWidth/maxHeight,
+    // while Input.dispatchMouseEvent still expects unscaled CSS coordinates.
+    // Normalize the target before capture so every JPEG pixel maps 1:1 to CDP
+    // input. Browser Use currently defaults to 1920x1080, which otherwise makes
+    // clicks from the 1280x720 canvas miss their target by roughly 1.5x.
+    await this.call(
+      "Emulation.setDeviceMetricsOverride",
+      interactiveViewportOverrideParams(),
+    );
+    this.viewportNormalized = true;
     await this.call("Browser.setDownloadBehavior", { behavior: "deny" }).catch(
       () => undefined,
     );
     await this.call("Page.startScreencast", {
       format: "jpeg",
       quality: 65,
-      maxWidth: 1280,
-      maxHeight: 720,
+      maxWidth: INTERACTIVE_VIEWPORT.width,
+      maxHeight: INTERACTIVE_VIEWPORT.height,
       everyNthFrame: 1,
     });
   }
@@ -231,16 +267,32 @@ class CdpPage {
       } catch {
         // The page may already be gone.
       }
+      await this.restoreViewport().catch(() => undefined);
       this.ws.close(1000, "handoff complete");
     }
     this.rejectAll();
+  }
+
+  async restoreViewport(): Promise<void> {
+    if (!this.viewportNormalized) return;
+    this.viewportNormalized = false;
+    const viewport = this.originalViewport;
+    this.originalViewport = null;
+    if (viewport) {
+      await this.call(
+        "Emulation.setDeviceMetricsOverride",
+        interactiveViewportOverrideParams(viewport),
+      );
+      return;
+    }
+    await this.call("Emulation.clearDeviceMetricsOverride", {});
   }
 
   async reload(): Promise<void> {
     await this.call("Page.reload", { ignoreCache: false });
   }
 
-  private call(method: string, params: unknown): Promise<void> {
+  private call<T = unknown>(method: string, params: unknown): Promise<T> {
     if (this.ws.readyState !== WebSocket.OPEN)
       return Promise.reject(new Error("browser_handoff_unavailable"));
     const id = this.nextId++;
@@ -251,9 +303,9 @@ class CdpPage {
       }, CDP_CALL_TIMEOUT_MS);
       timer.unref();
       this.pending.set(id, {
-        resolve: () => {
+        resolve: (result) => {
           clearTimeout(timer);
-          resolve();
+          resolve(result as T);
         },
         reject: (error) => {
           clearTimeout(timer);
@@ -268,6 +320,7 @@ class CdpPage {
     let value: {
       id?: number;
       error?: unknown;
+      result?: unknown;
       method?: string;
       params?: { data?: string; sessionId?: number };
     };
@@ -292,7 +345,7 @@ class CdpPage {
     if (!pending) return;
     this.pending.delete(value.id);
     if (value.error) pending.reject(new Error("browser_handoff_failed"));
-    else pending.resolve();
+    else pending.resolve(value.result);
   }
 
   private rejectAll(): void {

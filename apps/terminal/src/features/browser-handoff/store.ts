@@ -1,6 +1,10 @@
 import { create } from "zustand";
 
 import type { BrowserHandoffControlFrame } from "./protocol";
+import type {
+  BrowserHandoffFallbackReason,
+  BrowserHandoffTransport,
+} from "./protocol";
 
 export type HandoffLeaseState =
   "none" | "pending" | "human_active" | "agent_active" | "closed";
@@ -16,10 +20,18 @@ interface BrowserHandoffStore {
   expiresAt: number | null;
   hardExpiresAt: number | null;
   idleExpiresAt: number | null;
+  transport: BrowserHandoffTransport;
+  transportState: "idle" | "negotiating" | "connected" | "fallback" | "failed";
+  transportReason: BrowserHandoffFallbackReason | null;
   ingestControl: (frame: BrowserHandoffControlFrame) => void;
   setConnectionState: (state: HandoffConnectionState) => void;
   consumeToken: () => void;
   updateExpiry: (expiresAt: number, hardExpiresAt?: number) => void;
+  setTransportState: (value: {
+    transport: BrowserHandoffTransport;
+    state: "idle" | "negotiating" | "connected" | "fallback" | "failed";
+    reason?: BrowserHandoffFallbackReason;
+  }) => void;
   clear: () => void;
 }
 
@@ -35,6 +47,9 @@ const initialState = {
   expiresAt: null,
   hardExpiresAt: null,
   idleExpiresAt: null,
+  transport: "jpeg_ws" as const,
+  transportState: "idle" as const,
+  transportReason: null,
 };
 
 /** Memory-only handoff state. Tokens and frames never use persist middleware. */
@@ -84,6 +99,9 @@ export const useBrowserHandoffStore = create<BrowserHandoffStore>()((set) => ({
                   : ("disconnected" as const),
               idleExpiresAt: null,
               hardExpiresAt: null,
+              transport: "jpeg_ws" as const,
+              transportState: "idle" as const,
+              transportReason: null,
             }
           : {}),
       };
@@ -93,5 +111,7 @@ export const useBrowserHandoffStore = create<BrowserHandoffStore>()((set) => ({
   consumeToken: () => set({ token: null }),
   updateExpiry: (idleExpiresAt, hardExpiresAt) =>
     set({ idleExpiresAt, ...(hardExpiresAt ? { hardExpiresAt } : {}) }),
+  setTransportState: ({ transport, state, reason }) =>
+    set({ transport, transportState: state, transportReason: reason ?? null }),
   clear: () => set(initialState),
 }));

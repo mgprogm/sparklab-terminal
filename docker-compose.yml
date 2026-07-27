@@ -21,7 +21,8 @@ services:
         PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3110}
     image: sparklab-terminal:latest
     env_file:
-      - .env.docker
+      - path: .env.docker
+        required: false
     environment:
       # Runtime copy of the same origin (allowlist + cookie scoping). Keep in
       # sync with the build arg above.
@@ -34,6 +35,18 @@ services:
       - sparklab-data:/data
     restart: unless-stopped
     stop_grace_period: 15s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3110/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   sparklab-data:

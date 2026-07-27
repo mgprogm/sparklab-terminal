@@ -57,20 +57,28 @@ connect).
 Set in `apps/agent-service/.env` (gitignored). If you are not deploying Agent
 Chat, skip this table and the `/agent` and `/browser-handoff` Caddy routes.
 
-| Variable                                      | Default                 | Required            | Description                                                                                                               |
-| --------------------------------------------- | ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `AZURE_OPENAI_ENDPOINT`                       | _(unset)_               | **Yes**             | Azure AI Foundry resource endpoint URL.                                                                                   |
-| `AZURE_OPENAI_API_KEY`                        | _(unset)_               | **Yes**             | Azure key. Secret — gitignored `.env` only, and rotate if ever exposed.                                                   |
-| `AZURE_OPENAI_API_VERSION`                    | `2025-04-01-preview`    | No                  | Pin the Azure OpenAI REST API version.                                                                                    |
-| `GPT56SOL_DEPLOYMENT`                         | _(unset)_               | **Yes**             | Deployment name (e.g. `gpt-5.6-sol`); used as the model id.                                                               |
-| `AGENT_PORT`                                  | `3009`                  | No                  | Listen port for the `/agent` WebSocket (loopback).                                                                        |
-| `GATEWAY_URL`                                 | `http://127.0.0.1:3007` | **Yes**             | Loopback gateway base URL the service drives terminals through.                                                           |
-| `ALLOWED_ORIGINS`                             | localhost dev origins   | **Yes**             | Allowed browser `Origin`s for the `/agent` WS. Set to your public origin, e.g. `https://term.example.com`.                |
-| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | _(unset)_               | **Yes** (auth mode) | Credentials the service uses to log in to the gateway. Match the gateway's; omit only in open mode.                       |
-| `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009` | **Yes**             | Inlined at build time into the Next.js app — the public agent WS URL: `wss://term.example.com` (same origin as the site). |
-| `BROWSER_USE_PROJECT`                         | _(unset)_               | No                  | Trusted Browser Use checkout. When set, enables one isolated local Chromium/MCP process per chat.                         |
-| `BROWSER_USE_HEADLESS`                        | `true`                  | No                  | Keep per-chat Chromium headless in deployment.                                                                            |
-| `BROWSER_USE_EXECUTABLE_PATH`                 | _(auto-detect)_         | No                  | Explicit sandboxed Chromium executable, e.g. `/snap/bin/chromium` on Ubuntu.                                              |
+| Variable                                                    | Default                 | Required            | Description                                                                                                               |
+| ----------------------------------------------------------- | ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `AZURE_OPENAI_ENDPOINT`                                     | _(unset)_               | **Yes**             | Azure AI Foundry resource endpoint URL.                                                                                   |
+| `AZURE_OPENAI_API_KEY`                                      | _(unset)_               | **Yes**             | Azure key. Secret — gitignored `.env` only, and rotate if ever exposed.                                                   |
+| `AZURE_OPENAI_API_VERSION`                                  | `2025-04-01-preview`    | No                  | Pin the Azure OpenAI REST API version.                                                                                    |
+| `GPT56SOL_DEPLOYMENT`                                       | _(unset)_               | **Yes**             | Deployment name (e.g. `gpt-5.6-sol`); used as the model id.                                                               |
+| `AGENT_PORT`                                                | `3009`                  | No                  | Listen port for the `/agent` WebSocket (loopback).                                                                        |
+| `GATEWAY_URL`                                               | `http://127.0.0.1:3007` | **Yes**             | Loopback gateway base URL the service drives terminals through.                                                           |
+| `ALLOWED_ORIGINS`                                           | localhost dev origins   | **Yes**             | Allowed browser `Origin`s for the `/agent` WS. Set to your public origin, e.g. `https://term.example.com`.                |
+| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD`               | _(unset)_               | **Yes** (auth mode) | Credentials the service uses to log in to the gateway. Match the gateway's; omit only in open mode.                       |
+| `NEXT_PUBLIC_AGENT_URL`                                     | `http://localhost:3009` | **Yes**             | Inlined at build time into the Next.js app — the public agent WS URL: `wss://term.example.com` (same origin as the site). |
+| `BROWSER_USE_PROJECT`                                       | _(unset)_               | No                  | Trusted Browser Use checkout. When set, enables one isolated local Chromium/MCP process per chat.                         |
+| `BROWSER_USE_HEADLESS`                                      | `true`                  | No                  | Keep per-chat Chromium headless in deployment.                                                                            |
+| `BROWSER_USE_EXECUTABLE_PATH`                               | _(auto-detect)_         | No                  | Explicit sandboxed Chromium executable, e.g. `/snap/bin/chromium` on Ubuntu.                                              |
+| `AGENT_HOST`                                                | `127.0.0.1`             | **Yes**             | Agent-service bind address. Keep loopback behind the reverse proxy.                                                       |
+| `AGENT_ALLOW_MISSING_ORIGIN`                                | auth-dependent          | **No**              | Must be `false` in production. `true` is only for loopback non-browser diagnostics.                                       |
+| `MAX_AGENT_CONNECTIONS` / `MAX_HANDOFF_CONNECTIONS`         | `32` / `16`             | No                  | Process-wide WebSocket limits for chat and handoff channels.                                                              |
+| `MAX_BROWSER_SESSIONS` / `MAX_BROWSER_LAUNCHES`             | `4` / `2`               | No                  | Bound Chromium trees and concurrent CPU-heavy launches.                                                                   |
+| `BROWSER_HANDOFF_TRANSPORT`                                 | `jpeg`                  | No                  | `jpeg` rollback default or `webrtc-preferred`; current revision falls back until a reviewed media provider is installed.  |
+| `MAX_WEBRTC_PEERS`                                          | `4`                     | No                  | Future provider peer limit.                                                                                               |
+| `BROWSER_HANDOFF_STUN_URLS`                                 | _(unset)_               | No                  | Comma-separated STUN URLs delivered only after handoff authentication.                                                    |
+| `BROWSER_HANDOFF_TURN_URLS` / `BROWSER_HANDOFF_TURN_SECRET` | _(unset)_               | No                  | coturn REST URLs and server-only shared secret used to mint short-lived credentials; never expose the secret to clients.  |
 
 Because Caddy serves the agent WS at the same public origin as the site,
 `NEXT_PUBLIC_AGENT_URL` is typically the same host as `NEXT_PUBLIC_GATEWAY_URL`
@@ -92,6 +100,15 @@ the Chrome bypass value `<-loopback>`: it removes Chrome's implicit loopback
 exception and forces loopback traffic through the policy proxy. Do not exempt
 destinations, reuse profiles, expose MCP stdio, or grant the browser process
 access to sensitive host directories.
+
+WebRTC note: this revision contains the strict signaling protocol, frontend
+`<video>` receiver, limits, and automatic JPEG fallback, but no production
+media provider. The optional Docker browser target supplies verified native
+capture/encode/ICE prerequisites, not the application adapter. Keep
+`BROWSER_HANDOFF_TRANSPORT=jpeg` until the provider readiness work
+in [`ADR-BROWSER-HANDOFF-WEBRTC.md`](./ADR-BROWSER-HANDOFF-WEBRTC.md) is
+complete. Merely installing FFmpeg is insufficient because it does not provide
+the complete ICE/DTLS peer connection used by browsers.
 
 ## Step-by-step: production on a VPS
 

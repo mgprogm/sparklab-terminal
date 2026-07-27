@@ -20,11 +20,26 @@ import { gateway } from "./gateway-client.js";
 import { AgentLoop } from "./agent-loop.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { deleteChat, listChats, openChat } from "./history.js";
+import { browserResources } from "./browser-resource-limiter.js";
+import { browserHandoffMetrics } from "./browser-handoff-transport.js";
+import { isAllowedWebSocketOrigin } from "./agent-security.js";
 
 const server = createServer((req, res) => {
-  if (req.url === "/health" || req.url === "/") {
+  if (req.url === "/health" || req.url === "/ready" || req.url === "/") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, service: "agent-service" }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        ready: true,
+        service: "agent-service",
+        browserResources: browserResources.snapshot(),
+        browserHandoff: {
+          configuredTransport: config.handoff.transport,
+          mediaProviderAvailable: false,
+          ...browserHandoffMetrics.snapshot(),
+        },
+      }),
+    );
     return;
   }
   res.writeHead(404, { "content-type": "application/json" });
@@ -41,7 +56,8 @@ const wss = new WebSocketServer({
 });
 const handoffWss = new WebSocketServer({
   noServer: true,
-  maxPayload: 16 * 1024,
+  // A 64 KiB bounded SDP plus its typed JSON envelope must fit one frame.
+  maxPayload: 72 * 1024,
 });
 const handoffs = new BrowserHandoffBroker();
 const loops = new Set<AgentLoop>();
@@ -52,10 +68,16 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
-  // Origin allowlist before the handshake (CSWSH guard). An absent Origin
-  // (non-browser client, e.g. the smoke test) is allowed, matching the gateway.
+  // Origin allowlist before the handshake (CSWSH guard). Missing Origin is
+  // accepted only when explicitly configured (the default is development-only).
   const origin = req.headers.origin;
-  if (origin && !config.allowedOrigins.has(origin)) {
+  if (
+    !isAllowedWebSocketOrigin(
+      origin,
+      config.allowedOrigins,
+      config.allowMissingOrigin,
+    )
+  ) {
     socket.write(
       "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     );
@@ -63,6 +85,15 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
   const target = url.pathname === "/agent" ? wss : handoffWss;
+  const connectionLimit =
+    target === wss ? config.maxConnections : config.handoff.maxConnections;
+  if (target.clients.size >= connectionLimit) {
+    socket.write(
+      "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    socket.destroy();
+    return;
+  }
   if (
     url.pathname === "/browser-handoff" &&
     !isSecureHandoff(
@@ -327,9 +358,11 @@ function safeSend(ws: WebSocket, frame: AgentWsServerMessage): void {
   if (Buffer.byteLength(payload) <= MAX_OUTBOUND_BYTES) ws.send(payload);
 }
 
-server.listen(config.port, () => {
+server.headersTimeout = 30_000;
+server.requestTimeout = 60_000;
+server.listen(config.port, config.host, () => {
   console.log(
-    `[agent] listening on :${config.port} — gateway ${config.gatewayUrl}, model ${config.azure.deployment}`,
+    `[agent] listening on ${config.host}:${config.port} — gateway ${config.gatewayUrl}, model ${config.azure.deployment}`,
   );
 });
 

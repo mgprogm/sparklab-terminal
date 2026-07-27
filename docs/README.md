@@ -9,6 +9,9 @@
 | [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md)                       | Virtual-browser setup, startup, code map, security invariants, and troubleshooting                                      |
 | [BROWSER-HANDOFF-DESIGN.md](BROWSER-HANDOFF-DESIGN.md)         | Implemented shared interactive-browser architecture, protocol, security model, and lifecycle                            |
 | [BROWSER-HANDOFF-OPERATIONS.md](BROWSER-HANDOFF-OPERATIONS.md) | Browser handoff operations, virtual-mouse semantics, layered diagnosis, production E2E, and incident runbook            |
+| [ADR-BROWSER-HANDOFF-WEBRTC.md](ADR-BROWSER-HANDOFF-WEBRTC.md) | WebRTC migration decision, typed signaling foundation, JPEG fallback, provider blocker, and rollout phases              |
+| [BROWSER-USE-SETUP.md](BROWSER-USE-SETUP.md)                   | Native and Docker Browser Use installation, runtime verification, health checks, and safe production defaults           |
+| [DOCKER.md](DOCKER.md)                                         | Default and browser-enabled Docker targets, LocalXpose/TLS deployment, persistence, hardening, and rollback             |
 | [TESTING.md](TESTING.md)                                       | Unit tests, Playwright E2E, the eight gates (six cut-over + auth + scrollback), CI pipeline                             |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                             | Code conventions: feature folders, imports, state rules, commits                                                        |
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                           | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior) |
@@ -26,7 +29,7 @@ This repo is a **pnpm + Turborepo monorepo**. The flagship app is a web terminal
 Browser (Next.js + xterm.js) --WS--> Gateway (node-pty) --tmux attach--> tmux server --> shell + jobs
 ```
 
-It also ships an **Agent Chat**: an AI agent (a custom tool-calling loop over Azure OpenAI, in `apps/agent-service`) that views and drives terminals — with per-write approval — through the gateway. Conversation history is scoped per terminal and automatically follows the focused terminal. It can also operate an isolated Browser Use instance and publish a read-only browser view. See [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md) and [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md).
+It also ships an **Agent Chat**: an AI agent (a custom tool-calling loop over Azure OpenAI, in `apps/agent-service`) that views and drives terminals — with per-write approval — through the gateway. Conversation history is scoped per terminal and automatically follows the focused terminal. It can operate an isolated Browser Use instance and temporarily hand the same browser/profile to the user over an authenticated `/browser-handoff` channel. JPEG-over-WebSocket remains the production transport and automatic fallback; typed WebRTC signaling and the frontend `<video>` receiver are present behind a feature flag, but no media provider is advertised yet. See [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md), [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md), and [ADR-BROWSER-HANDOFF-WEBRTC.md](ADR-BROWSER-HANDOFF-WEBRTC.md).
 
 - `apps/terminal-gateway` — Node gateway (plain JS): REST session CRUD + agent REST (`/screen`, `/keys`) + `/attach` WebSocket.
 - `apps/agent-service` — Node/TS agent service: the `/agent` WebSocket + the tool-calling loop over `gpt-5.6-sol`.

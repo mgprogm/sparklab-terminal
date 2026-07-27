@@ -48,8 +48,8 @@ RUN NEXT_PUBLIC_GATEWAY_URL="${PUBLIC_ORIGIN}" \
     NEXT_PUBLIC_AGENT_URL="${PUBLIC_ORIGIN}" \
     pnpm --filter @sparklab/terminal build
 
-# ─────────────────────────────── runtime ───────────────────────────────
-FROM node:24-bookworm-slim AS runtime
+# ─────────────────────────── runtime system base ───────────────────────────
+FROM node:24-bookworm-slim AS runtime-system
 
 # tmux — the process owner (the whole point). openssh-client — multi-server
 # (SSH + remote tmux). procps — pm2/tmux housekeeping. tini — PID 1 reaping.
@@ -65,26 +65,77 @@ RUN npm install -g pm2@6 && npm cache clean --force
 
 ENV NODE_ENV=production
 ENV NEXT_DIST_DIR=.next-prod
+ENV SPARKLAB_DATA_DIR=/data
+
+# ───────────────────── optional browser/WebRTC runtime ─────────────────────
+# This target installs the native capture/codec/ICE runtime without bloating
+# the default terminal image. System packages stay cacheable when app code
+# changes. The finished target is selected by compose.browser.yml.
+FROM ghcr.io/astral-sh/uv:0.11.14 AS uv-runtime
+
+FROM runtime-system AS browser-system
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+      chromium xvfb ffmpeg gosu fonts-liberation \
+      python3 python3-gi \
+      gir1.2-gstreamer-1.0 \
+      gir1.2-gst-plugins-base-1.0 \
+      gir1.2-gst-plugins-bad-1.0 \
+      gstreamer1.0-tools \
+      gstreamer1.0-x \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-libav \
+      gstreamer1.0-nice \
+      libnice10 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Debian keeps Chromium's setuid sandbox in a separate recommended package;
+# install it explicitly because this image intentionally uses --no-install-recommends.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium-sandbox \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv-runtime /uv /uvx /usr/local/bin/
+COPY deploy/docker/verify-browser-runtime.sh /usr/local/bin/verify-browser-runtime
+RUN chmod +x /usr/local/bin/verify-browser-runtime \
+  && verify-browser-runtime
+
+ENV BROWSER_DOCKER_RUNTIME=1
+ENV BROWSER_USE_EXECUTABLE_PATH=/usr/bin/chromium
+ENV DISPLAY=:99
+
+# ───────────────────────────── default runtime ─────────────────────────────
+FROM runtime-system AS runtime
+
 WORKDIR /app
-
-# The built workspace (source + node_modules incl. compiled node-pty + baked
-# .next-prod). node_modules are kept whole: agent-service runs via tsx and the
-# frontend's `next start` needs its production deps.
 COPY --from=builder /app /app
-
-# Container supervisor config + entrypoint.
 COPY deploy/docker/pm2.config.cjs /app/deploy/docker/pm2.config.cjs
 COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# All mutable state (session metadata, server registry, push subs/settings,
-# agent chat history) is redirected here via env + a symlink; mount a volume.
-ENV SPARKLAB_DATA_DIR=/data
 VOLUME ["/data"]
-
-# Only the single-origin proxy is exposed; gateway/agent/terminal stay on
-# loopback inside the container.
 EXPOSE 3110
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+CMD ["pm2-runtime", "start", "/app/deploy/docker/pm2.config.cjs"]
 
+# ─────────────────────── browser/WebRTC final image ────────────────────────
+FROM browser-system AS browser-runtime
+
+WORKDIR /app
+COPY --from=builder /app /app
+COPY deploy/docker/pm2.config.cjs /app/deploy/docker/pm2.config.cjs
+COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+  && mkdir -p /data/gateway /data/agent-history /tmp/gw-ssh-cm \
+  && rm -rf /app/apps/terminal-gateway/data \
+  && ln -s /data/gateway /app/apps/terminal-gateway/data \
+  && chown -R node:node /data /tmp/gw-ssh-cm
+
+VOLUME ["/data"]
+EXPOSE 3110
+USER node
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["pm2-runtime", "start", "/app/deploy/docker/pm2.config.cjs"]

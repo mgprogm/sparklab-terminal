@@ -61,11 +61,14 @@ const isClipboardShortcut = (event: React.KeyboardEvent): boolean =>
 export function InteractiveBrowser({
   connection,
   enabled = true,
+  mediaStream = null,
 }: {
   connection: BrowserHandoffConnection | null;
   enabled?: boolean;
+  mediaStream?: MediaStream | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const cursorRef = useRef<HTMLDivElement>(null);
   const cursorLabelRef = useRef<HTMLSpanElement>(null);
   const lastPointRef = useRef({ x: 0, y: 0 });
@@ -73,6 +76,15 @@ export function InteractiveBrowser({
   const heldButtonsRef = useRef(new Set<MouseButton>());
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.srcObject = mediaStream;
+    if (mediaStream) void video.play().catch(() => undefined);
+    return () => {
+      video.srcObject = null;
+    };
+  }, [mediaStream]);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !connection) return;
@@ -179,130 +191,154 @@ export function InteractiveBrowser({
 
   return (
     <>
-      <canvas
-        ref={canvasRef}
-        width={MAX_WIDTH}
-        height={MAX_HEIGHT}
-        tabIndex={0}
-        role="application"
-        aria-label="Interactive isolated browser"
-        aria-disabled={!enabled}
-        className="max-h-full max-w-full cursor-none touch-none bg-white object-contain shadow-lg outline-none focus:ring-2 focus:ring-amber-400 aria-disabled:cursor-wait aria-disabled:opacity-80"
-        onPointerMove={(event) =>
-          send({
-            type: "pointer",
-            action: "move",
-            ...moveVirtualCursor(event, event.buttons !== 0),
-            buttons: pressedButtons(event.buttons),
-          })
-        }
-        onPointerDown={(event) => {
-          const button = buttonName(event.button, event.buttons);
-          if (!button) return;
-          event.currentTarget.focus();
-          heldButtonsRef.current.add(button);
-          send({
-            type: "pointer",
-            action: "down",
-            ...moveVirtualCursor(event, true),
-            button,
-            buttons: [...heldButtonsRef.current],
-            clickCount: clickCount(event.detail),
-          });
-          try {
-            event.currentTarget.setPointerCapture(event.pointerId);
-          } catch {
-            // Mouse input still works when pointer capture is unavailable.
+      <div className="relative flex max-h-full max-w-full items-center justify-center">
+        {mediaStream && (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            aria-label="WebRTC isolated browser video"
+            className="max-h-full max-w-full bg-white object-contain shadow-lg"
+            onLoadedMetadata={(event) => {
+              const canvas = canvasRef.current;
+              if (!canvas) return;
+              canvas.width = Math.min(
+                MAX_WIDTH,
+                event.currentTarget.videoWidth,
+              );
+              canvas.height = Math.min(
+                MAX_HEIGHT,
+                event.currentTarget.videoHeight,
+              );
+            }}
+          />
+        )}
+        <canvas
+          ref={canvasRef}
+          width={MAX_WIDTH}
+          height={MAX_HEIGHT}
+          tabIndex={0}
+          role="application"
+          aria-label="Interactive isolated browser"
+          aria-disabled={!enabled}
+          className={`${mediaStream ? "absolute inset-0 h-full w-full opacity-0" : "max-h-full max-w-full bg-white object-contain shadow-lg"} cursor-none touch-none outline-none focus:ring-2 focus:ring-amber-400 aria-disabled:cursor-wait aria-disabled:opacity-80`}
+          onPointerMove={(event) =>
+            send({
+              type: "pointer",
+              action: "move",
+              ...moveVirtualCursor(event, event.buttons !== 0),
+              buttons: pressedButtons(event.buttons),
+            })
           }
-        }}
-        onPointerUp={(event) => {
-          const button =
-            buttonName(event.button, event.buttons) ??
-            (heldButtonsRef.current.size === 1
-              ? [...heldButtonsRef.current][0]!
-              : null);
-          if (!button) return;
-          heldButtonsRef.current.delete(button);
-          send({
-            type: "pointer",
-            action: "up",
-            ...moveVirtualCursor(event, false),
-            button,
-            buttons: [...heldButtonsRef.current],
-            clickCount: clickCount(event.detail),
-          });
-          try {
-            if (event.currentTarget.hasPointerCapture(event.pointerId))
-              event.currentTarget.releasePointerCapture(event.pointerId);
-          } catch {
-            // Best-effort cleanup for browsers without pointer capture support.
-          }
-        }}
-        onPointerCancel={(event) => {
-          const buttons = [...heldButtonsRef.current];
-          heldButtonsRef.current.clear();
-          for (const button of buttons)
+          onPointerDown={(event) => {
+            const button = buttonName(event.button, event.buttons);
+            if (!button) return;
+            event.currentTarget.focus();
+            heldButtonsRef.current.add(button);
+            send({
+              type: "pointer",
+              action: "down",
+              ...moveVirtualCursor(event, true),
+              button,
+              buttons: [...heldButtonsRef.current],
+              clickCount: clickCount(event.detail),
+            });
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              // Mouse input still works when pointer capture is unavailable.
+            }
+          }}
+          onPointerUp={(event) => {
+            const button =
+              buttonName(event.button, event.buttons) ??
+              (heldButtonsRef.current.size === 1
+                ? [...heldButtonsRef.current][0]!
+                : null);
+            if (!button) return;
+            heldButtonsRef.current.delete(button);
             send({
               type: "pointer",
               action: "up",
               ...moveVirtualCursor(event, false),
               button,
-              buttons: [],
-              clickCount: 1,
+              buttons: [...heldButtonsRef.current],
+              clickCount: clickCount(event.detail),
             });
-        }}
-        onWheel={(event) => {
-          event.preventDefault();
-          send({
-            type: "wheel",
-            ...moveVirtualCursor(event, false),
-            deltaX: Math.max(-2000, Math.min(2000, event.deltaX)),
-            deltaY: Math.max(-2000, Math.min(2000, event.deltaY)),
-          });
-        }}
-        onKeyDown={(event) => {
-          event.preventDefault();
-          if (isClipboardShortcut(event)) return;
-          if (
-            !event.key ||
-            !event.code ||
-            event.key.length > 64 ||
-            event.code.length > 64
-          )
-            return;
-          send({
-            type: "key",
-            action: "down",
-            key: event.key,
-            code: event.code,
-            modifiers: modifiers(event),
-          });
-        }}
-        onKeyUp={(event) => {
-          event.preventDefault();
-          if (isClipboardShortcut(event)) return;
-          if (
-            !event.key ||
-            !event.code ||
-            event.key.length > 64 ||
-            event.code.length > 64
-          )
-            return;
-          send({
-            type: "key",
-            action: "up",
-            key: event.key,
-            code: event.code,
-            modifiers: modifiers(event),
-          });
-        }}
-        onPaste={(event) => event.preventDefault()}
-        onCopy={(event) => event.preventDefault()}
-        onCut={(event) => event.preventDefault()}
-        onDrop={(event) => event.preventDefault()}
-        onDragOver={(event) => event.preventDefault()}
-        onContextMenu={(event) => event.preventDefault()}
-      />
+            try {
+              if (event.currentTarget.hasPointerCapture(event.pointerId))
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            } catch {
+              // Best-effort cleanup for browsers without pointer capture support.
+            }
+          }}
+          onPointerCancel={(event) => {
+            const buttons = [...heldButtonsRef.current];
+            heldButtonsRef.current.clear();
+            for (const button of buttons)
+              send({
+                type: "pointer",
+                action: "up",
+                ...moveVirtualCursor(event, false),
+                button,
+                buttons: [],
+                clickCount: 1,
+              });
+          }}
+          onWheel={(event) => {
+            event.preventDefault();
+            send({
+              type: "wheel",
+              ...moveVirtualCursor(event, false),
+              deltaX: Math.max(-2000, Math.min(2000, event.deltaX)),
+              deltaY: Math.max(-2000, Math.min(2000, event.deltaY)),
+            });
+          }}
+          onKeyDown={(event) => {
+            event.preventDefault();
+            if (isClipboardShortcut(event)) return;
+            if (
+              !event.key ||
+              !event.code ||
+              event.key.length > 64 ||
+              event.code.length > 64
+            )
+              return;
+            send({
+              type: "key",
+              action: "down",
+              key: event.key,
+              code: event.code,
+              modifiers: modifiers(event),
+            });
+          }}
+          onKeyUp={(event) => {
+            event.preventDefault();
+            if (isClipboardShortcut(event)) return;
+            if (
+              !event.key ||
+              !event.code ||
+              event.key.length > 64 ||
+              event.code.length > 64
+            )
+              return;
+            send({
+              type: "key",
+              action: "up",
+              key: event.key,
+              code: event.code,
+              modifiers: modifiers(event),
+            });
+          }}
+          onPaste={(event) => event.preventDefault()}
+          onCopy={(event) => event.preventDefault()}
+          onCut={(event) => event.preventDefault()}
+          onDrop={(event) => event.preventDefault()}
+          onDragOver={(event) => event.preventDefault()}
+          onContextMenu={(event) => event.preventDefault()}
+        />
+      </div>
       <div
         ref={cursorRef}
         data-testid="virtual-mouse"

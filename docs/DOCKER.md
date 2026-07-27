@@ -4,16 +4,23 @@ Docker is an **additional** way to run the stack — it does not replace the nat
 paths (`pnpm dev`, `run-prod-local.sh`, PM2 via `ecosystem.config.cjs`). Deploy
 either way. This image is suitable for **both quick testing and real deployment**.
 
+The default image does not include Chromium/Browser Use. An optional
+`browser-runtime` target installs and verifies the native browser/WebRTC
+prerequisites, but the application media-provider adapter is not implemented
+yet. Browser Handoff therefore remains on JPEG-over-WebSocket. Do not enable
+`webrtc-preferred` expecting native packages alone to wire ICE/DTLS; follow
+[`ADR-BROWSER-HANDOFF-WEBRTC.md`](./ADR-BROWSER-HANDOFF-WEBRTC.md).
+
 ## What's in the image
 
 One **all-in-one container** runs the whole stack, supervised by pm2:
 
-| Process         | Port (internal) | Role                                              |
-| --------------- | --------------- | ------------------------------------------------- |
-| `prod-gateway`  | 3107 (loopback) | REST + `/attach` WS, owns tmux                     |
-| `prod-agent`    | 3109 (loopback) | Agent Chat loop (Azure OpenAI) — **only started when Azure is configured** |
-| `prod-terminal` | 3100 (loopback) | Next.js frontend (`next start`)                   |
-| `prod-proxy`    | **3110** (0.0.0.0) | Single-origin reverse proxy — the only exposed port |
+| Process         | Port (internal)    | Role                                                                       |
+| --------------- | ------------------ | -------------------------------------------------------------------------- |
+| `prod-gateway`  | 3107 (loopback)    | REST + `/attach` WS, owns tmux                                             |
+| `prod-agent`    | 3109 (loopback)    | Agent Chat loop (Azure OpenAI) — **only started when Azure is configured** |
+| `prod-terminal` | 3100 (loopback)    | Next.js frontend (`next start`)                                            |
+| `prod-proxy`    | **3110** (0.0.0.0) | Single-origin reverse proxy — the only exposed port                        |
 
 Everything is served from **one origin** (`:3110`) so the `gw_session` cookie
 stays first-party across the gateway and the agent — exactly like the native
@@ -33,7 +40,7 @@ server registry, push subscriptions/settings, agent chat history) lives on the
 containerizing a tmux-owns-the-process design and is an accepted trade-off. For
 maximum job durability across host reboots, use the native install.
 
-### What's deliberately NOT included
+### What's deliberately NOT included in the default target
 
 The **virtual browser** (Browser Use / `uv` + Playwright Chromium) is not bundled
 — it would add hundreds of MB and system libraries. `BROWSER_USE_PROJECT` is
@@ -56,21 +63,51 @@ docker compose down                 # keeps the /data volume
 docker compose up -d --build        # rebuild after code or PUBLIC_ORIGIN change
 ```
 
+## Optional browser-enabled image
+
+The override builds `browser-runtime` with Chromium and its setuid sandbox,
+Xvfb, FFmpeg, uv 0.11.14, GStreamer WebRTC/VP8 plugins, and libnice. It mounts a
+trusted Browser Use checkout read-only; Python environment and uv cache data go
+to `/data`. The container runs as the unprivileged `node` user, drops every
+Linux capability, forbids privilege escalation, and never passes Chromium
+`--no-sandbox`.
+
+Set an absolute checkout path in `.env.docker`, then include the file for both
+Compose interpolation and the container environment:
+
+```bash
+BROWSER_USE_PROJECT_HOST=/absolute/path/to/browser-use
+docker compose --env-file .env.docker \
+  -f docker-compose.yml -f deploy/docker/compose.browser.yml \
+  up -d --build
+```
+
+On this host, Docker's built-in seccomp profile blocks the user-namespace
+operation required by Chromium's sandbox. The override uses
+`seccomp=unconfined`, counterbalanced by non-root execution, `cap_drop: ALL`,
+and `no-new-privileges`. Review this trade-off against the target host's
+container policy; do not replace it with `privileged: true`.
+
+The native stack is a prerequisite, not a completed media provider. Keep
+`BROWSER_HANDOFF_TRANSPORT=jpeg`; WebRTC continues to report provider
+unavailable and falls back safely until the adapter and real-media E2E phase is
+implemented.
+
 ## Configuration
 
 All config is env (`.env.docker`, loaded by `docker-compose.yml`). See
 `.env.docker.example` for the annotated list. The essentials:
 
-| Variable                     | Required | Notes                                                        |
-| ---------------------------- | -------- | ----------------------------------------------------------- |
-| `PUBLIC_ORIGIN`              | yes      | The origin the browser loads from. **Baked at build time** — change it and rebuild. |
-| `HOST_PORT`                  | no       | Host port mapped to the proxy (default `3110`).             |
-| `GATEWAY_AUTH_USER`          | yes      | Login user.                                                 |
-| `GATEWAY_AUTH_PASSWORD`      | yes\*    | Plaintext (hashed at boot). \*Or `GATEWAY_AUTH_PASSWORD_HASH`. |
-| `GATEWAY_AUTH_PASSWORD_HASH` | prod     | scrypt hash (`pnpm --filter @sparklab/terminal-gateway hash-password`). |
-| `TRUST_PROXY`                | TLS      | Set `1` only behind an external https reverse proxy.        |
-| `AZURE_OPENAI_*`, `GPT56SOL_DEPLOYMENT` | Agent | Needed only for Agent Chat.                    |
-| `VAPID_*`                    | Push     | Needed only for "job finished" push.                       |
+| Variable                                | Required | Notes                                                                               |
+| --------------------------------------- | -------- | ----------------------------------------------------------------------------------- |
+| `PUBLIC_ORIGIN`                         | yes      | The origin the browser loads from. **Baked at build time** — change it and rebuild. |
+| `HOST_PORT`                             | no       | Host port mapped to the proxy (default `3110`).                                     |
+| `GATEWAY_AUTH_USER`                     | yes      | Login user.                                                                         |
+| `GATEWAY_AUTH_PASSWORD`                 | yes\*    | Plaintext (hashed at boot). \*Or `GATEWAY_AUTH_PASSWORD_HASH`.                      |
+| `GATEWAY_AUTH_PASSWORD_HASH`            | prod     | scrypt hash (`pnpm --filter @sparklab/terminal-gateway hash-password`).             |
+| `TRUST_PROXY`                           | TLS      | Set `1` only behind an external https reverse proxy.                                |
+| `AZURE_OPENAI_*`, `GPT56SOL_DEPLOYMENT` | Agent    | Needed only for Agent Chat.                                                         |
+| `VAPID_*`                               | Push     | Needed only for "job finished" push.                                                |
 
 ### `PUBLIC_ORIGIN` is baked at build time
 
@@ -110,13 +147,13 @@ and rebuild. `TRUST_PROXY=1` marks the session cookie `Secure` and honors
 The named volume `sparklab-data` is mounted at `/data` and holds all mutable
 state, redirected there via env overrides plus one symlink (`entrypoint.sh`):
 
-| File / dir                    | Contents                                   |
-| ----------------------------- | ------------------------------------------ |
-| `/data/gateway/sessions.json` | Session names / org / project / mute       |
-| `/data/servers.json`          | Connected-servers registry (SSH)           |
-| `/data/push-subscriptions.json` | Web Push device endpoints                |
-| `/data/push-settings.json`    | Push duration threshold / job-start toggle |
-| `/data/agent-history/`        | Per-chat JSONL history                     |
+| File / dir                      | Contents                                   |
+| ------------------------------- | ------------------------------------------ |
+| `/data/gateway/sessions.json`   | Session names / org / project / mute       |
+| `/data/servers.json`            | Connected-servers registry (SSH)           |
+| `/data/push-subscriptions.json` | Web Push device endpoints                  |
+| `/data/push-settings.json`      | Push duration threshold / job-start toggle |
+| `/data/agent-history/`          | Per-chat JSONL history                     |
 
 `docker compose down` keeps this volume; `docker compose down -v` deletes it.
 
@@ -158,3 +195,7 @@ docker compose exec sparklab \
   note above.
 - **node-pty errors on an ARM/x86 mismatch** — the image compiles node-pty for
   its own platform; build on (or for) the target arch (`docker build --platform`).
+- **Chromium reports `Operation not permitted`** — start with
+  `deploy/docker/compose.browser.yml`; the default Docker seccomp profile blocks
+  its sandbox namespace on some hosts. Never work around this with
+  `--no-sandbox`.

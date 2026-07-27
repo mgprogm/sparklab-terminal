@@ -51,6 +51,7 @@ line:
 # .env
 PUBLIC_ORIGIN=http://localhost:3110         # local, same machine only
 # PUBLIC_ORIGIN=https://sparklab.ap.loclx.io # public loclx tunnel
+TRUST_PROXY=1                                # required for the HTTPS tunnel
 TUNNEL_ENABLED=true                          # false → the prod-tunnel app is skipped
 TUNNEL_SUBDOMAIN=sparklab
 TUNNEL_REGION=ap

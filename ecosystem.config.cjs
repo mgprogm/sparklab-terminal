@@ -54,6 +54,10 @@ const PROXY_PORT = 3110;
 const PROXY_ORIGIN = `http://localhost:${PROXY_PORT}`;
 // The single public origin the stack is served on (default: the local proxy).
 const PUBLIC_ORIGIN = ENV.PUBLIC_ORIGIN || PROXY_ORIGIN;
+// External TLS terminators (LocalXpose/Caddy/ingress) require this so the
+// gateway emits Secure cookies and derives the real client address only from
+// the trusted forwarded headers. Keep it explicit for plain HTTP local mode.
+const TRUST_PROXY = ENV.TRUST_PROXY || "";
 
 // loclx tunnel config (root .env). Skip the tunnel app entirely when disabled.
 const LOCLX_BIN = "/snap/bin/loclx";
@@ -77,6 +81,7 @@ const apps = [
       PORT: String(GATEWAY_PORT),
       HOST: "127.0.0.1",
       ALLOWED_ORIGINS,
+      ...(TRUST_PROXY ? { TRUST_PROXY } : {}),
     },
   },
   {

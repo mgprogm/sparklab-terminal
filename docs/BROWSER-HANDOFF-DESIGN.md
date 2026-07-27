@@ -136,6 +136,15 @@ Security requirements:
   server logs.
 - Require TLS outside loopback development.
 
+The production default is `BROWSER_HANDOFF_TRANSPORT=jpeg`. The same socket
+also carries a versioned WebRTC capability/offer/answer/trickle-ICE foundation
+behind `webrtc-preferred`. Authentication and lifecycle always remain on the
+WebSocket, and mouse/keyboard input stays there so ICE failure cannot strand
+human control. A failed or unavailable peer automatically returns to the same
+bounded JPEG stream. The current provider reports unavailable intentionally;
+do not treat native GStreamer/FFmpeg packages alone as an application media
+provider. See [ADR-BROWSER-HANDOFF-WEBRTC.md](ADR-BROWSER-HANDOFF-WEBRTC.md).
+
 ## Interactive Data Plane
 
 ### Server to client
@@ -153,6 +162,11 @@ Send bounded WebP/JPEG frames over binary WebSocket messages:
 
 The Browser Session Host may use an internal CDP screencast, but CDP connection
 details and commands never cross the server boundary.
+
+Before starting the screencast, the host normalizes the target's CSS viewport
+to 1280×720. CDP input coordinates and JPEG pixels are therefore 1:1 even when
+Browser Use previously emulated 1920×1080. On Done, the host restores the exact
+prior viewport before reloading the page and returning the lease to the agent.
 
 ### Client to server
 

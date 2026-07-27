@@ -35,6 +35,39 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST (loo
 
 Protocol, tools, and safety model: [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md).
 
+### Isolated browser and human handoff
+
+The virtual browser is another isolated lifetime owned by one Agent Chat. A
+`BrowserSessionHost` owns Chromium, its ephemeral profile, and an enforcing
+public-network-only proxy. Browser Use connects to that internal Chromium over
+CDP, but raw MCP/CDP, cookies, DOM, filesystem, uploads, downloads, and
+credentials never cross the public boundary.
+
+```text
+Agent Browser Use ──internal MCP/CDP──┐
+                                     ▼
+                              BrowserSessionHost
+                                     │
+User canvas/video ◄── /browser-handoff WS ── BrowserHandoffBroker
+```
+
+`/browser-handoff` reuses the gateway cookie and strict Origin allowlist. Its
+first frame carries a one-time owner-bound token; subsequent frames are typed
+signaling or bounded mouse/keyboard input. The broker keeps input on WebSocket
+and applies latest-frame-wins backpressure to JPEG fallback frames. During a
+JPEG handoff the host normalizes both CDP and the captured frame to 1280×720 so
+canvas pixels map 1:1 to mouse coordinates, then restores Browser Use's prior
+viewport before returning control.
+
+The WebRTC foundation includes strict capability/offer/answer/ICE schemas, an
+explicit state machine, frontend `RTCPeerConnection`/`<video>` support,
+short-lived TURN REST credentials, limits, and metadata-only health metrics.
+No production media provider is currently wired, so
+`BROWSER_HANDOFF_TRANSPORT=jpeg` is the deployment default and
+`webrtc-preferred` falls back without weakening authentication. See
+[BROWSER-HANDOFF-DESIGN.md](BROWSER-HANDOFF-DESIGN.md) and
+[ADR-BROWSER-HANDOFF-WEBRTC.md](ADR-BROWSER-HANDOFF-WEBRTC.md).
+
 ## Monorepo layout
 
 pnpm workspaces + Turborepo. Workspace globs: `apps/*`, `packages/*` (`pnpm-workspace.yaml`). Task graph in `turbo.json`: `build` (dependsOn `^build`), `lint`, `typecheck`, `test`, `dev` (persistent, uncached), `e2e` (uncached).
@@ -74,15 +107,19 @@ Tests live in `test/` as standalone node scripts (see [TESTING.md](TESTING.md)) 
 
 The Agent Chat backend — a Node/TypeScript service (port 3009, run via `tsx`) that hosts the WebSocket `/agent` endpoint and runs a **custom tool-calling loop** over an Azure OpenAI deployment (`gpt-5.6-sol`). No agent SDK: the loop, the approval gate, and conversation persistence are all first-party.
 
-| File                                                      | Role                                                                                                                                                                                                                                                                                                                                |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/index.ts`                                            | HTTP + WS server. On upgrade: origin allowlist (pre-handshake), then cookie auth by proxying the browser's cookie to the gateway's `/api/auth/me` (fail → close `4001`). Attaches the message listener synchronously and buffers until auth + init finish, so the client's first `user_message` (sent on WS open) is never dropped. |
-| `src/agent-loop.ts`                                       | One instance per connection. Streams `gpt-5.6-sol`, relays text deltas, runs the approval gate on write tools, executes via the gateway, feeds results back, loops until the model stops. Per-turn caps (24 model calls / 10 writes); `AbortController` wired to the Stop button.                                                   |
-| `src/tools.ts`                                            | OpenAI function schemas for terminal reads/writes and isolated virtual-browser tools. No `kill_session`, raw MCP, JavaScript, or CDP capability.                                                                                                                                                                                    |
-| `src/gateway-client.ts`                                   | Fetch client for the gateway (loopback); logs in with `GATEWAY_AUTH_*` when the gateway has auth on, reuses the `gw_session` cookie, re-logs in on 401.                                                                                                                                                                             |
-| `src/approvals.ts`                                        | Pending-approval map; `requestApproval` emits an `approval_request` and awaits the user's `approval_response` (120s → deny). `allow_always` scopes to tool+session for the chat.                                                                                                                                                    |
-| `src/history.ts`                                          | Terminal-linked persistence under `data/`: `<chatId>.jsonl` stores model messages and `<chatId>.meta.json` stores the immutable terminal owner. Resolves the newest chat per terminal under a same-terminal lock, scopes lists/deletes, and reconstructs UI replay entries server-side.                                             |
-| `src/config.ts` / `src/azure.ts` / `src/system-prompt.ts` | Env validation (fail-fast), the `AzureOpenAI` client, and the operator persona.                                                                                                                                                                                                                                                     |
+| File                                                                 | Role                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/index.ts`                                                       | HTTP + WS server. On upgrade: origin allowlist (pre-handshake), then cookie auth by proxying the browser's cookie to the gateway's `/api/auth/me` (fail → close `4001`). Attaches the message listener synchronously and buffers until auth + init finish, so the client's first `user_message` (sent on WS open) is never dropped. |
+| `src/agent-loop.ts`                                                  | One instance per connection. Streams `gpt-5.6-sol`, relays text deltas, runs the approval gate on write tools, executes via the gateway, feeds results back, loops until the model stops. Per-turn caps (24 model calls / 10 writes); `AbortController` wired to the Stop button.                                                   |
+| `src/tools.ts`                                                       | OpenAI function schemas for terminal reads/writes and isolated virtual-browser tools. No `kill_session`, raw MCP, JavaScript, or CDP capability.                                                                                                                                                                                    |
+| `src/gateway-client.ts`                                              | Fetch client for the gateway (loopback); logs in with `GATEWAY_AUTH_*` when the gateway has auth on, reuses the `gw_session` cookie, re-logs in on 401.                                                                                                                                                                             |
+| `src/approvals.ts`                                                   | Pending-approval map; `requestApproval` emits an `approval_request` and awaits the user's `approval_response` (120s → deny). `allow_always` scopes to tool+session for the chat.                                                                                                                                                    |
+| `src/history.ts`                                                     | Terminal-linked persistence under `data/`: `<chatId>.jsonl` stores model messages and `<chatId>.meta.json` stores the immutable terminal owner. Resolves the newest chat per terminal under a same-terminal lock, scopes lists/deletes, and reconstructs UI replay entries server-side.                                             |
+| `src/browser-session-host.ts`                                        | Chromium/profile/proxy owner and internal CDP adapter. Normalizes the interactive viewport, streams bounded JPEG frames, dispatches allowlisted input, restores agent viewport, and cleans every owned resource.                                                                                                                    |
+| `src/browser-handoff-broker.ts` / `src/browser-handoff-transport.ts` | Authenticated handoff lifecycle, one-time/resume credentials, strict signaling/input ordering, rate limits, timeouts, JPEG backpressure, WebRTC fallback state machine, and aggregate metrics.                                                                                                                                      |
+| `src/browser-webrtc-provider.ts`                                     | Provider seam and unavailable default. A reviewed ICE/DTLS/SRTP media implementation must satisfy this contract before WebRTC is advertised.                                                                                                                                                                                        |
+| `src/browser-resource-limiter.ts` / `src/agent-security.ts`          | Global session/launch/peer bounds and production Origin validation shared by the agent and handoff upgrade paths.                                                                                                                                                                                                                   |
+| `src/config.ts` / `src/azure.ts` / `src/system-prompt.ts`            | Env validation (fail-fast), the `AzureOpenAI` client, and the operator persona.                                                                                                                                                                                                                                                     |
 
 Secrets and config live in a gitignored `.env` (Azure endpoint/key/version, deployment name, `AGENT_PORT`, `GATEWAY_URL`, `ALLOWED_ORIGINS`, gateway creds); see `apps/agent-service/.env.example`. `build` emits with `tsc`; `dev`/`start` run via `tsx`. Protocol: [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md).
 
@@ -110,6 +147,12 @@ Wiring: `next.config.ts` rewrites `/api/:path*` to the gateway (same-origin REST
 
 A second feature module, `src/features/agent-chat/`, holds the **Agent Chat** UI: the floating button and docked/floating panel (bottom sheet on mobile), streaming messages, expandable tool-event rows, the approval card (risk hints + per-session auto-approve), the composer with a session target picker, the amber terminal-attribution overlay + session-row badge, and a terminal-scoped history dialog. Its Zustand store persists `panelOpen`, display mode, and a `terminalSessionId → latest chatId` map; a versioned migration adopts the former global `chatId` once. `use-agent-chat.ts` replaces the single live JSON-only WS connection whenever the focused terminal changes, clears transient transcript/history state, and uses a generation guard so late frames from a superseded terminal cannot overwrite the active chat. Each connection includes `terminalSessionId`; explicit history uses `resumeChatId`, while new chat uses `newChat=1`. The service remains the source of truth and resolves the newest linked chat when the client has no mapping. Amber (`chart-2`) remains the agent-activity status color. The terminal byte pipeline is untouched; the agent UI is layered around it.
 
+`src/features/browser-view/` renders the ephemeral isolated-browser overlay.
+`src/features/browser-handoff/` owns the non-persisted handoff credentials,
+dedicated WebSocket, WebRTC receiver, JPEG renderer, input scheduler, retry and
+fallback state, and Done/Cancel UI. Neither feature writes screenshots, tokens,
+typed text, or media state into chat history or persisted Zustand storage.
+
 ### `apps/web` (`@sparklab/web`)
 
 The product app shell. Currently minimal by design — it exists to carry the canonical patterns future features copy:
@@ -126,7 +169,7 @@ Playwright (chromium, serial workers). Boots its own production build of the ter
 
 | Package                       | Contents                                                                                                                                                                                                                                                                                                                                                                                             |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@sparklab/shared-types`      | Zod schemas + inferred types for the REST API and WS control frames (`src/terminal.ts`), auth (`src/auth.ts`), and the agent chat protocol + agent REST bodies (`src/agent.ts`). Source-export package: no build step; consumers transpile it (`transpilePackages` in Next apps). The schemas were derived from `server.js` — the server code is the source of truth; change them together.          |
+| `@sparklab/shared-types`      | Zod schemas + inferred types for REST, terminal/auth control frames, Agent Chat, bounded browser input, and versioned WebRTC signaling (`src/agent.ts`). Source-export package: no build step; consumers transpile it. Browser handoff schemas are strict and size-bounded; change both server and client consumers with the shared contract.                                                        |
 | `@sparklab/ui`                | Design system: Tailwind v4 (CSS-first) theme tokens in `src/styles/globals.css`, `cn()` in `src/lib/utils.ts`, shadcn-generated components in `src/components/ui/` (checked in and editable — that's the shadcn model; regenerate/add with `pnpm dlx shadcn@latest add <name>` run inside the package). Apps must list it in `transpilePackages` and include its source in Tailwind `@source` globs. |
 | `@sparklab/config-typescript` | `base.json` (strict + `noUncheckedIndexedAccess` + `noImplicitOverride` + `verbatimModuleSyntax`), plus `nextjs.json`, `react-library.json`, `node.json`.                                                                                                                                                                                                                                            |
 | `@sparklab/config-eslint`     | ESLint 9 flat configs: `base.js`, `react.js`, `next.js`. Each workspace has a tiny `eslint.config.mjs` re-export.                                                                                                                                                                                                                                                                                    |

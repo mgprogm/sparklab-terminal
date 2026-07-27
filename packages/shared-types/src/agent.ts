@@ -448,6 +448,143 @@ export const BrowserHandoffAuthSchema = z
   })
   .strict();
 
+export const BrowserHandoffTransportSchema = z.enum(["webrtc", "jpeg_ws"]);
+export type BrowserHandoffTransport = z.infer<
+  typeof BrowserHandoffTransportSchema
+>;
+
+export const BrowserHandoffVideoCodecSchema = z.enum(["VP8", "H264"]);
+export type BrowserHandoffVideoCodec = z.infer<
+  typeof BrowserHandoffVideoCodecSchema
+>;
+
+export const BrowserHandoffFallbackReasonSchema = z.enum([
+  "client_unsupported",
+  "media_provider_unavailable",
+  "peer_limit",
+  "negotiation_timeout",
+  "ice_failed",
+  "peer_failed",
+  "client_requested",
+]);
+export type BrowserHandoffFallbackReason = z.infer<
+  typeof BrowserHandoffFallbackReasonSchema
+>;
+
+/** Credentials are short-lived and delivered only after handoff authentication. */
+export const BrowserHandoffIceServerSchema = z
+  .object({
+    urls: z.union([
+      z.string().min(1).max(2048),
+      z.array(z.string().min(1).max(2048)).min(1).max(4),
+    ]),
+    username: z.string().min(1).max(256).optional(),
+    credential: z.string().min(1).max(512).optional(),
+  })
+  .strict()
+  .refine(
+    (server) => Boolean(server.username) === Boolean(server.credential),
+    "ICE username and credential must be supplied together",
+  );
+export type BrowserHandoffIceServer = z.infer<
+  typeof BrowserHandoffIceServerSchema
+>;
+
+export const BrowserHandoffCapabilitiesSchema = z
+  .object({
+    type: z.literal("capabilities"),
+    protocolVersion: z.literal(1),
+    transports: z.array(BrowserHandoffTransportSchema).min(1).max(2),
+    videoCodecs: z.array(BrowserHandoffVideoCodecSchema).max(2),
+    trickleIce: z.boolean(),
+  })
+  .strict();
+
+const WebRtcNegotiationIdSchema = z.string().uuid();
+const SessionDescriptionSchema = z
+  .object({
+    type: z.enum(["offer", "answer"]),
+    sdp: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
+  })
+  .strict();
+
+export const BrowserHandoffWebRtcAnswerSchema = z
+  .object({
+    type: z.literal("webrtc_answer"),
+    negotiationId: WebRtcNegotiationIdSchema,
+    description: SessionDescriptionSchema.refine(
+      (description) => description.type === "answer",
+    ),
+  })
+  .strict();
+
+export const BrowserHandoffWebRtcIceCandidateSchema = z
+  .object({
+    type: z.literal("webrtc_ice_candidate"),
+    negotiationId: WebRtcNegotiationIdSchema,
+    candidate: z.string().max(4096),
+    sdpMid: z.string().max(256).nullable().optional(),
+    sdpMLineIndex: z.number().int().min(0).max(32).nullable().optional(),
+    usernameFragment: z.string().max(256).optional(),
+  })
+  .strict();
+
+export const BrowserHandoffFallbackRequestSchema = z
+  .object({
+    type: z.literal("transport_fallback"),
+    negotiationId: WebRtcNegotiationIdSchema.optional(),
+    reason: BrowserHandoffFallbackReasonSchema,
+  })
+  .strict();
+
+export const BrowserHandoffHeartbeatSchema = z
+  .object({
+    type: z.literal("handoff_heartbeat"),
+    sequence: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+export const BrowserHandoffTransportCapabilitiesSchema = z
+  .object({
+    type: z.literal("transport_capabilities"),
+    protocolVersion: z.literal(1),
+    preferred: BrowserHandoffTransportSchema,
+    available: z.array(BrowserHandoffTransportSchema).min(1).max(2),
+    videoCodecs: z.array(BrowserHandoffVideoCodecSchema).max(2),
+    iceServers: z.array(BrowserHandoffIceServerSchema).max(8),
+    negotiationTimeoutMs: z.number().int().min(1000).max(30_000),
+  })
+  .strict();
+
+export const BrowserHandoffWebRtcOfferSchema = z
+  .object({
+    type: z.literal("webrtc_offer"),
+    negotiationId: WebRtcNegotiationIdSchema,
+    description: SessionDescriptionSchema.refine(
+      (description) => description.type === "offer",
+    ),
+  })
+  .strict();
+
+export const BrowserHandoffTransportStateSchema = z
+  .object({
+    type: z.literal("transport_state"),
+    transport: BrowserHandoffTransportSchema,
+    state: z.enum(["negotiating", "connected", "failed", "fallback", "closed"]),
+    reason: BrowserHandoffFallbackReasonSchema.optional(),
+  })
+  .strict();
+
+export const BrowserHandoffHeartbeatAckSchema = z
+  .object({
+    type: z.literal("handoff_heartbeat_ack"),
+    sequence: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
 const HandoffModifierSchema = z.enum(["Alt", "Control", "Meta", "Shift"]);
 export const BrowserHandoffInputSchema = z.discriminatedUnion("type", [
   z
@@ -496,6 +633,29 @@ export const BrowserHandoffInputSchema = z.discriminatedUnion("type", [
 ]);
 export type BrowserHandoffAuth = z.infer<typeof BrowserHandoffAuthSchema>;
 export type BrowserHandoffInput = z.infer<typeof BrowserHandoffInputSchema>;
+
+export const BrowserHandoffPostAuthClientMessageSchema = z.union([
+  BrowserHandoffInputSchema,
+  BrowserHandoffCapabilitiesSchema,
+  BrowserHandoffWebRtcAnswerSchema,
+  BrowserHandoffWebRtcIceCandidateSchema,
+  BrowserHandoffFallbackRequestSchema,
+  BrowserHandoffHeartbeatSchema,
+]);
+export type BrowserHandoffPostAuthClientMessage = z.infer<
+  typeof BrowserHandoffPostAuthClientMessageSchema
+>;
+
+export const BrowserHandoffServerControlSchema = z.union([
+  BrowserHandoffTransportCapabilitiesSchema,
+  BrowserHandoffWebRtcOfferSchema,
+  BrowserHandoffWebRtcIceCandidateSchema,
+  BrowserHandoffTransportStateSchema,
+  BrowserHandoffHeartbeatAckSchema,
+]);
+export type BrowserHandoffServerControl = z.infer<
+  typeof BrowserHandoffServerControlSchema
+>;
 
 /** Discriminated union of all server -> client agent chat messages. */
 export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [

@@ -1,0 +1,32 @@
+services:
+  sparklab:
+    image: sparklab-terminal:browser-runtime
+    build:
+      target: browser-runtime
+    environment:
+      BROWSER_DOCKER_RUNTIME: "1"
+      BROWSER_USE_PROJECT: /opt/browser-use
+      BROWSER_USE_EXECUTABLE_PATH: /usr/bin/chromium
+      BROWSER_USE_HEADLESS: ${BROWSER_USE_HEADLESS:-true}
+      UV_PROJECT_ENVIRONMENT: /data/browser-use-venv
+      UV_CACHE_DIR: /data/uv-cache
+      DISPLAY: :99
+    volumes:
+      # A trusted, pinned Browser Use checkout. Source remains read-only while
+      # uv's environment/cache live in the persistent /data volume.
+      - type: bind
+        source: ${BROWSER_USE_PROJECT_HOST:?set BROWSER_USE_PROJECT_HOST to a trusted Browser Use checkout}
+        target: /opt/browser-use
+        read_only: true
+    shm_size: ${BROWSER_SHM_SIZE:-1gb}
+    pids_limit: ${BROWSER_PIDS_LIMIT:-1024}
+    # Docker's built-in seccomp profile blocks the user-namespace syscall used
+    # by Chromium's sandbox on supported Linux hosts. Keep Chromium sandboxed
+    # while compensating at the container boundary: non-root USER (image), no
+    # capabilities, and no privilege escalation. Never replace this with
+    # privileged: true or a Chromium --no-sandbox flag.
+    security_opt:
+      - seccomp=unconfined
+      - no-new-privileges=true
+    cap_drop:
+      - ALL

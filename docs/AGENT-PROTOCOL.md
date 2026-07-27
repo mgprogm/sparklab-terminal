@@ -115,6 +115,13 @@ backpressure, and the client uses one active decode plus one replaceable pending
 frame. Pointer movement and wheel events are coalesced before transmission;
 clicks and keyboard events retain ordering.
 
+The same authenticated `/browser-handoff` socket also carries a versioned,
+strict WebRTC signaling foundation: capabilities, bounded offer/answer SDP,
+trickle ICE candidates, transport state, fallback, and heartbeat. Input remains
+on WebSocket. JPEG binary frames remain the default and automatic fallback;
+WebRTC is not advertised until a production media provider is present. See
+[`ADR-BROWSER-HANDOFF-WEBRTC.md`](./ADR-BROWSER-HANDOFF-WEBRTC.md).
+
 The virtual mouse displays the exact bounded browser coordinates locally. The
 existing handoff `activity` control adds only `inputType`; a short ✓ is shown
 after CDP accepts pointer/wheel input. Coordinates and typed content are never

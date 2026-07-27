@@ -95,11 +95,12 @@ Do not compare absolute screen `clientX/clientY` values to browser coordinates.
 The virtual label shows the latter.
 
 Screencast dimensions must describe the same current viewport used by CDP
-input. During the 2026-07-27 diagnostic, a fresh headless Chromium target had
-both viewport and JPEG dimensions `1280x633`, device scale factor 1, page scale
-factor 1, and zero offsets. A production Browser Use handoff reported a
-`1280x720` canvas. Both are valid when the current emulated viewport matches
-the frame; never hard-code the observed height as a universal value.
+input. The handoff adapter therefore normalizes the active target to 1280x720
+before starting the bounded JPEG screencast, then restores Browser Use's prior
+viewport before reloading and returning control to the agent. Earlier builds
+could leave Browser Use at `1920x1080` while scaling only the JPEG to
+`1280x720`, causing pointer coordinates to miss by roughly 1.5x. During an
+active handoff, both the CDP viewport and canvas contract are now `1280x720`.
 
 ## Layered Diagnosis
 

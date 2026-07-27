@@ -26,4 +26,12 @@ fi
 # make sure it exists and is writable for the runtime user.
 mkdir -p "${TMPDIR:-/tmp}/gw-ssh-cm" || true
 
+# Chromium must retain its Linux sandbox. The browser-enabled target therefore
+# drops the complete stack to the unprivileged node user after preparing the
+# persistent volume; it never adds --no-sandbox or privileged container flags.
+if [ "${BROWSER_DOCKER_RUNTIME:-}" = "1" ] && [ "$(id -u)" = "0" ]; then
+  chown -R node:node "${DATA_DIR}"
+  exec gosu node "$0" "$@"
+fi
+
 exec "$@"

@@ -6,6 +6,7 @@ import type { BrowserHandoffInput } from "@sparklab/shared-types";
 import { config, CAPS } from "./config.js";
 import { BrowserControlLease } from "./browser-control-lease.js";
 import { BrowserSessionHost } from "./browser-session-host.js";
+import { browserResources } from "./browser-resource-limiter.js";
 import { sanitizePublicUrl, validateBrowserUrl } from "./browser-security.js";
 
 interface McpContent {
@@ -64,6 +65,7 @@ export class BrowserRuntime {
   private lease = new BrowserControlLease();
   private closed = false;
   private disposing: Promise<number> | null = null;
+  private releaseSession: (() => void) | null = null;
 
   constructor(
     private onUnexpectedClose?: (browserId: string, revision: number) => void,
@@ -182,6 +184,8 @@ export class BrowserRuntime {
     this.rejectPending(new Error("browser runtime closed"));
     this.lastElements.clear();
     await this.cleanupOwnedResources();
+    this.releaseSession?.();
+    this.releaseSession = null;
     return revision;
   }
 
@@ -205,7 +209,14 @@ export class BrowserRuntime {
     if (!project)
       throw new Error("browser tools are disabled: set BROWSER_USE_PROJECT");
     const workdir = resolve(project);
-    await this.host.start();
+    this.releaseSession = browserResources.reserveSession();
+    const releaseLaunch = await browserResources.acquireLaunch();
+    try {
+      this.assertOpen();
+      await this.host.start();
+    } finally {
+      releaseLaunch();
+    }
     this.assertOpen();
     const configDir = this.host.configDir;
     const profileId = randomUUID();

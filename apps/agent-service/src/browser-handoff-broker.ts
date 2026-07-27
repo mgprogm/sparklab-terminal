@@ -1,12 +1,25 @@
 import type { WebSocket } from "ws";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   BrowserHandoffAuthSchema,
-  BrowserHandoffInputSchema,
+  BrowserHandoffPostAuthClientMessageSchema,
   type AgentWsServerMessage,
 } from "@sparklab/shared-types";
 import { BrowserRuntime } from "./browser-runtime.js";
 import { HandoffTokenManager } from "./browser-handoff-tokens.js";
+import { config } from "./config.js";
+import {
+  BrowserHandoffTransportMachine,
+  browserHandoffMetrics,
+  createHandoffIceServers,
+  type BrowserHandoffCleanupReason,
+} from "./browser-handoff-transport.js";
+import {
+  unavailableWebRtcProvider,
+  type BrowserWebRtcPeer,
+  type BrowserWebRtcProvider,
+} from "./browser-webrtc-provider.js";
 
 const TOKEN_TTL_MS = 60_000;
 const IDLE_TIMEOUT_MS = 120_000;
@@ -36,11 +49,22 @@ interface HandoffRecord {
   sendingFrameSocket?: WebSocket;
   frameDrainTimer?: NodeJS.Timeout;
   lastFrameSentAt?: number;
+  transport: BrowserHandoffTransportMachine;
+  finishing?: boolean;
+  peer?: BrowserWebRtcPeer;
+  peerCounted?: boolean;
+  negotiationId?: string;
+  negotiationStartedAt?: number;
+  negotiationTimer?: NodeJS.Timeout;
 }
 
 export class BrowserHandoffBroker {
   private tokens = new HandoffTokenManager();
   private records = new Map<string, HandoffRecord>();
+
+  constructor(
+    private readonly webRtcProvider: BrowserWebRtcProvider = unavailableWebRtcProvider,
+  ) {}
 
   begin(args: {
     user: string;
@@ -64,14 +88,16 @@ export class BrowserHandoffBroker {
       socket: null,
       expiresAt: issued.expiresAt,
       tokenTimer: setTimeout(
-        () => void this.destroy(issued.handoffId),
+        () => void this.destroy(issued.handoffId, "token_timeout"),
         TOKEN_TTL_MS,
       ),
       rateSecond: 0,
       rateCount: 0,
+      transport: new BrowserHandoffTransportMachine(),
     };
     record.tokenTimer.unref();
     this.records.set(issued.handoffId, record);
+    browserHandoffMetrics.handoffStarted();
     return issued;
   }
 
@@ -129,6 +155,7 @@ export class BrowserHandoffBroker {
       clearTimeout(record.disconnectTimer);
       record.socket = ws;
       this.sendAuthenticated(record);
+      this.sendTransportCapabilities(record);
       return record.handoffId;
     }
     const auth = BrowserHandoffAuthSchema.safeParse(firstFrame);
@@ -149,7 +176,7 @@ export class BrowserHandoffBroker {
         this.enqueueFrame(record, frame),
       );
     } catch (error) {
-      await this.destroy(record.handoffId);
+      await this.destroy(record.handoffId, "activation_failed");
       throw error;
     }
     if (ws.readyState !== ws.OPEN) {
@@ -157,6 +184,7 @@ export class BrowserHandoffBroker {
       record.disconnectTimer = this.timer(
         record.handoffId,
         DISCONNECT_GRACE_MS,
+        "disconnect_timeout",
       );
     }
     clearTimeout(record.tokenTimer);
@@ -164,9 +192,20 @@ export class BrowserHandoffBroker {
     record.resumeToken = randomBytes(32).toString("base64url");
     record.hardExpiresAt = now + HARD_TIMEOUT_MS;
     record.expiresAt = Math.min(now + IDLE_TIMEOUT_MS, record.hardExpiresAt);
-    record.idleTimer = this.timer(record.handoffId, IDLE_TIMEOUT_MS);
-    record.hardTimer = this.timer(record.handoffId, HARD_TIMEOUT_MS);
-    if (record.socket) this.sendAuthenticated(record);
+    record.idleTimer = this.timer(
+      record.handoffId,
+      IDLE_TIMEOUT_MS,
+      "idle_timeout",
+    );
+    record.hardTimer = this.timer(
+      record.handoffId,
+      HARD_TIMEOUT_MS,
+      "hard_timeout",
+    );
+    if (record.socket) {
+      this.sendAuthenticated(record);
+      this.sendTransportCapabilities(record);
+    }
     record.sendAgent({
       type: "browser_handoff_state",
       browserId: record.browser.browserId,
@@ -179,11 +218,10 @@ export class BrowserHandoffBroker {
 
   async input(handoffId: string, raw: unknown): Promise<void> {
     const record = this.records.get(handoffId);
-    if (!record || !record.socket) throw new Error("browser_handoff_inactive");
-    const event = BrowserHandoffInputSchema.safeParse(raw);
-    if (!event.success) throw new Error("browser_input_invalid");
-    if (isClipboardShortcut(event.data))
-      throw new Error("browser_input_invalid");
+    if (!record || !record.socket || record.finishing)
+      throw new Error("browser_handoff_inactive");
+    const message = BrowserHandoffPostAuthClientMessageSchema.safeParse(raw);
+    if (!message.success) throw new Error("browser_input_invalid");
     const second = Math.floor(Date.now() / 1_000);
     if (record.rateSecond !== second) {
       record.rateSecond = second;
@@ -191,30 +229,103 @@ export class BrowserHandoffBroker {
     }
     if (++record.rateCount > MAX_INPUTS_PER_SECOND)
       throw new Error("browser_input_rate_limited");
+    if (message.data.type === "capabilities") {
+      const firstSelection = record.transport.state === "awaiting_capabilities";
+      const selected = record.transport.select({
+        preferWebRtc: config.handoff.transport === "webrtc-preferred",
+        clientSupportsWebRtc: message.data.transports.includes("webrtc"),
+        // No production media provider is present in the current runtime.
+        providerAvailable: this.webRtcProvider.available,
+        peerCapacity:
+          browserHandoffMetrics.snapshot().activePeers <
+          config.handoff.maxPeerConnections,
+      });
+      if (firstSelection)
+        browserHandoffMetrics.transportSelected(selected.transport);
+      if (selected.reason) {
+        if (firstSelection) browserHandoffMetrics.fallback(selected.reason);
+        this.sendControl(record, {
+          type: "transport_state",
+          transport: "jpeg_ws",
+          state: "fallback",
+          reason: selected.reason,
+        });
+      } else {
+        if (selected.transport === "webrtc") {
+          await this.startWebRtc(record);
+          return;
+        }
+        this.sendControl(record, {
+          type: "transport_state",
+          transport: selected.transport,
+          state: "connected",
+        });
+      }
+      return;
+    }
+    if (message.data.type === "handoff_heartbeat") {
+      this.sendControl(record, {
+        type: "handoff_heartbeat_ack",
+        sequence: message.data.sequence,
+      });
+      return;
+    }
+    if (message.data.type === "transport_fallback") {
+      this.fallbackTransport(record, message.data.reason);
+      return;
+    }
+    if (message.data.type === "webrtc_answer") {
+      if (
+        message.data.negotiationId !== record.negotiationId ||
+        !record.peer ||
+        record.transport.state !== "webrtc_negotiating"
+      )
+        throw new Error("browser_webrtc_not_negotiating");
+      await record.peer.acceptAnswer(message.data.description);
+      return;
+    }
+    if (message.data.type === "webrtc_ice_candidate") {
+      if (message.data.negotiationId !== record.negotiationId || !record.peer)
+        throw new Error("browser_webrtc_not_negotiating");
+      await record.peer.addRemoteCandidate(message.data);
+      return;
+    }
+    const event = message.data;
+    if (isClipboardShortcut(event)) throw new Error("browser_input_invalid");
     clearTimeout(record.idleTimer);
     record.expiresAt = Math.min(
       Date.now() + IDLE_TIMEOUT_MS,
       record.hardExpiresAt ?? Date.now(),
     );
-    record.idleTimer = this.timer(record.handoffId, IDLE_TIMEOUT_MS);
-    await record.browser.handoffInput(event.data);
-    this.sendStatus(record, event.data.type);
+    record.idleTimer = this.timer(
+      record.handoffId,
+      IDLE_TIMEOUT_MS,
+      "idle_timeout",
+    );
+    await record.browser.handoffInput(event);
+    this.sendStatus(record, event.type);
   }
 
   async finish(handoffId: string, user: string, chatId: string): Promise<void> {
     const record = this.owned(handoffId, user, chatId);
     if (record.browser.leaseState !== "human_active")
       throw new Error("browser_handoff_inactive");
+    record.finishing = true;
+    const socket = record.socket;
+    record.socket = null;
+    socket?.close(1000, "handoff finishing");
     this.clear(record);
     try {
       await record.browser.finishHandoff();
     } catch (error) {
-      await this.destroy(handoffId);
+      await this.destroy(handoffId, "activation_failed");
       throw error;
     }
     this.records.delete(handoffId);
     this.tokens.revoke(handoffId);
-    record.socket?.close(1000, "handoff complete");
+    record.transport.close();
+    this.closePeer(record);
+    browserHandoffMetrics.handoffEnded("finished");
     record.sendAgent({
       type: "browser_handoff_state",
       browserId: record.browser.browserId,
@@ -225,7 +336,7 @@ export class BrowserHandoffBroker {
 
   async cancel(handoffId: string, user: string, chatId: string): Promise<void> {
     this.owned(handoffId, user, chatId);
-    await this.destroy(handoffId);
+    await this.destroy(handoffId, "cancel");
   }
 
   disconnected(handoffId: string, socket: WebSocket): void {
@@ -236,21 +347,31 @@ export class BrowserHandoffBroker {
     if (record.sendingFrameSocket === socket)
       record.sendingFrameSocket = undefined;
     clearTimeout(record.frameDrainTimer);
+    clearTimeout(record.negotiationTimer);
     record.frameDrainTimer = undefined;
-    record.disconnectTimer = this.timer(handoffId, DISCONNECT_GRACE_MS);
+    record.negotiationTimer = undefined;
+    this.closePeer(record);
+    record.transport.resetForReconnect();
+    record.disconnectTimer = this.timer(
+      handoffId,
+      DISCONNECT_GRACE_MS,
+      "disconnect_timeout",
+    );
   }
 
   async revokeForChat(chatId: string): Promise<void> {
     const pending: Promise<void>[] = [];
     for (const record of this.records.values()) {
       if (record.chatId === chatId)
-        pending.push(this.destroy(record.handoffId));
+        pending.push(this.destroy(record.handoffId, "chat_revoked"));
     }
     await Promise.all(pending);
   }
 
   async disposeAll(): Promise<void> {
-    await Promise.all([...this.records.keys()].map((id) => this.destroy(id)));
+    await Promise.all(
+      [...this.records.keys()].map((id) => this.destroy(id, "shutdown")),
+    );
   }
 
   async revokeBrowser(browserId: string): Promise<boolean> {
@@ -258,7 +379,7 @@ export class BrowserHandoffBroker {
       (candidate) => candidate.browser.browserId === browserId,
     );
     if (!record) return false;
-    await this.destroy(record.handoffId);
+    await this.destroy(record.handoffId, "browser_revoked");
     return true;
   }
 
@@ -298,18 +419,28 @@ export class BrowserHandoffBroker {
     return record;
   }
 
-  private timer(handoffId: string, ms: number): NodeJS.Timeout {
-    const timer = setTimeout(() => void this.destroy(handoffId), ms);
+  private timer(
+    handoffId: string,
+    ms: number,
+    reason: BrowserHandoffCleanupReason,
+  ): NodeJS.Timeout {
+    const timer = setTimeout(() => void this.destroy(handoffId, reason), ms);
     timer.unref();
     return timer;
   }
 
-  private async destroy(handoffId: string): Promise<void> {
+  private async destroy(
+    handoffId: string,
+    reason: BrowserHandoffCleanupReason,
+  ): Promise<void> {
     const record = this.records.get(handoffId);
     if (!record) return;
     this.records.delete(handoffId);
     this.tokens.revoke(handoffId);
+    record.transport.close();
+    browserHandoffMetrics.handoffEnded(reason);
     this.clear(record);
+    this.closePeer(record);
     record.socket?.close(4000, "browser session closed");
     const revision = await record.browser.dispose();
     record.sendAgent({
@@ -342,6 +473,127 @@ export class BrowserHandoffBroker {
     });
   }
 
+  private sendTransportCapabilities(record: HandoffRecord): void {
+    this.sendControl(record, {
+      type: "transport_capabilities",
+      protocolVersion: 1,
+      preferred:
+        config.handoff.transport === "webrtc-preferred" ? "webrtc" : "jpeg_ws",
+      available: this.webRtcProvider.available
+        ? ["webrtc", "jpeg_ws"]
+        : ["jpeg_ws"],
+      videoCodecs: this.webRtcProvider.available ? ["VP8"] : [],
+      iceServers: this.webRtcProvider.available
+        ? createHandoffIceServers(record.handoffId)
+        : [],
+      negotiationTimeoutMs: config.handoff.negotiationTimeoutMs,
+    });
+  }
+
+  private async startWebRtc(record: HandoffRecord): Promise<void> {
+    const negotiationId = randomUUID();
+    record.negotiationId = negotiationId;
+    record.negotiationStartedAt = Date.now();
+    browserHandoffMetrics.peerStarted();
+    record.peerCounted = true;
+    this.sendControl(record, {
+      type: "transport_state",
+      transport: "webrtc",
+      state: "negotiating",
+    });
+    try {
+      const peer = await this.webRtcProvider.createPeer({
+        browser: record.browser,
+        negotiationId,
+        iceServers: createHandoffIceServers(record.handoffId),
+        onCandidate: (candidate) => {
+          if (record.negotiationId !== negotiationId) return;
+          this.sendControl(record, {
+            type: "webrtc_ice_candidate",
+            negotiationId,
+            ...candidate,
+          });
+        },
+        onState: (state, reason) => {
+          if (record.negotiationId !== negotiationId) return;
+          if (state === "connected") {
+            clearTimeout(record.negotiationTimer);
+            record.negotiationTimer = undefined;
+            record.transport.connected();
+            browserHandoffMetrics.negotiationCompleted(
+              Date.now() - (record.negotiationStartedAt ?? Date.now()),
+            );
+            browserHandoffMetrics.iceState("connected");
+            this.sendControl(record, {
+              type: "transport_state",
+              transport: "webrtc",
+              state: "connected",
+            });
+          } else if (state === "failed") {
+            browserHandoffMetrics.iceState("failed");
+            this.fallbackTransport(record, reason ?? "peer_failed");
+          }
+        },
+      });
+      if (
+        record.negotiationId !== negotiationId ||
+        record.transport.state !== "webrtc_negotiating" ||
+        !record.socket
+      ) {
+        void Promise.resolve(peer.close()).catch(() => undefined);
+        return;
+      }
+      record.peer = peer;
+      this.sendControl(record, {
+        type: "webrtc_offer",
+        negotiationId,
+        description: peer.offer,
+      });
+      record.negotiationTimer = setTimeout(
+        () => this.fallbackTransport(record, "negotiation_timeout"),
+        config.handoff.negotiationTimeoutMs,
+      );
+      record.negotiationTimer.unref();
+    } catch {
+      if (
+        record.negotiationId === negotiationId &&
+        record.transport.state === "webrtc_negotiating"
+      )
+        this.fallbackTransport(record, "peer_failed");
+    }
+  }
+
+  private fallbackTransport(
+    record: HandoffRecord,
+    reason: import("@sparklab/shared-types").BrowserHandoffFallbackReason,
+  ): void {
+    if (record.transport.state === "closed") return;
+    if (record.transport.state === "fallback" && !record.peerCounted) return;
+    record.transport.fallback(reason);
+    browserHandoffMetrics.fallback(reason);
+    this.closePeer(record);
+    this.sendControl(record, {
+      type: "transport_state",
+      transport: "jpeg_ws",
+      state: "fallback",
+      reason,
+    });
+  }
+
+  private closePeer(record: HandoffRecord): void {
+    clearTimeout(record.negotiationTimer);
+    record.negotiationTimer = undefined;
+    record.negotiationId = undefined;
+    record.negotiationStartedAt = undefined;
+    const peer = record.peer;
+    record.peer = undefined;
+    if (record.peerCounted) {
+      record.peerCounted = false;
+      browserHandoffMetrics.peerEnded();
+    }
+    if (peer) void Promise.resolve(peer.close()).catch(() => undefined);
+  }
+
   private sendStatus(
     record: HandoffRecord,
     inputType: import("@sparklab/shared-types").BrowserHandoffInput["type"],
@@ -365,6 +617,7 @@ export class BrowserHandoffBroker {
   private enqueueFrame(record: HandoffRecord, frame: Buffer): void {
     // CDP can outpace a slow client. Retain only the newest unsent frame so
     // latency and memory stay bounded while preserving the latest view.
+    if (record.pendingFrame) browserHandoffMetrics.frameDropped();
     record.pendingFrame = frame;
     this.flushFrame(record);
   }

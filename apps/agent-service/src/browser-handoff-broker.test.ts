@@ -6,9 +6,13 @@ import type { BrowserRuntime } from "./browser-runtime.js";
 process.env.AZURE_OPENAI_ENDPOINT ??= "https://test.openai.azure.com";
 process.env.AZURE_OPENAI_API_KEY ??= "test-key";
 process.env.GPT56SOL_DEPLOYMENT ??= "test-deployment";
+process.env.BROWSER_HANDOFF_TRANSPORT ??= "webrtc-preferred";
 const { BrowserHandoffBroker } = await import("./browser-handoff-broker.js");
-const { ignoreScreencastAckFailure, mouseEventParams } =
-  await import("./browser-session-host.js");
+const {
+  ignoreScreencastAckFailure,
+  interactiveViewportOverrideParams,
+  mouseEventParams,
+} = await import("./browser-session-host.js");
 
 class FakeBrowser {
   browserId = "browser-1";
@@ -231,6 +235,141 @@ test("malformed resume frames are rejected before a socket is bound", async () =
   await broker.cancel(issued.handoffId, "alice", "chat-1");
 });
 
+test("post-auth transport negotiation remains on JPEG and heartbeat is bounded", async () => {
+  const { broker, issued } = fixture();
+  const socket = new FakeSocket();
+  await broker.accept(socket as unknown as WebSocket, "alice", {
+    type: "auth",
+    handoffId: issued.handoffId,
+    token: issued.token,
+  });
+  assert.match(String(socket.sent[1] ?? ""), /transport_capabilities/);
+  await broker.input(issued.handoffId, {
+    type: "capabilities",
+    protocolVersion: 1,
+    transports: ["webrtc", "jpeg_ws"],
+    videoCodecs: ["VP8"],
+    trickleIce: true,
+  });
+  assert.match(String(socket.sent.at(-1)), /"transport":"jpeg_ws"/);
+  await broker.input(issued.handoffId, {
+    type: "handoff_heartbeat",
+    sequence: 7,
+  });
+  assert.deepEqual(JSON.parse(String(socket.sent.at(-1))), {
+    type: "handoff_heartbeat_ack",
+    sequence: 7,
+  });
+  await assert.rejects(
+    broker.input(issued.handoffId, {
+      type: "webrtc_answer",
+      negotiationId: "123e4567-e89b-12d3-a456-426614174000",
+      description: { type: "answer", sdp: "v=0\r\n" },
+    }),
+    /browser_webrtc_not_negotiating/,
+  );
+  await broker.cancel(issued.handoffId, "alice", "chat-1");
+});
+
+test("post-auth messages are rate limited per handoff", async () => {
+  const { broker, issued } = fixture();
+  const socket = new FakeSocket();
+  await broker.accept(socket as unknown as WebSocket, "alice", {
+    type: "auth",
+    handoffId: issued.handoffId,
+    token: issued.token,
+  });
+  for (let sequence = 0; sequence < 120; sequence++)
+    await broker.input(issued.handoffId, {
+      type: "handoff_heartbeat",
+      sequence,
+    });
+  await assert.rejects(
+    broker.input(issued.handoffId, {
+      type: "handoff_heartbeat",
+      sequence: 120,
+    }),
+    /browser_input_rate_limited/,
+  );
+  await broker.cancel(issued.handoffId, "alice", "chat-1");
+});
+
+test("provider seam orders offer, answer, ICE and connected state", async () => {
+  const peer = {
+    offer: { type: "offer" as const, sdp: "v=0\r\noffer" },
+    answers: [] as unknown[],
+    candidates: [] as unknown[],
+    closed: false,
+    async acceptAnswer(value: unknown) {
+      this.answers.push(value);
+    },
+    async addRemoteCandidate(value: unknown) {
+      this.candidates.push(value);
+    },
+    close() {
+      this.closed = true;
+    },
+  };
+  let notifyState:
+    ((state: "connected" | "failed" | "closed") => void) | undefined;
+  const broker = new BrowserHandoffBroker({
+    available: true,
+    async createPeer(args) {
+      notifyState = args.onState;
+      args.onCandidate({ candidate: "candidate:server" });
+      return peer;
+    },
+  });
+  const browser = new FakeBrowser();
+  const issued = broker.begin({
+    user: "alice",
+    chatId: "chat-1",
+    browser: browser as unknown as BrowserRuntime,
+    sendAgent: () => undefined,
+    destroyed: () => undefined,
+  });
+  const socket = new FakeSocket();
+  await broker.accept(socket as unknown as WebSocket, "alice", {
+    type: "auth",
+    handoffId: issued.handoffId,
+    token: issued.token,
+  });
+  await broker.input(issued.handoffId, {
+    type: "capabilities",
+    protocolVersion: 1,
+    transports: ["webrtc", "jpeg_ws"],
+    videoCodecs: ["VP8"],
+    trickleIce: true,
+  });
+  const offer = socket.sent
+    .map((value) => (typeof value === "string" ? JSON.parse(value) : null))
+    .find((value) => value?.type === "webrtc_offer") as {
+    negotiationId: string;
+  };
+  assert.ok(offer.negotiationId);
+  await broker.input(issued.handoffId, {
+    type: "webrtc_ice_candidate",
+    negotiationId: offer.negotiationId,
+    candidate: "candidate:client",
+  });
+  await broker.input(issued.handoffId, {
+    type: "webrtc_answer",
+    negotiationId: offer.negotiationId,
+    description: { type: "answer", sdp: "v=0\r\nanswer" },
+  });
+  assert.equal(peer.candidates.length, 1);
+  assert.equal(peer.answers.length, 1);
+  notifyState?.("connected");
+  assert.match(String(socket.sent.at(-1)), /"transport":"webrtc"/);
+  assert.match(String(socket.sent.at(-1)), /"state":"connected"/);
+  notifyState?.("failed");
+  assert.match(String(socket.sent.at(-1)), /"transport":"jpeg_ws"/);
+  assert.match(String(socket.sent.at(-1)), /"state":"fallback"/);
+  assert.equal(peer.closed, true);
+  await broker.finish(issued.handoffId, "alice", "chat-1");
+  assert.equal(peer.closed, true);
+});
+
 test("a failed screencast acknowledgement is consumed", async () => {
   await assert.doesNotReject(
     ignoreScreencastAckFailure(Promise.reject(new Error("target closed"))),
@@ -255,6 +394,24 @@ test("mouse parameters preserve drag buttons and multi-click count", () => {
       button: "right",
       buttons: 3,
       clickCount: 2,
+    },
+  );
+});
+
+test("interactive capture viewport keeps JPEG pixels aligned with CDP input", () => {
+  assert.deepEqual(interactiveViewportOverrideParams(), {
+    width: 1280,
+    height: 720,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  assert.deepEqual(
+    interactiveViewportOverrideParams({ width: 1920, height: 1080 }),
+    {
+      width: 1920,
+      height: 1080,
+      deviceScaleFactor: 1,
+      mobile: false,
     },
   );
 });

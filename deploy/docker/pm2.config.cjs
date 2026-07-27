@@ -57,6 +57,7 @@ const stateEnv = {
 // would crash-loop under pm2. When absent, Agent Chat is simply unavailable and
 // the terminal stack runs untouched.
 const AGENT_ENABLED = Boolean((process.env.AZURE_OPENAI_ENDPOINT || "").trim());
+const BROWSER_DOCKER_RUNTIME = process.env.BROWSER_DOCKER_RUNTIME === "1";
 
 const apps = [
   {
@@ -104,6 +105,24 @@ const apps = [
   },
 ];
 
+if (BROWSER_DOCKER_RUNTIME) {
+  apps.unshift({
+    name: "prod-xvfb",
+    script: "/usr/bin/Xvfb",
+    args: [
+      ":99",
+      "-screen",
+      "0",
+      "1280x720x24",
+      "-nolisten",
+      "tcp",
+      "-noreset",
+    ],
+    interpreter: "none",
+    autorestart: true,
+  });
+}
+
 // Agent Chat — supervised only when Azure OpenAI is configured (see above).
 if (AGENT_ENABLED) {
   apps.push({
@@ -117,6 +136,9 @@ if (AGENT_ENABLED) {
       GATEWAY_URL: `http://127.0.0.1:${GATEWAY_PORT}`,
       ALLOWED_ORIGINS,
       AGENT_HISTORY_DIR: path.join(DATA_DIR, "agent-history"),
+      ...(BROWSER_DOCKER_RUNTIME
+        ? { DISPLAY: process.env.DISPLAY || ":99" }
+        : {}),
     },
   });
 }

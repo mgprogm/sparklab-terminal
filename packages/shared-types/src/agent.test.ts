@@ -8,6 +8,8 @@ import {
   AgentWsClientMessageSchema,
   BrowserHandoffAuthSchema,
   BrowserHandoffInputSchema,
+  BrowserHandoffPostAuthClientMessageSchema,
+  BrowserHandoffServerControlSchema,
 } from "./agent";
 
 describe("browser handoff contracts", () => {
@@ -75,6 +77,44 @@ describe("browser handoff contracts", () => {
     expect(BrowserHandoffAuthSchema.parse(valid)).toEqual(valid);
     expect(() =>
       BrowserHandoffAuthSchema.parse({ ...valid, chatId: "other" }),
+    ).toThrow();
+  });
+
+  it("bounds WebRTC signaling without making raw control APIs representable", () => {
+    const negotiationId = "123e4567-e89b-12d3-a456-426614174000";
+    expect(
+      BrowserHandoffPostAuthClientMessageSchema.parse({
+        type: "webrtc_answer",
+        negotiationId,
+        description: { type: "answer", sdp: "v=0\r\n" },
+      }),
+    ).toMatchObject({ type: "webrtc_answer" });
+    expect(
+      BrowserHandoffServerControlSchema.parse({
+        type: "webrtc_offer",
+        negotiationId,
+        description: { type: "offer", sdp: "v=0\r\n" },
+      }),
+    ).toMatchObject({ type: "webrtc_offer" });
+    expect(() =>
+      BrowserHandoffPostAuthClientMessageSchema.parse({
+        type: "webrtc_answer",
+        negotiationId,
+        description: { type: "offer", sdp: "v=0\r\n" },
+      }),
+    ).toThrow();
+    expect(() =>
+      BrowserHandoffPostAuthClientMessageSchema.parse({
+        type: "webrtc_ice_candidate",
+        negotiationId,
+        candidate: "x".repeat(4097),
+      }),
+    ).toThrow();
+    expect(() =>
+      BrowserHandoffPostAuthClientMessageSchema.parse({
+        type: "cdp",
+        method: "Runtime.evaluate",
+      }),
     ).toThrow();
   });
 });
