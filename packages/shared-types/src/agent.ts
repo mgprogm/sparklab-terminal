@@ -139,6 +139,35 @@ export const AgentDeleteChatSchema = z.object({
 });
 export type AgentDeleteChat = z.infer<typeof AgentDeleteChatSchema>;
 
+const HandoffIdSchema = z.string().uuid();
+
+/** Request manual control of an already-running isolated browser. */
+export const BrowserHandoffRequestSchema = z
+  .object({
+    type: z.literal("browser_handoff_request"),
+    browserId: z.string().min(1).max(128),
+  })
+  .strict();
+export type BrowserHandoffRequest = z.infer<typeof BrowserHandoffRequestSchema>;
+
+/** Return the unchanged browser session to the agent. */
+export const BrowserHandoffFinishSchema = z
+  .object({
+    type: z.literal("browser_handoff_finish"),
+    handoffId: HandoffIdSchema,
+  })
+  .strict();
+export type BrowserHandoffFinish = z.infer<typeof BrowserHandoffFinishSchema>;
+
+/** Destroy the complete isolated browser session. */
+export const BrowserHandoffCancelSchema = z
+  .object({
+    type: z.literal("browser_handoff_cancel"),
+    handoffId: HandoffIdSchema,
+  })
+  .strict();
+export type BrowserHandoffCancel = z.infer<typeof BrowserHandoffCancelSchema>;
+
 /** Discriminated union of all client -> server agent chat messages. */
 export const AgentWsClientMessageSchema = z.discriminatedUnion("type", [
   AgentUserMessageSchema,
@@ -147,6 +176,9 @@ export const AgentWsClientMessageSchema = z.discriminatedUnion("type", [
   AgentPingSchema,
   AgentListChatsSchema,
   AgentDeleteChatSchema,
+  BrowserHandoffRequestSchema,
+  BrowserHandoffFinishSchema,
+  BrowserHandoffCancelSchema,
 ]);
 export type AgentWsClientMessage = z.infer<typeof AgentWsClientMessageSchema>;
 
@@ -383,6 +415,88 @@ export const AgentBrowserClosedSchema = z
   .strict();
 export type AgentBrowserClosed = z.infer<typeof AgentBrowserClosedSchema>;
 
+export const BrowserHandoffReadySchema = z
+  .object({
+    type: z.literal("browser_handoff_ready"),
+    browserId: BrowserIdSchema,
+    handoffId: HandoffIdSchema,
+    token: z.string().min(43).max(128),
+    expiresAt: z.number().int().positive().safe(),
+  })
+  .strict();
+export type BrowserHandoffReady = z.infer<typeof BrowserHandoffReadySchema>;
+
+export const BrowserHandoffStateSchema = z
+  .object({
+    type: z.literal("browser_handoff_state"),
+    browserId: BrowserIdSchema,
+    handoffId: HandoffIdSchema.optional(),
+    state: z.enum(["pending", "human_active", "agent_active", "closed"]),
+    expiresAt: z.number().int().positive().safe().optional(),
+  })
+  .strict();
+export type BrowserHandoffState = z.infer<typeof BrowserHandoffStateSchema>;
+
+// Dedicated /browser-handoff socket. Authentication is the first text frame;
+// subsequent client frames are limited to these input events. There is no raw
+// CDP, clipboard, file, cookie, upload, or download message in this union.
+export const BrowserHandoffAuthSchema = z
+  .object({
+    type: z.literal("auth"),
+    handoffId: HandoffIdSchema,
+    token: z.string().min(43).max(128),
+  })
+  .strict();
+
+const HandoffModifierSchema = z.enum(["Alt", "Control", "Meta", "Shift"]);
+export const BrowserHandoffInputSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("pointer"),
+      action: z.enum(["move", "down", "up"]),
+      x: z.number().finite().min(0).max(1280),
+      y: z.number().finite().min(0).max(720),
+      button: z.enum(["left", "middle", "right"]).optional(),
+      buttons: z
+        .array(z.enum(["left", "middle", "right"]))
+        .max(3)
+        .optional(),
+      clickCount: z.number().int().min(1).max(3).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("wheel"),
+      x: z.number().finite().min(0).max(1280).optional(),
+      y: z.number().finite().min(0).max(720).optional(),
+      deltaX: z.number().finite().min(-2000).max(2000),
+      deltaY: z.number().finite().min(-2000).max(2000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("key"),
+      action: z.enum(["down", "up"]),
+      key: z.string().min(1).max(64),
+      code: z.string().min(1).max(64),
+      modifiers: z.array(HandoffModifierSchema).max(4),
+    })
+    .strict(),
+  z
+    .object({ type: z.literal("text"), text: z.string().min(1).max(4096) })
+    .strict(),
+  z
+    .object({
+      type: z.literal("resize"),
+      width: z.number().int().min(320).max(1280),
+      height: z.number().int().min(240).max(720),
+    })
+    .strict(),
+  z.object({ type: z.literal("ping") }).strict(),
+]);
+export type BrowserHandoffAuth = z.infer<typeof BrowserHandoffAuthSchema>;
+export type BrowserHandoffInput = z.infer<typeof BrowserHandoffInputSchema>;
+
 /** Discriminated union of all server -> client agent chat messages. */
 export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatStartedSchema,
@@ -398,5 +512,7 @@ export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatHistorySchema,
   AgentBrowserViewSchema,
   AgentBrowserClosedSchema,
+  BrowserHandoffReadySchema,
+  BrowserHandoffStateSchema,
 ]);
 export type AgentWsServerMessage = z.infer<typeof AgentWsServerMessageSchema>;

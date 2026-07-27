@@ -9,6 +9,7 @@ process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 
 const { TOOLS, WRITE_TOOLS, describeCall, executeTool } =
   await import("./tools.js");
+const { gateway } = await import("./gateway-client.js");
 
 function toolNames(): string[] {
   return TOOLS.map((t) => t.function.name);
@@ -24,6 +25,15 @@ test("the standalone file tools were removed (use run_codex instead)", () => {
 
 test("run_codex is exposed as a tool", () => {
   assert.ok(toolNames().includes("run_codex"), "run_codex missing from TOOLS");
+});
+
+test("browser handoff is an explicit one-time approved tool", () => {
+  assert.ok(toolNames().includes("browser_request_handoff"));
+  assert.equal(WRITE_TOOLS.has("browser_request_handoff"), true);
+  assert.equal(
+    describeCall("browser_request_handoff", {}),
+    "take control of the isolated browser",
+  );
 });
 
 test("run_codex is a WRITE tool (approval-gated, consequential)", () => {
@@ -69,4 +79,47 @@ test("run_codex short-circuits when prompt is missing (no gateway call)", async 
     await executeTool("run_codex", { session_id: "web-x" }),
     "error: session_id and prompt are required",
   );
+});
+
+test("run_codex forwards agent-service Azure config outside the JSON body", async () => {
+  const originalFetch = globalThis.fetch;
+  let seenHeaders: Headers | undefined;
+  let seenBody = "";
+  globalThis.fetch = async (input, init) => {
+    if (String(input).endsWith("/api/auth/login")) {
+      return new Response(null, {
+        status: 204,
+        headers: { "set-cookie": "gw_session=test-session; HttpOnly" },
+      });
+    }
+    seenHeaders = new Headers(init?.headers);
+    seenBody = String(init?.body ?? "");
+    return new Response(
+      JSON.stringify({
+        mode: "read-only",
+        cwd: "/tmp/project",
+        exitCode: 0,
+        output: "ok",
+        truncated: false,
+        durationMs: 1,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    await gateway.runCodex("web-x", { prompt: "inspect this project" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(seenHeaders?.get("x-sparklab-codex-azure-api-key"), "test-key");
+  assert.equal(
+    seenHeaders?.get("x-sparklab-codex-azure-endpoint"),
+    "https://example.invalid",
+  );
+  assert.equal(
+    seenHeaders?.get("x-sparklab-codex-azure-deployment"),
+    "test-deployment",
+  );
+  assert.ok(!seenBody.includes("test-key"), "secret leaked into request body");
 });

@@ -6,7 +6,78 @@ import {
   AgentWsServerMessageSchema,
   MAX_BROWSER_SCREENSHOT_BASE64_LENGTH,
   AgentWsClientMessageSchema,
+  BrowserHandoffAuthSchema,
+  BrowserHandoffInputSchema,
 } from "./agent";
+
+describe("browser handoff contracts", () => {
+  it("keeps agent control frames strict", () => {
+    expect(
+      AgentWsClientMessageSchema.parse({
+        type: "browser_handoff_request",
+        browserId: "browser-1",
+      }),
+    ).toMatchObject({ browserId: "browser-1" });
+    expect(() =>
+      AgentWsClientMessageSchema.parse({
+        type: "browser_handoff_request",
+        browserId: "browser-1",
+        cdp: "ws://forbidden",
+      }),
+    ).toThrow();
+  });
+
+  it("allows only bounded input and never raw CDP or clipboard", () => {
+    expect(
+      BrowserHandoffInputSchema.parse({
+        type: "pointer",
+        action: "down",
+        x: 1280,
+        y: 720,
+        button: "left",
+        buttons: ["left"],
+        clickCount: 2,
+      }),
+    ).toMatchObject({ type: "pointer" });
+    expect(() =>
+      BrowserHandoffInputSchema.parse({
+        type: "cdp",
+        method: "Network.getAllCookies",
+      }),
+    ).toThrow();
+    expect(() =>
+      BrowserHandoffInputSchema.parse({ type: "clipboard", text: "secret" }),
+    ).toThrow();
+    expect(() =>
+      BrowserHandoffInputSchema.parse({
+        type: "pointer",
+        action: "down",
+        x: 10,
+        y: 10,
+        clickCount: 4,
+      }),
+    ).toThrow();
+    expect(() =>
+      BrowserHandoffInputSchema.parse({
+        type: "resize",
+        width: 1281,
+        height: 720,
+      }),
+    ).toThrow();
+  });
+
+  it("requires the one-time bearer token in a strict first frame", () => {
+    const valid = {
+      type: "auth",
+      handoffId: "123e4567-e89b-12d3-a456-426614174000",
+      token: "a".repeat(43),
+    };
+    expect(BrowserHandoffAuthSchema.parse(valid)).toEqual(valid);
+    expect(() =>
+      BrowserHandoffAuthSchema.parse({ ...valid, chatId: "other" }),
+    ).toThrow();
+  });
+});
 
 describe("terminal-linked chat frames", () => {
   it("accepts terminal-scoped history requests and chat ownership", () => {

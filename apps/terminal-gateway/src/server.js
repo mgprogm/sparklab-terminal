@@ -1006,9 +1006,11 @@ function capText(s, n) {
 // it must NOT inherit the gateway's full process.env (VAPID keys, the auth
 // password/hash, etc.). We pass only what a CLI needs to run plus Codex's OWN
 // auth/config namespace (CODEX_*/OPENAI_*, where its API key or login lives —
-// that is Codex's credential, not the gateway's). SSH askpass vars are merged so
-// the remote/password-auth path still connects; ssh never forwards this env to
-// the remote host anyway.
+// that is Codex's credential, not the gateway's). For a local session, the
+// agent-service may also provide its Azure configuration in internal request
+// headers; those values exist only in the Codex child env. They are deliberately
+// not put in argv or forwarded over SSH. SSH askpass vars are merged so the
+// remote/password-auth path still connects.
 const CODEX_ENV_ALLOWLIST = [
   "PATH",
   "HOME",
@@ -1024,13 +1026,29 @@ const CODEX_ENV_ALLOWLIST = [
   "XDG_DATA_HOME",
   "XDG_CACHE_HOME",
 ];
-function codexChildEnv(server) {
+const CODEX_AZURE_HEADERS = {
+  "x-sparklab-codex-azure-endpoint": "AZURE_OPENAI_ENDPOINT",
+  "x-sparklab-codex-azure-api-key": "AZURE_OPENAI_API_KEY",
+  "x-sparklab-codex-azure-api-version": "AZURE_OPENAI_API_VERSION",
+  "x-sparklab-codex-azure-deployment": "GPT56SOL_DEPLOYMENT",
+};
+function codexChildEnv(server, headers) {
   const env = {};
   for (const k of CODEX_ENV_ALLOWLIST) {
     if (process.env[k] != null) env[k] = process.env[k];
   }
   for (const k of Object.keys(process.env)) {
     if (/^(CODEX_|OPENAI_)/.test(k)) env[k] = process.env[k];
+  }
+  // Passing a secret to a remote process would require placing it in the SSH
+  // command/argv or relying on AcceptEnv. Do neither: remote Codex uses its own
+  // remote CODEX_HOME/credential, while local Codex can reuse agent-service's
+  // already-required Azure configuration.
+  if (!server || server.type === "local") {
+    for (const [header, envName] of Object.entries(CODEX_AZURE_HEADERS)) {
+      const value = headers[header];
+      if (typeof value === "string" && value.trim()) env[envName] = value;
+    }
   }
   return { ...env, ...sshEnvFor(server) };
 }
@@ -1973,7 +1991,7 @@ async function handleApi(req, res, url) {
         timeout: CODEX_TIMEOUT_MS,
         // Override childEnvFor's full-env inheritance with a curated allowlist —
         // Codex must not see the gateway's secrets (see codexChildEnv).
-        env: codexChildEnv(server),
+        env: codexChildEnv(server, req.headers),
       });
     } catch (err) {
       const stderr = String((err && (err.stderr || err.message)) || "");

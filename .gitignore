@@ -44,6 +44,7 @@ coverage/
 .env
 .env.local
 .env*.local
+.env.bak.*
 # Docker env (real secrets); the *.example template stays checked in.
 .env.docker
 !.env.docker.example

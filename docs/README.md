@@ -1,20 +1,22 @@
 # Documentation index
 
-| Document                                                     | What it covers                                                                                                          |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| [GETTING-STARTED.md](GETTING-STARTED.md)                     | Prerequisites, install, starting dev, ports, environment variables                                                      |
-| [ARCHITECTURE.md](ARCHITECTURE.md)                           | Monorepo layout, the three-lifetimes design, every app and package                                                      |
-| [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)                 | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
-| [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                       | Agent Chat: `/agent`, auth, terminal/browser tools, approvals, history, and safety model                                |
-| [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md)                     | Virtual-browser setup, startup, code map, security invariants, and troubleshooting                                      |
-| [TESTING.md](TESTING.md)                                     | Unit tests, Playwright E2E, the eight gates (six cut-over + auth + scrollback), CI pipeline                             |
-| [CONTRIBUTING.md](CONTRIBUTING.md)                           | Code conventions: feature folders, imports, state rules, commits                                                        |
-| [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                         | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior) |
-| [FRONTEND-PLATFORM-PLAN.md](FRONTEND-PLATFORM-PLAN.md)       | The implementation plan that produced the current monorepo (executed 2026-07-14; kept as a decision record)             |
-| [DEPLOYMENT.md](DEPLOYMENT.md)                               | Production deployment: reverse-proxy topology, environment variables, Caddyfile, systemd, safety checklist              |
-| [PHASE-3-HARDENING-PLAN.md](PHASE-3-HARDENING-PLAN.md)       | Workstreams A (auth/hardening) + B (scrollback, session status) shipped 2026-07-14                                      |
-| [MULTI-SERVER-PLAN.md](MULTI-SERVER-PLAN.md)                 | Design proposal (not implemented): "Connected Servers" — create sessions on any registered server via SSH + remote tmux |
-| [SESSION-ORGANIZATION-PLAN.md](SESSION-ORGANIZATION-PLAN.md) | Org → Project session grouping: metadata fields, PATCH endpoint, two-level collapsible sidebar tree                     |
+| Document                                                       | What it covers                                                                                                          |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| [GETTING-STARTED.md](GETTING-STARTED.md)                       | Prerequisites, install, starting dev, ports, environment variables                                                      |
+| [ARCHITECTURE.md](ARCHITECTURE.md)                             | Monorepo layout, the three-lifetimes design, every app and package                                                      |
+| [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)                   | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
+| [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                         | Agent Chat: `/agent`, auth, terminal/browser tools, approvals, history, and safety model                                |
+| [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md)                       | Virtual-browser setup, startup, code map, security invariants, and troubleshooting                                      |
+| [BROWSER-HANDOFF-DESIGN.md](BROWSER-HANDOFF-DESIGN.md)         | Implemented shared interactive-browser architecture, protocol, security model, and lifecycle                            |
+| [BROWSER-HANDOFF-OPERATIONS.md](BROWSER-HANDOFF-OPERATIONS.md) | Browser handoff operations, virtual-mouse semantics, layered diagnosis, production E2E, and incident runbook            |
+| [TESTING.md](TESTING.md)                                       | Unit tests, Playwright E2E, the eight gates (six cut-over + auth + scrollback), CI pipeline                             |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                             | Code conventions: feature folders, imports, state rules, commits                                                        |
+| [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md)                           | Original Phase-1 design & rationale for the tmux-backed terminal (historical, still authoritative for gateway behavior) |
+| [FRONTEND-PLATFORM-PLAN.md](FRONTEND-PLATFORM-PLAN.md)         | The implementation plan that produced the current monorepo (executed 2026-07-14; kept as a decision record)             |
+| [DEPLOYMENT.md](DEPLOYMENT.md)                                 | Production deployment: reverse-proxy topology, environment variables, Caddyfile, systemd, safety checklist              |
+| [PHASE-3-HARDENING-PLAN.md](PHASE-3-HARDENING-PLAN.md)         | Workstreams A (auth/hardening) + B (scrollback, session status) shipped 2026-07-14                                      |
+| [MULTI-SERVER-PLAN.md](MULTI-SERVER-PLAN.md)                   | Design proposal (not implemented): "Connected Servers" — create sessions on any registered server via SSH + remote tmux |
+| [SESSION-ORGANIZATION-PLAN.md](SESSION-ORGANIZATION-PLAN.md)   | Org → Project session grouping: metadata fields, PATCH endpoint, two-level collapsible sidebar tree                     |
 
 ## Quick orientation
 

@@ -1,6 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isPublicIp, validateBrowserUrl } from "./browser-security.js";
+import {
+  isPublicIp,
+  sanitizePublicUrl,
+  validateBrowserUrl,
+} from "./browser-security.js";
+
+test("live browser URLs omit credentials, OAuth query values, and fragments", () => {
+  assert.equal(
+    sanitizePublicUrl(
+      "https://alice:secret@example.com/callback?code=otp-secret#token",
+    ),
+    "https://example.com/callback",
+  );
+  assert.equal(
+    sanitizePublicUrl(
+      "/next?access_token=secret#private",
+      "https://example.com/start",
+    ),
+    "https://example.com/next",
+  );
+});
 
 test("rejects private, reserved, and metadata addresses", () => {
   for (const address of [

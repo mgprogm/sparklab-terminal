@@ -54,7 +54,8 @@ connect).
 
 ### Agent Chat (only if deploying `apps/agent-service`)
 
-Set in `apps/agent-service/.env` (gitignored). If you are not deploying Agent Chat, skip this table and the `/agent` Caddy route.
+Set in `apps/agent-service/.env` (gitignored). If you are not deploying Agent
+Chat, skip this table and the `/agent` and `/browser-handoff` Caddy routes.
 
 | Variable                                      | Default                 | Required            | Description                                                                                                               |
 | --------------------------------------------- | ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -69,6 +70,7 @@ Set in `apps/agent-service/.env` (gitignored). If you are not deploying Agent Ch
 | `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009` | **Yes**             | Inlined at build time into the Next.js app — the public agent WS URL: `wss://term.example.com` (same origin as the site). |
 | `BROWSER_USE_PROJECT`                         | _(unset)_               | No                  | Trusted Browser Use checkout. When set, enables one isolated local Chromium/MCP process per chat.                         |
 | `BROWSER_USE_HEADLESS`                        | `true`                  | No                  | Keep per-chat Chromium headless in deployment.                                                                            |
+| `BROWSER_USE_EXECUTABLE_PATH`                 | _(auto-detect)_         | No                  | Explicit sandboxed Chromium executable, e.g. `/snap/bin/chromium` on Ubuntu.                                              |
 
 Because Caddy serves the agent WS at the same public origin as the site,
 `NEXT_PUBLIC_AGENT_URL` is typically the same host as `NEXT_PUBLIC_GATEWAY_URL`
@@ -214,7 +216,8 @@ enabled: `NEXT_PUBLIC_GATEWAY_URL=wss://term.example.com NEXT_PUBLIC_AGENT_URL=w
 See `deploy/Caddyfile` for the full example. Key points:
 
 - `/attach` and `/api/*` → `reverse_proxy 127.0.0.1:3007` (gateway)
-- `/agent` → `reverse_proxy 127.0.0.1:3009` (agent service; omit if not deploying Agent Chat)
+- `/agent` and `/browser-handoff` → `reverse_proxy 127.0.0.1:3009`
+  (agent service; omit if not deploying Agent Chat)
 - Everything else → `reverse_proxy 127.0.0.1:3000` (Next.js app)
 - Caddy issues and renews TLS certificates automatically for named hosts.
 

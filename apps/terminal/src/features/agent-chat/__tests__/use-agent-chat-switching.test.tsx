@@ -5,14 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAgentStore } from "../store";
 import { useAgentChat } from "../use-agent-chat";
 
+import type { BrowserHandoffControlFrame } from "@/features/browser-handoff";
 import type { AgentWsServerMessage } from "@sparklab/shared-types";
 import type { PropsWithChildren } from "react";
 
+import { useBrowserHandoffStore } from "@/features/browser-handoff";
+import { useBrowserViewStore } from "@/features/browser-view";
 import { useTerminalStore } from "@/features/terminal/store";
 
 const connectionMocks = vi.hoisted(() => {
   type Callbacks = {
     onFrame: (frame: AgentWsServerMessage) => void;
+    onHandoffFrame?: (frame: BrowserHandoffControlFrame) => void;
     onConnected: (connected: boolean) => void;
   };
   class MockAgentConnection {
@@ -66,6 +70,8 @@ describe("useAgentChat terminal switching", () => {
       legacyChatId: null,
       entries: [],
     });
+    useBrowserViewStore.getState().clear();
+    useBrowserHandoffStore.getState().clear();
   });
 
   afterEach(() => {
@@ -103,5 +109,32 @@ describe("useAgentChat terminal switching", () => {
     expect(useAgentStore.getState().chatIdsByTerminal).toEqual({
       "local/web-b": "chat-b",
     });
+  });
+
+  it("reopens a hidden browser view when the active handoff is republished", () => {
+    renderHook(() => useAgentChat(), { wrapper });
+    const connection = connectionMocks.MockAgentConnection.instances[0]!;
+    act(() => {
+      useBrowserViewStore.getState().ingest({
+        type: "browser_view",
+        browserId: "browser-1",
+        revision: 1,
+        url: "https://example.com/login",
+        title: "Sign in",
+        viewport: { width: 1280, height: 720 },
+        screenshot: { mediaType: "image/png", data: "AA==" },
+      });
+      useBrowserViewStore.getState().hide();
+      connection.callbacks.onHandoffFrame?.({
+        type: "browser_handoff_state",
+        browserId: "browser-1",
+        handoffId: "handoff-1",
+        state: "human_active",
+        expiresAt: Date.now() + 60_000,
+      });
+    });
+
+    expect(useBrowserViewStore.getState().visible).toBe(true);
+    expect(useBrowserHandoffStore.getState().handoffId).toBe("handoff-1");
   });
 });

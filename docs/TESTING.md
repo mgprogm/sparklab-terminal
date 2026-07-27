@@ -35,6 +35,19 @@ They clean up their tmux sessions; if interrupted, check `tmux ls` and `tmux kil
 
 `pnpm --filter @sparklab/agent-service smoke` — a live end-to-end check of the Agent Chat backend. It spawns a real gateway (open mode) + the agent service, opens a terminal-owned WS with `terminalSessionId` and `newChat=1`, verifies `chat_started` echoes that owner, sends one message, auto-approves the write, and asserts the agent created a session in tmux through the approval flow, then cleans up. It makes **one real Azure call**, so it needs a valid `apps/agent-service/.env` and is not part of CI (it's a manual/local integration check). The model is slow (~15–20s/call), so the whole run takes ~1min.
 
+## 1b. Browser handoff production diagnostic
+
+The interactive handoff spans frontend pointer capture, a dedicated WebSocket,
+the broker, internal CDP, binary screencast frames, and canvas decoding. Unit
+tests cannot alone prove that deployed reverse-proxy and browser behavior.
+
+Use the bounded manual E2E in
+[`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md) after changes
+to that path. It requires a valid agent configuration and makes real Azure and
+public-network calls, so it is not part of CI. Use a fresh temporary
+terminal/chat, synthetic input only, ephemeral frame hashes instead of saved
+screenshots, and exact-id cleanup. Do not run it inside an active user handoff.
+
 ## 2. Unit tests (Vitest)
 
 Shared presets in `@sparklab/config-vitest` (`base` = node env, `react` = jsdom + Testing Library).
@@ -63,6 +76,12 @@ Shared presets in `@sparklab/config-vitest` (`base` = node env, `react` = jsdom 
 | `apps/terminal/.../agent-chat/__tests__/store-history.test.ts`             | Terminal-aware chat reducers: per-terminal latest ids, switch reset, list/history replay replacement, reconnect idempotency, failed tools, new-chat reset                                                                                                                                                     | 7     |
 | `apps/terminal/.../agent-chat/__tests__/store-persist.test.ts`             | Persists the terminal→latest-chat map (not transient current chat/transcript) and migrates the former global `chatId`                                                                                                                                                                                         | 2     |
 | `apps/terminal/.../agent-chat/__tests__/use-agent-chat-switching.test.tsx` | Rapid A→B terminal switch: opens distinct connections and ignores a late `chat_started` frame from A                                                                                                                                                                                                          | 1     |
+| `apps/terminal/.../browser-handoff/__tests__/interactive-browser.test.tsx` | Bounded canvas coordinate mapping, mouse button/click count, virtual cursor state, and coarse input ACK rendering                                                                                                                                                                                             | 3     |
+| `apps/terminal/.../browser-handoff/__tests__/input-scheduler.test.ts`      | Coalesced pointer movement/wheel input and ordered flushing before click/key events                                                                                                                                                                                                                           | 3     |
+| `apps/terminal/.../browser-handoff/__tests__/connection.test.ts`           | One-time handoff authentication, binary frame filtering, reconnect behavior, and input-kind ACK dispatch                                                                                                                                                                                                      | 5     |
+| `apps/terminal/.../browser-handoff/__tests__/frame-renderer.test.ts`       | One active frame decode plus one latest replaceable pending frame                                                                                                                                                                                                                                             | 1     |
+| `apps/agent-service/src/browser-handoff-broker.test.ts`                    | Handoff ownership, resume, stale-socket safety, cleanup, binary backpressure, and 10 FPS pacing                                                                                                                                                                                                               | 9     |
+| `apps/agent-service/src/browser-session-host.test.ts`                      | Internal CDP mouse button/drag/multi-click mapping and safe screencast ACK failure handling                                                                                                                                                                                                                   | 2     |
 | `apps/agent-service/src/history.test.ts`                                   | Latest-chat resolution per terminal, cross-terminal relink/delete rejection, and removal of both durable chat files                                                                                                                                                                                           | 3     |
 
 Convention: tests live in `__tests__/` beside the feature (or next to the source in packages). Use the `react` preset for anything touching the DOM.
@@ -114,4 +133,5 @@ Git hooks (husky): pre-commit runs `lint-staged` (prettier on staged files — e
 | Session status fields / badges                            | session-list-status tests + shared-types tests                                            |
 | Agent REST (`/screen`, `/keys`)                           | `test:agent-endpoints` + shared-types (`agent.ts`)                                        |
 | Agent loop / tools / WS protocol                          | `agent-service` typecheck + `agent-service` smoke                                         |
+| Browser handoff canvas/socket/broker/CDP path             | Focused handoff tests + both typechecks + manual production diagnostic runbook            |
 | Agent-chat store, terminal switching, or history protocol | Agent-chat store/switching Vitest suites + shared-types + `agent-service` tests/typecheck |

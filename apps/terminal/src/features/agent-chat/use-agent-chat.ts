@@ -17,6 +17,7 @@ import { AgentConnection } from "./connection";
 import { useAgentStore } from "./store";
 
 import { authKeys } from "@/features/auth";
+import { useBrowserHandoffStore } from "@/features/browser-handoff";
 import { useBrowserViewStore } from "@/features/browser-view";
 import { useTerminalStore } from "@/features/terminal/store";
 
@@ -42,6 +43,7 @@ export function useAgentChat() {
       connectionTerminalSessionId = terminalSessionId;
       const ingest = useAgentStore.getState().ingest;
       const ingestBrowser = useBrowserViewStore.getState().ingest;
+      const ingestHandoff = useBrowserHandoffStore.getState().ingestControl;
       const setConnected = useAgentStore.getState().setConnected;
       conn = new AgentConnection(
         {
@@ -52,9 +54,24 @@ export function useAgentChat() {
               frame.type === "browser_closed"
             ) {
               ingestBrowser(frame);
+              if (
+                frame.type === "browser_closed" &&
+                useBrowserHandoffStore.getState().browserId === frame.browserId
+              )
+                useBrowserHandoffStore.getState().clear();
               return;
             }
             ingest(frame);
+          },
+          onHandoffFrame: (frame) => {
+            if (generation !== connectionGeneration) return;
+            ingestHandoff(frame);
+            if (
+              frame.type === "browser_handoff_ready" ||
+              frame.state === "pending" ||
+              frame.state === "human_active"
+            )
+              useBrowserViewStore.getState().show();
           },
           onConnected: (connected) => {
             if (generation === connectionGeneration) setConnected(connected);
@@ -83,6 +100,7 @@ export function useAgentChat() {
         useAgentStore.getState().setConnected(false);
       }
       useBrowserViewStore.getState().clear();
+      useBrowserHandoffStore.getState().clear();
       useAgentStore.getState().beginTerminalSwitch(null);
       return;
     }
@@ -93,6 +111,7 @@ export function useAgentChat() {
     const resumeChatId =
       state.chatIdsByTerminal[activeSessionId] ?? state.legacyChatId;
     useBrowserViewStore.getState().clear();
+    useBrowserHandoffStore.getState().clear();
     state.beginTerminalSwitch(activeSessionId, resumeChatId);
     openConnection(activeSessionId, resumeChatId ?? null);
   }, [activeSessionId, panelOpen, openConnection]);
@@ -126,6 +145,7 @@ export function useAgentChat() {
   const newChat = useCallback(() => {
     if (!activeSessionId) return;
     useBrowserViewStore.getState().clear();
+    useBrowserHandoffStore.getState().clear();
     useAgentStore.getState().beginTerminalSwitch(activeSessionId);
     openConnection(activeSessionId, null, true);
   }, [activeSessionId, openConnection]);
@@ -136,6 +156,7 @@ export function useAgentChat() {
       if (!activeSessionId) return;
       if (chatId === useAgentStore.getState().chatId) return;
       useBrowserViewStore.getState().clear();
+      useBrowserHandoffStore.getState().clear();
       // Clear now; chat_history will replace with the reconstructed transcript.
       // loadingChat keeps the panel on "Loading chat…" (not the new-chat empty
       // state) until that replay arrives.
@@ -176,3 +197,11 @@ export function useAgentChat() {
     deleteChat,
   };
 }
+
+/** Control-plane messages intentionally bypass chat entries and optimistic UI. */
+export const requestBrowserHandoff = (browserId: string) =>
+  conn?.requestBrowserHandoff(browserId);
+export const finishBrowserHandoff = (handoffId: string) =>
+  conn?.finishBrowserHandoff(handoffId);
+export const cancelBrowserHandoff = (handoffId: string) =>
+  conn?.cancelBrowserHandoff(handoffId);

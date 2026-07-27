@@ -88,8 +88,8 @@ const apps = [
   },
   {
     // Single-origin reverse proxy — the ONLY process bound to 0.0.0.0 so the
-    // published container port reaches it. /attach,/api → gateway; /agent →
-    // agent; else → terminal.
+    // published container port reaches it. /attach,/api → gateway;
+    // /agent,/browser-handoff → agent; else → terminal.
     name: "prod-proxy",
     cwd: root,
     script: "prod-proxy.cjs",

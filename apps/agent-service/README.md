@@ -44,6 +44,12 @@ Required env (see `.env.example` and the table in
 **fails fast** at startup if a required Azure var is missing. `.env` is
 gitignored — never commit the key.
 
+The same Azure configuration is forwarded for each local `run_codex` call in
+internal Gateway request headers and exists only in the Codex child environment.
+It is never included in the prompt, JSON body, approval card, command argv, or
+logs. Codex on a remote server must use credentials configured on that server;
+the agent does not forward secrets through SSH.
+
 To enable virtual-browser tools, set `BROWSER_USE_PROJECT` to a trusted local
 Browser Use checkout. In that checkout, install Python dependencies and
 Chromium with `uv sync` and `uvx browser-use install`. `uv` must be on the agent

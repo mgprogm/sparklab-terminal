@@ -19,12 +19,14 @@ export const WRITE_TOOL_NAMES = new Set([
   "run_command",
   "create_session",
   "browser_act",
+  "browser_request_handoff",
 ]);
 
 export const BROWSER_TOOL_NAMES = new Set([
   "browser_observe",
   "browser_list_tabs",
   "browser_act",
+  "browser_request_handoff",
 ]);
 
 export function toolIcon(tool: string): LucideIcon {
@@ -42,6 +44,7 @@ export function toolIcon(tool: string): LucideIcon {
     case "browser_list_tabs":
       return List;
     case "browser_act":
+    case "browser_request_handoff":
       return MousePointer2;
     case "type_text":
     case "press_keys":

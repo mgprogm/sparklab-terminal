@@ -4,16 +4,18 @@
  * Fronts all three services on ONE host/port so a single public tunnel
  * (loclx) serves everything from one origin. That is what keeps the
  * `gw_session` cookie first-party: the browser sends it to the gateway
- * (/attach, /api/*) AND the agent (/agent) because they share the origin.
+ * (/attach, /api/*) AND the agent (/agent, /browser-handoff) because they
+ * share the origin.
  * Splitting them across separate subdomains breaks the agent's cookie auth
  * (host-only cookie never reaches the agent host) — see docs/LOCAL-PROD.md.
  *
  * Zero dependencies (node http + net). Routes by path prefix:
  *   /attach, /api/*  -> gateway  (127.0.0.1:3107)
- *   /agent           -> agent    (127.0.0.1:3109)
+ *   /agent, /browser-handoff -> agent (127.0.0.1:3109)
  *   everything else  -> terminal (127.0.0.1:3100)
  *
- * WebSocket upgrades (/attach, /agent) are proxied by piping raw sockets.
+ * WebSocket upgrades (/attach, /agent, /browser-handoff) are proxied by
+ * piping raw sockets.
  */
 const http = require("node:http");
 const net = require("node:net");
@@ -39,6 +41,7 @@ function route(url) {
   if (path === "/attach" || path.startsWith("/attach/")) return GATEWAY;
   if (path === "/api" || path.startsWith("/api/")) return GATEWAY;
   if (path === "/agent" || path.startsWith("/agent/")) return AGENT;
+  if (path === "/browser-handoff") return AGENT;
   return TERMINAL;
 }
 
@@ -85,6 +88,6 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(
-    `[prod-proxy] http://${HOST}:${PORT} → term:${TERMINAL.port} · gw:${GATEWAY.port} (/attach,/api) · agent:${AGENT.port} (/agent)`,
+    `[prod-proxy] http://${HOST}:${PORT} → term:${TERMINAL.port} · gw:${GATEWAY.port} (/attach,/api) · agent:${AGENT.port} (/agent,/browser-handoff)`,
   );
 });

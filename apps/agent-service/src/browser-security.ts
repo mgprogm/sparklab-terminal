@@ -1,4 +1,20 @@
 import { isIP } from "node:net";
+
+/** Strip URL material that must not reach model output, UI chrome, or logs. */
+export function sanitizePublicUrl(value: string, base?: string): string {
+  if (value === "about:blank") return value;
+  try {
+    const parsed = base ? new URL(value, base) : new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
 import { lookup } from "node:dns/promises";
 
 const BLOCKED_HOSTS = new Set([

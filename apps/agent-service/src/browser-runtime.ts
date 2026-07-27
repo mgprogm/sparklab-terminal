@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { BrowserHandoffInput } from "@sparklab/shared-types";
 import { config, CAPS } from "./config.js";
-import { validateBrowserUrl } from "./browser-security.js";
-import { SafeBrowserProxy } from "./browser-proxy.js";
+import { BrowserControlLease } from "./browser-control-lease.js";
+import { BrowserSessionHost } from "./browser-session-host.js";
+import { sanitizePublicUrl, validateBrowserUrl } from "./browser-security.js";
 
 interface McpContent {
   type: string;
@@ -51,7 +52,6 @@ const MAX_MCP_LINE_BYTES = 4 * 1024 * 1024;
 export class BrowserRuntime {
   readonly browserId = randomUUID();
   private child: ChildProcessWithoutNullStreams | null = null;
-  private tempDir: string | null = null;
   private nextId = 1;
   private revision = 0;
   private pending = new Map<
@@ -60,13 +60,21 @@ export class BrowserRuntime {
   >();
   private starting: Promise<void> | null = null;
   private lastElements = new Map<number, string>();
-  private proxy: SafeBrowserProxy | null = null;
+  private host: BrowserSessionHost;
+  private lease = new BrowserControlLease();
   private closed = false;
   private disposing: Promise<number> | null = null;
 
   constructor(
     private onUnexpectedClose?: (browserId: string, revision: number) => void,
-  ) {}
+  ) {
+    this.host = new BrowserSessionHost(() => {
+      if (this.closed) return;
+      void this.dispose().then((revision) =>
+        this.onUnexpectedClose?.(this.browserId, revision),
+      );
+    });
+  }
 
   get isActive(): boolean {
     return this.child !== null || this.starting !== null;
@@ -76,7 +84,12 @@ export class BrowserRuntime {
     return this.closed;
   }
 
+  get leaseState() {
+    return this.lease.state;
+  }
+
   async observe(signal?: AbortSignal): Promise<BrowserCallResult> {
+    this.lease.assertAgent();
     const content = await this.call(
       "browser_get_state",
       { include_screenshot: true },
@@ -86,14 +99,16 @@ export class BrowserRuntime {
   }
 
   async listTabs(signal?: AbortSignal): Promise<BrowserCallResult> {
+    this.lease.assertAgent();
     const content = await this.call("browser_list_tabs", {}, signal);
-    return { content: extractText(content) };
+    return { content: sanitizeOutputText(extractText(content)) };
   }
 
   async act(
     action: BrowserAction,
     signal?: AbortSignal,
   ): Promise<BrowserCallResult> {
+    this.lease.assertAgent();
     let tool: string;
     let args: Record<string, unknown>;
     switch (action.action) {
@@ -140,7 +155,7 @@ export class BrowserRuntime {
     const actionText =
       action.action === "type"
         ? "Typed [redacted] into browser element"
-        : extractText(actionContent);
+        : sanitizeOutputText(extractText(actionContent));
     return {
       content: `${actionText}\n${result.content}`,
       snapshot: result.snapshot,
@@ -154,6 +169,7 @@ export class BrowserRuntime {
 
   private async doDispose(): Promise<number> {
     this.closed = true;
+    this.lease.close();
     const revision = ++this.revision;
     const child = this.child;
     this.child = null;
@@ -189,20 +205,10 @@ export class BrowserRuntime {
     if (!project)
       throw new Error("browser tools are disabled: set BROWSER_USE_PROJECT");
     const workdir = resolve(project);
-    this.tempDir = await mkdtemp(join(tmpdir(), "sparklab-browser-"));
+    await this.host.start();
     this.assertOpen();
-    const configDir = join(this.tempDir, "config");
-    const profileDir = join(this.tempDir, "profile");
-    const downloadsDir = join(this.tempDir, "downloads");
-    await Promise.all([
-      mkdir(configDir, { recursive: true }),
-      mkdir(profileDir, { recursive: true }),
-      mkdir(downloadsDir, { recursive: true }),
-    ]);
+    const configDir = this.host.configDir;
     const profileId = randomUUID();
-    this.proxy = new SafeBrowserProxy();
-    const proxyUrl = await this.proxy.start();
-    this.assertOpen();
     await writeFile(
       join(configDir, "config.json"),
       JSON.stringify({
@@ -210,13 +216,10 @@ export class BrowserRuntime {
           [profileId]: {
             id: profileId,
             default: true,
-            headless: config.browser.headless,
-            user_data_dir: profileDir,
-            downloads_path: downloadsDir,
+            cdp_url: this.host.cdpUrl,
             block_ip_addresses: true,
             disable_security: false,
             enable_default_extensions: false,
-            proxy: { server: proxyUrl, bypass: "<-loopback>" },
             accept_downloads: false,
             auto_download_pdfs: false,
             permissions: [],
@@ -356,14 +359,28 @@ export class BrowserRuntime {
     } catch {
       throw new Error("Browser Use returned malformed page state");
     }
-    const url = typeof state.url === "string" ? state.url : "";
+    const rawUrl = typeof state.url === "string" ? state.url : "";
+    const url = sanitizePublicUrl(rawUrl);
+    this.host.setActiveUrl(rawUrl);
+    state.url = url;
+    if (Array.isArray(state.interactive_elements)) {
+      state.interactive_elements = state.interactive_elements.map((value) => {
+        if (!value || typeof value !== "object") return value;
+        const element = { ...(value as Record<string, unknown>) };
+        if (typeof element.href === "string")
+          element.href = sanitizePublicUrl(element.href, rawUrl);
+        return element;
+      });
+    }
+    sanitizeStateUrls(state, rawUrl);
+    const publicText = JSON.stringify(state).slice(0, 100_000);
     if (!url || url === "about:blank") {
       this.lastElements.clear();
-      return { content: text };
+      return { content: publicText };
     }
     if (url) {
       try {
-        await validateBrowserUrl(url);
+        await validateBrowserUrl(rawUrl);
       } catch (error) {
         await this.dispose();
         throw new Error(
@@ -409,11 +426,14 @@ export class BrowserRuntime {
       browserId: this.browserId,
       revision: ++this.revision,
       url,
-      title: typeof state.title === "string" ? state.title.slice(0, 500) : "",
+      title:
+        typeof state.title === "string"
+          ? sanitizeOutputText(state.title).slice(0, 500)
+          : "",
       viewport: { width, height },
       screenshot: { mediaType, data: image.data },
     };
-    return { content: text, snapshot };
+    return { content: publicText, snapshot };
   }
 
   private rejectPending(error: Error): void {
@@ -422,13 +442,40 @@ export class BrowserRuntime {
   }
 
   private async cleanupOwnedResources(): Promise<void> {
-    await this.proxy?.close();
-    this.proxy = null;
-    if (this.tempDir) {
-      const path = this.tempDir;
-      this.tempDir = null;
-      await rm(path, { recursive: true, force: true });
+    await this.host.dispose();
+  }
+
+  requestHandoff(): void {
+    if (!this.isActive || this.closed)
+      throw new Error("browser_handoff_unavailable");
+    this.lease.requestHuman();
+    this.lastElements.clear();
+  }
+
+  async activateHandoff(onFrame: (frame: Buffer) => void): Promise<void> {
+    this.lease.activateHuman();
+    try {
+      await this.host.startInteractive(onFrame);
+    } catch (error) {
+      await this.dispose();
+      throw error;
     }
+  }
+
+  async handoffInput(event: BrowserHandoffInput): Promise<void> {
+    this.lease.assertHuman();
+    await this.host.input(event);
+  }
+
+  async finishHandoff(): Promise<void> {
+    this.lease.assertHuman();
+    // Reload in the same profile before the agent can observe again. This
+    // preserves authenticated cookies while clearing password/OTP values and
+    // other transient form data entered by the human.
+    await this.host.prepareAgentReturn();
+    await this.host.stopInteractive();
+    this.lastElements.clear();
+    this.lease.returnToAgent();
   }
 }
 
@@ -438,6 +485,36 @@ function extractText(content: McpContent[]): string {
     .map((item) => item.text)
     .join("\n")
     .slice(0, 100_000);
+}
+
+function sanitizeOutputText(value: string): string {
+  return value.replace(/https?:\/\/[^\s"'<>]+/gi, (candidate) => {
+    try {
+      return sanitizePublicUrl(candidate.replace(/[),.;]+$/, ""));
+    } catch {
+      return "[redacted-url]";
+    }
+  });
+}
+
+function sanitizeStateUrls(value: unknown, baseUrl: string): void {
+  if (!value || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (typeof nested === "string") {
+      if (/^(url|href|src|action)$/i.test(key)) {
+        (value as Record<string, unknown>)[key] = sanitizePublicUrl(
+          nested,
+          baseUrl,
+        );
+      } else {
+        (value as Record<string, unknown>)[key] = sanitizeOutputText(nested);
+      }
+    } else {
+      sanitizeStateUrls(nested, baseUrl);
+    }
+  }
 }
 
 function boundedDimension(value: unknown): number {

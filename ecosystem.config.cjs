@@ -105,8 +105,8 @@ const apps = [
     },
   },
   {
-    // Single-origin reverse proxy: /attach,/api → gateway; /agent → agent;
-    // else → terminal. Lets one origin/tunnel serve the whole stack.
+    // Single-origin reverse proxy: /attach,/api → gateway;
+    // /agent,/browser-handoff → agent; else → terminal.
     name: "prod-proxy",
     cwd: root,
     script: "prod-proxy.cjs",

@@ -161,10 +161,23 @@ class GatewayClient {
     sessionId: string,
     body: { prompt: string; mode?: CodexSandboxMode },
   ): Promise<CodexRunResponse> {
+    // Codex runs as a child of the gateway, not this service, so it would not
+    // otherwise see the Azure credential already loaded by agent-service.
+    // Keep secrets out of the JSON body, approval UI, command argv, and logs;
+    // the gateway accepts these internal headers only as ephemeral child env.
+    const azureHeaders = {
+      "x-sparklab-codex-azure-endpoint": config.azure.endpoint,
+      "x-sparklab-codex-azure-api-key": config.azure.apiKey,
+      "x-sparklab-codex-azure-api-version": config.azure.apiVersion,
+      "x-sparklab-codex-azure-deployment": config.azure.deployment,
+    };
     return this.json<CodexRunResponse>(
       await this.call(`/api/sessions/${encodeURIComponent(sessionId)}/codex`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...azureHeaders,
+        },
         body: JSON.stringify(body),
       }),
     );
@@ -186,7 +199,7 @@ class GatewayClient {
   /** Verify a browser's cookie by proxying to GET /api/auth/me. */
   async verifyCookie(
     cookieHeader: string | undefined,
-  ): Promise<{ ok: boolean; openMode: boolean }> {
+  ): Promise<{ ok: boolean; openMode: boolean; username?: string }> {
     const headers: Record<string, string> = {};
     if (cookieHeader) headers.cookie = cookieHeader;
     const res = await fetch(`${config.gatewayUrl}/api/auth/me`, { headers });
@@ -199,6 +212,7 @@ class GatewayClient {
     return {
       ok: Boolean(body.authenticated),
       openMode: Boolean(body.authenticated) && body.username === undefined,
+      ...(typeof body.username === "string" ? { username: body.username } : {}),
     };
   }
 }

@@ -30,6 +30,7 @@ import {
   type ToolArgs,
 } from "./tools.js";
 import { BrowserRuntime, type BrowserAction } from "./browser-runtime.js";
+import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 
 type Send = (frame: AgentWsServerMessage) => void;
 
@@ -52,6 +53,8 @@ export class AgentLoop {
     private send: Send,
     chatId: string,
     private readonly terminalSessionId: string,
+    private readonly handoffs: BrowserHandoffBroker,
+    private readonly user: string,
   ) {
     this.browser = this.newBrowserRuntime();
     this.chatId = chatId;
@@ -62,6 +65,13 @@ export class AgentLoop {
 
   async init(): Promise<void> {
     await this.ready;
+    const attached = this.handoffs.attachChat(
+      this.chatId,
+      this.user,
+      this.send,
+      (browser, revision) => this.browserDestroyed(browser, revision),
+    );
+    if (attached) this.browser = attached;
     this.send({
       type: "chat_started",
       chatId: this.chatId,
@@ -85,13 +95,67 @@ export class AgentLoop {
   interrupt(): void {
     this.abort?.abort();
     this.approvals.denyAll();
-    void this.closeBrowser();
+    if (this.browser.leaseState === "agent_active") void this.closeBrowser();
+    else void this.handoffs.revokeForChat(this.chatId);
   }
 
   async dispose(): Promise<void> {
     this.abort?.abort();
     this.approvals.denyAll();
-    await this.closeBrowser();
+    if (this.browser.leaseState === "agent_active") await this.closeBrowser();
+    // A pending or human-controlled browser is owned by the broker and may be
+    // adopted by the same authenticated chat after a transient /agent reconnect.
+  }
+
+  requestBrowserHandoff(browserId: string): void {
+    if (this.running) throw new Error("browser_handoff_agent_busy");
+    this.beginBrowserHandoff(browserId);
+  }
+
+  private beginBrowserHandoff(browserId: string): "started" | "reopened" {
+    if (this.browser.browserId !== browserId || !this.browser.isActive)
+      throw new Error("browser_handoff_unavailable");
+    if (this.handoffs.reopen(this.user, this.chatId, browserId))
+      return "reopened";
+    const issued = this.handoffs.begin({
+      user: this.user,
+      chatId: this.chatId,
+      browser: this.browser,
+      sendAgent: this.send,
+      destroyed: (browser, revision) => {
+        this.browserDestroyed(browser, revision);
+      },
+    });
+    this.send({
+      type: "browser_handoff_ready",
+      browserId,
+      ...issued,
+    });
+    this.send({
+      type: "browser_handoff_state",
+      browserId,
+      handoffId: issued.handoffId,
+      state: "pending",
+      expiresAt: issued.expiresAt,
+    });
+    return "started";
+  }
+
+  private browserDestroyed(browser: BrowserRuntime, revision: number): void {
+    if (this.browser === browser) this.browser = this.newBrowserRuntime();
+    this.send({
+      type: "browser_closed",
+      browserId: browser.browserId,
+      revision,
+    });
+  }
+
+  finishBrowserHandoff(handoffId: string): Promise<void> {
+    return this.handoffs.finish(handoffId, this.user, this.chatId);
+  }
+
+  cancelBrowserHandoff(handoffId: string): Promise<void> {
+    return this.handoffs.cancel(handoffId, this.user, this.chatId);
   }
 
   async handleUserMessage(
@@ -212,7 +276,9 @@ export class AgentLoop {
                 }),
               // browser_act and run_codex are consequential enough that each
               // invocation is approved individually (no persistent allow-always).
-              tc.name !== "browser_act" && tc.name !== "run_codex",
+              tc.name !== "browser_act" &&
+                tc.name !== "browser_request_handoff" &&
+                tc.name !== "run_codex",
             );
             if (behavior === "deny") {
               resultContent =
@@ -308,6 +374,12 @@ export class AgentLoop {
       }
       if (tool === "browser_list_tabs")
         return (await this.browser.listTabs(signal)).content;
+      if (tool === "browser_request_handoff") {
+        const result = this.beginBrowserHandoff(this.browser.browserId);
+        if (result === "reopened")
+          return "The existing human browser handoff view was reopened. The browser session, cookies, control channel, and timeouts are unchanged. Do not use browser tools again in this turn. Tell the user to continue in the reopened browser view and select Done or Cancel when finished.";
+        return "Human browser handoff started. Do not use browser tools again in this turn. Tell the user to complete authentication and select Done, or cancel the browser session.";
+      }
       if (tool === "browser_act") {
         const action = parseBrowserAction(args);
         if (typeof action === "string") return `error: ${action}`;
@@ -339,9 +411,12 @@ export class AgentLoop {
 
   private newBrowserRuntime(): BrowserRuntime {
     return new BrowserRuntime((browserId, revision) => {
-      this.send({ type: "browser_closed", browserId, revision });
-      if (this.browser.browserId === browserId)
-        this.browser = this.newBrowserRuntime();
+      void this.handoffs.revokeBrowser(browserId).then((revoked) => {
+        if (revoked) return;
+        this.send({ type: "browser_closed", browserId, revision });
+        if (this.browser.browserId === browserId)
+          this.browser = this.newBrowserRuntime();
+      });
     });
   }
 

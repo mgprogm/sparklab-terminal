@@ -134,8 +134,8 @@ function assert(cond, msg) {
   if (!cond) fail(msg);
 }
 
-async function req(method, pathname, { body, origin } = {}) {
-  const h = {};
+async function req(method, pathname, { body, origin, headers } = {}) {
+  const h = { ...headers };
   if (cookie) h["cookie"] = cookie;
   if (origin) h["origin"] = origin;
   let payload;
@@ -266,12 +266,19 @@ async function main() {
 
   // =====================================================================
   // 2b. env isolation — the Codex child gets NO gateway secrets, but keeps
-  //     its own OPENAI_/CODEX_ credentials (curated allowlist).
+  //     its own OPENAI_/CODEX_ credentials and agent-provided Azure config.
   // =====================================================================
   {
+    const azureKey = "agent-azure-key-sentinel";
     const res = await req("POST", `/api/sessions/${eid}/codex`, {
       body: { prompt: "ENV dump please" },
       origin: ALLOWED_ORIGIN,
+      headers: {
+        "x-sparklab-codex-azure-endpoint": "https://azure.example.invalid",
+        "x-sparklab-codex-azure-api-key": azureKey,
+        "x-sparklab-codex-azure-api-version": "test-api-version",
+        "x-sparklab-codex-azure-deployment": "test-deployment",
+      },
     });
     assert(res.status === 200, `codex env -> ${res.status}, expected 200`);
     const out = (await res.json()).output;
@@ -283,9 +290,25 @@ async function main() {
       out.includes(CODEX_OWN_CRED),
       "Codex's own OPENAI_API_KEY should be passed through but was not",
     );
+    assert(
+      out.includes(`AZURE_OPENAI_API_KEY=${azureKey}`),
+      "agent-service Azure API key should reach the local Codex child",
+    );
+    assert(
+      out.includes("AZURE_OPENAI_ENDPOINT=https://azure.example.invalid"),
+      "agent-service Azure endpoint should reach the local Codex child",
+    );
+    assert(
+      out.includes("AZURE_OPENAI_API_VERSION=test-api-version"),
+      "agent-service Azure API version should reach the local Codex child",
+    );
+    assert(
+      out.includes("GPT56SOL_DEPLOYMENT=test-deployment"),
+      "agent-service Azure deployment should reach the local Codex child",
+    );
     assert(/(^|\n)PATH=/.test(out), "PATH missing from the Codex child env");
     console.log(
-      "  ok: env isolation — gateway secret dropped, Codex's own cred + PATH kept",
+      "  ok: env isolation — gateway secret dropped, Codex + agent Azure credentials kept",
     );
   }
 

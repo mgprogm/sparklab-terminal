@@ -34,7 +34,8 @@ never clobbers dev's `.next`.
 ### Single origin (why the proxy)
 
 `prod-proxy.cjs` (port **3110**) fronts all three services on one origin:
-`/attach` + `/api/*` → gateway, `/agent` → agent, everything else → terminal.
+`/attach` + `/api/*` → gateway, `/agent` + `/browser-handoff` → agent,
+everything else → terminal.
 This is required so the `gw_session` cookie is **first-party** for the gateway
 AND the agent — split them across separate hosts/ports and the agent's cookie
 auth breaks (the host-only cookie never reaches the agent). **Open the proxy
@@ -272,7 +273,8 @@ sure the script isn't also running.
 This runs the same four processes as production (gateway, agent, terminal, proxy)
 but **omits Caddy/TLS and binds loopback ports directly**. `prod-proxy.cjs` is
 the zero-dependency local analogue of Caddy — it applies the same single-origin
-routing (same path rules: `/attach`+`/api/*` → gateway, `/agent` → agent,
+routing (same path rules: `/attach`+`/api/*` → gateway,
+`/agent`+`/browser-handoff` → agent,
 everything else → terminal) for the same reason: the `gw_session` cookie must be
 first-party for both the gateway and the agent.
 

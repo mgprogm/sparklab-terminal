@@ -69,7 +69,7 @@ The agent service reads these from `apps/agent-service/.env` (gitignored). See `
 | Variable                                      | Default                           | Used by         | Purpose                                                                                           |
 | --------------------------------------------- | --------------------------------- | --------------- | ------------------------------------------------------------------------------------------------- |
 | `AZURE_OPENAI_ENDPOINT`                       | _(required)_                      | agent-service   | Azure AI Foundry resource endpoint URL                                                            |
-| `AZURE_OPENAI_API_KEY`                        | _(required, secret)_              | agent-service   | Azure key — gitignored `.env` only, never committed                                               |
+| `AZURE_OPENAI_API_KEY`                        | _(required, secret)_              | agent-service   | Azure key — gitignored `.env` only; also supplied ephemerally to local `run_codex` children       |
 | `AZURE_OPENAI_API_VERSION`                    | `2025-04-01-preview`              | agent-service   | Azure OpenAI REST API version (pin it)                                                            |
 | `GPT56SOL_DEPLOYMENT`                         | _(required)_                      | agent-service   | Deployment name, e.g. `gpt-5.6-sol` — passed as the model id                                      |
 | `AGENT_PORT`                                  | `3009`                            | agent-service   | Listen port for the `/agent` WebSocket                                                            |
@@ -78,6 +78,7 @@ The agent service reads these from `apps/agent-service/.env` (gitignored). See `
 | `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | _(match gateway)_                 | agent-service   | Credentials it uses to log in to the gateway. Omit when the gateway runs in open mode.            |
 | `BROWSER_USE_PROJECT`                         | _(unset)_                         | agent-service   | Trusted Browser Use checkout; enables isolated virtual-browser tools when set                     |
 | `BROWSER_USE_HEADLESS`                        | `true`                            | agent-service   | Run each per-chat Chromium process headlessly                                                     |
+| `BROWSER_USE_EXECUTABLE_PATH`                 | _(auto-detect)_                   | agent-service   | Explicit sandboxed Chromium path, e.g. `/snap/bin/chromium`                                       |
 | `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009`           | `apps/terminal` | Where the browser's chat WebSocket connects. **Inlined at build time** — set it for `next build`. |
 
 The `gpt-5.6-sol` deployment is a reasoning-grade model — expect ~15–20s per model call, so a multi-step agent turn can take 40s–2min. The panel streams tokens and shows tool progress throughout.

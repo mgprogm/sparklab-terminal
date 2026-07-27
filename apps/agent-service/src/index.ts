@@ -18,6 +18,7 @@ import {
 import { config } from "./config.js";
 import { gateway } from "./gateway-client.js";
 import { AgentLoop } from "./agent-loop.js";
+import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { deleteChat, listChats, openChat } from "./history.js";
 
 const server = createServer((req, res) => {
@@ -38,11 +39,16 @@ const wss = new WebSocketServer({
   noServer: true,
   maxPayload: MAX_INBOUND_BYTES,
 });
+const handoffWss = new WebSocketServer({
+  noServer: true,
+  maxPayload: 16 * 1024,
+});
+const handoffs = new BrowserHandoffBroker();
 const loops = new Set<AgentLoop>();
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-  if (url.pathname !== "/agent") {
+  if (url.pathname !== "/agent" && url.pathname !== "/browser-handoff") {
     socket.destroy();
     return;
   }
@@ -56,8 +62,23 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit("connection", ws, req);
+  const target = url.pathname === "/agent" ? wss : handoffWss;
+  if (
+    url.pathname === "/browser-handoff" &&
+    !isSecureHandoff(
+      req.headers.host,
+      req.headers["x-forwarded-proto"],
+      req.socket.remoteAddress,
+    )
+  ) {
+    socket.write(
+      "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    socket.destroy();
+    return;
+  }
+  target.handleUpgrade(req, socket, head, (ws) => {
+    target.emit("connection", ws, req);
   });
 });
 
@@ -114,6 +135,31 @@ wss.on("connection", (ws: WebSocket, req) => {
             }),
           );
         break;
+      case "browser_handoff_request":
+        try {
+          loop.requestBrowserHandoff(msg.data.browserId);
+        } catch (error) {
+          send({
+            type: "error",
+            message:
+              error instanceof Error ? error.message : "browser_handoff_failed",
+          });
+        }
+        break;
+      case "browser_handoff_finish":
+        void loop
+          .finishBrowserHandoff(msg.data.handoffId)
+          .catch(() =>
+            send({ type: "error", message: "browser_handoff_failed" }),
+          );
+        break;
+      case "browser_handoff_cancel":
+        void loop
+          .cancelBrowserHandoff(msg.data.handoffId)
+          .catch(() =>
+            send({ type: "error", message: "browser_handoff_failed" }),
+          );
+        break;
     }
   };
 
@@ -147,8 +193,11 @@ wss.on("connection", (ws: WebSocket, req) => {
   void (async () => {
     // Auth: proxy the browser's cookie to the gateway. 4001 = no-reconnect.
     let authed = false;
+    let user = "";
     try {
-      authed = (await gateway.verifyCookie(req.headers.cookie)).ok;
+      const identity = await gateway.verifyCookie(req.headers.cookie);
+      authed = identity.ok;
+      user = identity.username ?? "open-mode";
     } catch {
       authed = false;
     }
@@ -179,7 +228,7 @@ wss.on("connection", (ws: WebSocket, req) => {
       ws.close(1008, "unable to open chat");
       return;
     }
-    loop = new AgentLoop(send, chatId, terminalSessionId);
+    loop = new AgentLoop(send, chatId, terminalSessionId, handoffs, user);
     loops.add(loop);
     await loop.init();
 
@@ -187,6 +236,88 @@ wss.on("connection", (ws: WebSocket, req) => {
     for (const d of pending) route(d);
     pending.length = 0;
     pendingBytes = 0;
+  })();
+});
+
+handoffWss.on("connection", (ws: WebSocket, req) => {
+  let user = "";
+  let handoffId = "";
+  let ready = false;
+  let pending: { data: RawData; binary: boolean } | null = null;
+  let routeQueue = Promise.resolve();
+  let queuedRoutes = 0;
+  const authTimer = setTimeout(
+    () => ws.close(4001, "handoff_auth_failed"),
+    10_000,
+  );
+  authTimer.unref();
+
+  const route = async (data: RawData, binary: boolean) => {
+    if (binary) {
+      ws.close(1003, "browser_input_invalid");
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data.toString());
+    } catch {
+      ws.close(1008, "browser_input_invalid");
+      return;
+    }
+    try {
+      if (!handoffId) {
+        // The broker validates both one-time auth and reconnect resume frames.
+        // Bind this connection only after that validation succeeds.
+        handoffId = await handoffs.accept(ws, user, parsed);
+        clearTimeout(authTimer);
+      } else {
+        await handoffs.input(handoffId, parsed);
+      }
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : "browser_handoff_failed";
+      ws.close(1008, reason.slice(0, 123));
+    }
+  };
+  const enqueueRoute = (data: RawData, binary: boolean) => {
+    if (++queuedRoutes > 256) {
+      ws.close(1009, "browser_input_rate_limited");
+      return;
+    }
+    routeQueue = routeQueue
+      .then(() => route(data, binary))
+      .catch(() => ws.close(1011, "browser_handoff_failed"))
+      .finally(() => {
+        queuedRoutes--;
+      });
+  };
+  ws.on("message", (data, binary) => {
+    // Authentication and input must remain ordered. In particular, a click
+    // arriving while Chromium activation is still awaiting must not be parsed
+    // as a second first-frame credential and close the handoff.
+    if (ready) enqueueRoute(data, binary);
+    else if (!pending) pending = { data, binary };
+    else ws.close(1009, "handoff_auth_failed");
+  });
+  ws.on("close", () => {
+    clearTimeout(authTimer);
+    if (handoffId) handoffs.disconnected(handoffId, ws);
+  });
+  ws.on("error", () => {
+    if (handoffId) handoffs.disconnected(handoffId, ws);
+  });
+  void (async () => {
+    try {
+      const identity = await gateway.verifyCookie(req.headers.cookie);
+      if (!identity.ok) throw new Error("handoff_auth_failed");
+      if (ws.readyState !== ws.OPEN) throw new Error("handoff_auth_failed");
+      user = identity.username ?? "open-mode";
+      ready = true;
+      const queued = pending as { data: RawData; binary: boolean } | null;
+      if (queued) enqueueRoute(queued.data, queued.binary);
+    } catch {
+      ws.close(4001, "handoff_auth_failed");
+    }
   })();
 });
 
@@ -206,12 +337,40 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     void (async () => {
       await Promise.all([...loops].map((loop) => loop.dispose()));
+      await handoffs.disposeAll();
       loops.clear();
       for (const client of wss.clients)
+        client.close(1001, "service shutting down");
+      for (const client of handoffWss.clients)
         client.close(1001, "service shutting down");
       server.close(() => process.exit(0));
       setTimeout(() => process.exit(0), 500).unref();
     })();
     setTimeout(() => process.exit(1), 5_000).unref();
   });
+}
+
+function isSecureHandoff(
+  host: string | undefined,
+  forwardedProto: string | string[] | undefined,
+  remoteAddress: string | undefined,
+): boolean {
+  let hostname = "";
+  try {
+    hostname = new URL(`http://${host ?? "invalid"}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const proxyIsLoopback =
+    remoteAddress === "127.0.0.1" ||
+    remoteAddress === "::1" ||
+    remoteAddress === "::ffff:127.0.0.1";
+  const localHost =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]";
+  const proto = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : forwardedProto?.split(",", 1)[0]?.trim();
+  return proxyIsLoopback && (localHost || proto === "https");
 }

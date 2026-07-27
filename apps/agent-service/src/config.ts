@@ -52,6 +52,7 @@ export const config = {
   browser: {
     project: process.env.BROWSER_USE_PROJECT?.trim() || "",
     headless: optional("BROWSER_USE_HEADLESS", "true") !== "false",
+    executablePath: process.env.BROWSER_USE_EXECUTABLE_PATH?.trim() || "",
   },
 } as const;
 

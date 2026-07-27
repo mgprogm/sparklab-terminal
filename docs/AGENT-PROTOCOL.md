@@ -25,6 +25,7 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST─�
 | `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                |
 | `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools |
 | `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)               |
+| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                  |
 
 The service fails fast at startup if any required Azure var is missing.
 
@@ -89,19 +90,43 @@ is reserved for the terminal's `/attach`). Schemas live in
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                | Kind      | Backing                                               |
-| ------------------- | --------- | ----------------------------------------------------- |
-| `list_sessions`     | read      | `GET /api/sessions`                                   |
-| `read_screen`       | read      | `GET /api/sessions/:id/screen`                        |
-| `wait_idle`         | read      | polls `/screen` until a shell prompt / quiescence     |
-| `type_text`         | **write** | `POST /api/sessions/:id/keys {text}` — never executes |
-| `press_keys`        | **write** | `POST …/keys {keys}` (whitelist)                      |
-| `run_command`       | **write** | type + Enter + `wait_idle` (one approval)             |
-| `create_session`    | **write** | `POST /api/sessions`                                  |
-| `run_codex`         | **write** | `POST …/codex` — `codex exec` in the session cwd      |
-| `browser_observe`   | read      | Browser Use MCP page state + bounded snapshot         |
-| `browser_list_tabs` | read      | Browser Use MCP tab list                              |
-| `browser_act`       | **write** | one structured navigate/click/type/scroll/tab action  |
+| Tool                      | Kind      | Backing                                                          |
+| ------------------------- | --------- | ---------------------------------------------------------------- |
+| `list_sessions`           | read      | `GET /api/sessions`                                              |
+| `read_screen`             | read      | `GET /api/sessions/:id/screen`                                   |
+| `wait_idle`               | read      | polls `/screen` until a shell prompt / quiescence                |
+| `type_text`               | **write** | `POST /api/sessions/:id/keys {text}` — never executes            |
+| `press_keys`              | **write** | `POST …/keys {keys}` (whitelist)                                 |
+| `run_command`             | **write** | type + Enter + `wait_idle` (one approval)                        |
+| `create_session`          | **write** | `POST /api/sessions`                                             |
+| `run_codex`               | **write** | `POST …/codex` — `codex exec` in the session cwd                 |
+| `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                    |
+| `browser_list_tabs`       | read      | Browser Use MCP tab list                                         |
+| `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action             |
+| `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication |
+
+Calling `browser_request_handoff` again while the same chat's handoff is
+pending or active republishes that handoff state and reopens the Browser View.
+It does not create a second browser, token, socket, cookie jar, or timeout.
+
+The dedicated handoff data plane is bounded and latest-frame-wins: the broker
+paces binary frames to 10 FPS, retains at most one unsent frame under
+backpressure, and the client uses one active decode plus one replaceable pending
+frame. Pointer movement and wheel events are coalesced before transmission;
+clicks and keyboard events retain ordering.
+
+The virtual mouse displays the exact bounded browser coordinates locally. The
+existing handoff `activity` control adds only `inputType`; a short ✓ is shown
+after CDP accepts pointer/wheel input. Coordinates and typed content are never
+echoed back, logged, or persisted.
+
+The v1 ACK is deliberately coarse. It does not identify `move`, `down`, or
+`up`, and it does not prove that a DOM element existed, received focus, or
+changed state. A move ACK can produce the same ✓ as a click. The visual ACK
+style expires after about 350 ms while the last label text may retain its check
+mark. Operational tooling must inspect `data-acknowledged`, connection state,
+known-target behavior, and frame freshness rather than interpreting the label
+alone. See [`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md).
 
 There is no `kill_session` — destroying a session stays a human-only action in
 the UI (the gateway's single `DELETE` call site).
@@ -138,8 +163,12 @@ the UI (the gateway's single `DELETE` call site).
   The
   prompt is piped via **stdin** (never argv), output is bounded, and there are
   distinct errors for not-installed (`503 codex_unavailable`) and timeout
-  (`504 codex_timeout`, `CODEX_TIMEOUT_MS`, default 180s). Codex's own auth lives
-  in its `CODEX_HOME`; no credentials cross this contract.
+  (`504 codex_timeout`, `CODEX_TIMEOUT_MS`, default 180s). For local sessions,
+  the agent-service forwards its already-required `AZURE_OPENAI_*` configuration
+  to the Gateway in internal request headers; the Gateway exposes it only in the
+  Codex child environment (never the JSON body, approval UI, argv, or logs).
+  Remote sessions do not forward secrets through SSH and therefore use the
+  remote host's own `CODEX_HOME`/credential.
 
 ## Conversation history
 

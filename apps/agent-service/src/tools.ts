@@ -9,7 +9,7 @@
  *   READ  (auto):  list_sessions, read_screen, wait_idle,
  *                  browser_observe, browser_list_tabs
  *   WRITE (ask):   type_text, press_keys, run_command, create_session,
- *                  run_codex, browser_act
+ *                  run_codex, browser_act, browser_request_handoff
  *
  * There is deliberately no kill_session — destroying a session stays a
  * human-only act in the UI.
@@ -25,11 +25,25 @@ export const WRITE_TOOLS = new Set([
   "create_session",
   "run_codex",
   "browser_act",
+  "browser_request_handoff",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
 
 export const TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "browser_request_handoff",
+      description:
+        "Offer the current isolated browser to the user for password/MFA entry. Use when the user explicitly asks to take control, asks to reopen an existing handoff view, or a login requires secrets. This requires user approval, starts or reopens the private human-only channel, and never returns typed input. After calling it, stop using browser tools and tell the user to finish or cancel the handoff in the browser view.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -306,6 +320,8 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `run Codex [${args.mode === "workspace-write" ? "workspace-write" : "read-only"}]: ${truncate(String(args.prompt ?? ""))}`;
     case "browser_observe":
       return "observe browser";
+    case "browser_request_handoff":
+      return "take control of the isolated browser";
     case "browser_list_tabs":
       return "list browser tabs";
     case "browser_act":

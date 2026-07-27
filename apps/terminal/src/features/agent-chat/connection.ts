@@ -13,11 +13,17 @@ import {
   type AgentWsServerMessage,
 } from "@sparklab/shared-types";
 
+import {
+  BrowserHandoffControlFrameSchema,
+  type BrowserHandoffControlFrame,
+} from "@/features/browser-handoff";
+
 const HEARTBEAT_MS = 25_000;
 const BACKOFF = [1000, 2000, 4000, 8000, 15_000] as const;
 
 export interface AgentConnectionCallbacks {
   onFrame: (frame: AgentWsServerMessage) => void;
+  onHandoffFrame?: (frame: BrowserHandoffControlFrame) => void;
   onConnected: (connected: boolean) => void;
   onAuthError?: () => void;
 }
@@ -69,6 +75,11 @@ export class AgentConnection {
       try {
         parsed = JSON.parse(ev.data);
       } catch {
+        return;
+      }
+      const handoff = BrowserHandoffControlFrameSchema.safeParse(parsed);
+      if (handoff.success) {
+        this.callbacks.onHandoffFrame?.(handoff.data);
         return;
       }
       const result = AgentWsServerMessageSchema.safeParse(parsed);
@@ -159,6 +170,18 @@ export class AgentConnection {
 
   deleteChat(chatId: string): void {
     this.sendRaw({ type: "delete_chat", chatId });
+  }
+
+  requestBrowserHandoff(browserId: string): void {
+    this.sendRaw({ type: "browser_handoff_request", browserId });
+  }
+
+  finishBrowserHandoff(handoffId: string): void {
+    this.sendRaw({ type: "browser_handoff_finish", handoffId });
+  }
+
+  cancelBrowserHandoff(handoffId: string): void {
+    this.sendRaw({ type: "browser_handoff_cancel", handoffId });
   }
 
   dispose(): void {

@@ -17,9 +17,13 @@ term.example.com {
         reverse_proxy 127.0.0.1:3007
     }
 
-    # Agent Chat service: the /agent WebSocket. Same-origin so the gw_session
-    # cookie is sent; the agent service verifies it against the gateway.
+    # Agent Chat service: control and interactive handoff WebSockets.
+    # Same-origin so the gw_session cookie is sent and verified.
     handle /agent {
+        reverse_proxy 127.0.0.1:3009
+    }
+
+    handle /browser-handoff {
         reverse_proxy 127.0.0.1:3009
     }
 
