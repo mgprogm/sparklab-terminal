@@ -7,12 +7,15 @@
  * `/api/kanban/*`) lives entirely inside that self-contained document, not in
  * React. Swap the file behind the iframe and you swap the artifact.
  *
- * The iframe carries `sandbox="allow-scripts allow-same-origin"`. Per D6 this
- * pairing provides essentially NO security boundary (a same-origin frame can
- * remove its own sandbox, and it is our own first-party code regardless). Its
- * real purpose here is DOM/CSS/JS isolation for pluggability — the artifact
- * can't collide with the app's global styles/scripts and vice-versa. It is
- * explicitly NOT presented as a security control.
+ * The iframe carries `sandbox="allow-scripts allow-same-origin allow-forms
+ * allow-modals"`. `allow-scripts`+`allow-same-origin` provide essentially NO
+ * security boundary (a same-origin frame can remove its own sandbox, and it is
+ * our own first-party code regardless); their real purpose is DOM/CSS/JS
+ * isolation for pluggability. `allow-forms` is required so the artifact's
+ * new-board / add-card / edit-card `<form>` submits fire, and `allow-modals`
+ * so its `window.confirm()` delete guards work — without these the browser
+ * blocks form submission and modals inside a sandboxed frame. This is NOT
+ * presented as a security control.
  *
  * Because the iframe is same-origin to the Next app, its relative
  * `fetch("/api/kanban/…")` calls carry the app-origin `gw_session` cookie
@@ -59,7 +62,7 @@ export function KanbanDialog({
         <iframe
           src="/kanban/app.html"
           title="Kanban board"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
           className="h-full w-full border-0"
         />
       </DialogContent>
