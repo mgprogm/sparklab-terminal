@@ -213,6 +213,8 @@ A gateway-owned, multi-board task tracker (design: [`KANBAN-PLAN.md`](./KANBAN-P
 
 Auth: the existing `gw_session` cookie **or** a scoped `Authorization: Bearer <KANBAN_API_TOKEN>` (this prefix only — lets an external AI CLI drive boards without a cookie login; a CLI request carries no `Origin`, so the CSRF guard is a no-op for it). GET routes are Origin-exempt; state-changing routes get the Origin/CSRF check.
 
+An MCP-server wrapper (dependency-free stdio) lives at `tools/kanban-mcp/` — it exposes these endpoints as MCP tools for Claude Code / Codex via the bearer token. See `tools/kanban-mcp/README.md` for the `claude mcp add` / `~/.codex/config.toml` setup.
+
 #### `GET /api/kanban/boards` → 200
 
 `{ "boards": KanbanBoardSummary[] }` where a summary is `{id,name,tags,rev,createdAt,updatedAt,columnCount,cardCount}`.
