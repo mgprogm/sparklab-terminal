@@ -20,6 +20,7 @@ import { spawn as ptySpawn } from "node-pty";
 import metadata from "./metadata.js";
 import registry from "./registry.js";
 import push from "./push.js";
+import kanban from "./kanban.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,6 +46,10 @@ const ALLOWED_ORIGINS = new Set(
     .filter(Boolean),
 );
 const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
+// Optional scoped bearer token for /api/kanban/* ONLY (see docs/KANBAN-PLAN.md
+// D8). Lets an external AI CLI (Claude/Codex) drive the Kanban API without a
+// cookie login. Unset => the external path is simply unavailable (cookie only).
+const KANBAN_API_TOKEN = process.env.KANBAN_API_TOKEN || "";
 
 // The pre-user/pass shared secret is gone. Refusing to start (rather than
 // ignoring the var) keeps an un-migrated deploy from silently coming up with
@@ -174,6 +179,22 @@ function isAuthenticated(req) {
   if (OPEN_MODE) return true;
   const cookies = parseCookies(req);
   return validateAuthSession(cookies.gw_session);
+}
+
+// Bearer-token auth scoped to /api/kanban/* (D8). Constant-time compare; only
+// active when KANBAN_API_TOKEN is set. Requests from a CLI carry no Origin
+// header, so the CSRF guard is a no-op for them and the token is the auth.
+function isKanbanBearerAuthorized(req) {
+  if (!KANBAN_API_TOKEN) return false;
+  const header = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m) return false;
+  const provided = Buffer.from(m[1]);
+  const expected = Buffer.from(KANBAN_API_TOKEN);
+  return (
+    provided.length === expected.length &&
+    crypto.timingSafeEqual(provided, expected)
+  );
 }
 
 // ---- A1: Origin helpers ----
@@ -951,6 +972,218 @@ function readBody(req) {
   });
 }
 
+// Parse a JSON-object request body with the standard 413/400 handling. Returns
+// { ok:true, body } or { ok:false, status, error }.
+async function readJsonObject(req) {
+  try {
+    const raw = await readBody(req);
+    const body = raw.trim() ? JSON.parse(raw) : {};
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false, status: 400, error: "body must be a JSON object" };
+    }
+    return { ok: true, body };
+  } catch (err) {
+    if (err.code === "BODY_TOO_LARGE") {
+      return { ok: false, status: 413, error: "request too large" };
+    }
+    return { ok: false, status: 400, error: "malformed JSON body" };
+  }
+}
+
+// ---- Kanban (/api/kanban/*) ----
+// A gateway-owned, multi-board task tracker (docs/KANBAN-PLAN.md). Store lives in
+// src/kanban.js; every mutator there is synchronous => atomic. This handler only
+// validates input and maps coded store errors to HTTP: not_found -> 404,
+// stale -> 409, everything else -> 400. `seg` = path after /api/kanban.
+async function handleKanban(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // GET /api/kanban/boards — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "boards") {
+      return sendJson(res, 200, { boards: kanban.listBoards() });
+    }
+    // GET /api/kanban/boards/:boardId — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "boards") {
+      const board = kanban.getBoard(seg[1]);
+      if (!board) return sendJson(res, 404, { error: "board not found" });
+      return sendJson(res, 200, board);
+    }
+    // POST /api/kanban/boards — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "boards") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name, tags, columns } = r.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      if (columns !== undefined && !Array.isArray(columns)) {
+        return sendJson(res, 400, { error: "columns must be an array" });
+      }
+      const board = kanban.createBoard({
+        name: name.trim(),
+        tags: Array.isArray(tags) ? tags.map(String) : [],
+        columns: Array.isArray(columns) ? columns.map(String) : undefined,
+      });
+      return sendJson(res, 201, board);
+    }
+    // PATCH /api/kanban/boards/:boardId — rename / retag
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "boards") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const patch = {};
+      if (r.body.name !== undefined) {
+        if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+          return sendJson(res, 400, {
+            error: "name must be a non-empty string",
+          });
+        }
+        patch.name = r.body.name.trim();
+      }
+      if (r.body.tags !== undefined) {
+        if (!Array.isArray(r.body.tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = r.body.tags.map(String);
+      }
+      if (patch.name === undefined && patch.tags === undefined) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, kanban.updateBoard(seg[1], patch));
+    }
+    // DELETE /api/kanban/boards/:boardId — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "boards") {
+      if (!kanban.deleteBoard(seg[1])) {
+        return sendJson(res, 404, { error: "board not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/kanban/boards/:boardId/cards — add card
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "boards" &&
+      seg[2] === "cards"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { title, description, tags, columnId } = r.body;
+      if (typeof title !== "string" || !title.trim()) {
+        return sendJson(res, 400, { error: "title is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      const card = kanban.createCard(seg[1], {
+        title: title.trim(),
+        description: typeof description === "string" ? description : "",
+        tags: Array.isArray(tags) ? tags.map(String) : [],
+        columnId: typeof columnId === "string" ? columnId : undefined,
+      });
+      return sendJson(res, 201, card);
+    }
+    // PATCH /api/kanban/cards/:cardId — edit card (boardId in body)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "cards") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { boardId, title, description, tags } = r.body;
+      if (typeof boardId !== "string") {
+        return sendJson(res, 400, { error: "boardId is required" });
+      }
+      const patch = {};
+      if (title !== undefined) {
+        if (typeof title !== "string" || !title.trim()) {
+          return sendJson(res, 400, {
+            error: "title must be a non-empty string",
+          });
+        }
+        patch.title = title.trim();
+      }
+      if (description !== undefined) patch.description = String(description);
+      if (tags !== undefined) {
+        if (!Array.isArray(tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = tags.map(String);
+      }
+      if (
+        patch.title === undefined &&
+        patch.description === undefined &&
+        patch.tags === undefined
+      ) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, kanban.updateCard(boardId, seg[1], patch));
+    }
+    // POST /api/kanban/cards/:cardId/move — move (optimistic concurrency)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "cards" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { boardId, toColumnId, toIndex, rev } = r.body;
+      if (typeof boardId !== "string" || typeof toColumnId !== "string") {
+        return sendJson(res, 400, {
+          error: "boardId and toColumnId are required",
+        });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      try {
+        const board = kanban.moveCard(boardId, seg[1], {
+          toColumnId,
+          toIndex,
+          expectedRev: typeof rev === "number" ? rev : undefined,
+        });
+        return sendJson(res, 200, board);
+      } catch (e) {
+        if (e.code === "stale") {
+          // Return the current board so the client can reconcile + retry.
+          return sendJson(res, 409, {
+            error: "stale",
+            board: kanban.getBoard(boardId) ?? null,
+          });
+        }
+        throw e;
+      }
+    }
+    // DELETE /api/kanban/cards/:cardId — boardId via ?boardId= or JSON body
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "cards") {
+      let boardId = url.searchParams.get("boardId") || "";
+      if (!boardId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.boardId === "string")
+          boardId = r.body.boardId;
+      }
+      if (!boardId) return sendJson(res, 400, { error: "boardId is required" });
+      if (!kanban.deleteCard(boardId, seg[1])) {
+        return sendJson(res, 404, { error: "card not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      const status =
+        e.code === "not_found" ? 404 : e.code === "stale" ? 409 : 400;
+      return sendJson(res, status, { error: e.message });
+    }
+    throw e;
+  }
+}
+
 // ---- File Explorer (fs/*) helpers ----
 // Read cap for text preview (bytes). Binary/oversized files are downloaded.
 const FS_READ_CAP = 256 * 1024;
@@ -1413,9 +1646,19 @@ async function handleApi(req, res, url) {
     return true;
   }
 
-  // A2: All other /api/* routes require a valid session (or open mode).
-  if (!isAuthenticated(req)) {
+  // A2: All other /api/* routes require a valid session (or open mode). The
+  // /api/kanban/* prefix additionally accepts a scoped bearer token (D8) so an
+  // external AI CLI can drive it without a cookie login.
+  if (
+    !isAuthenticated(req) &&
+    !(parts[1] === "kanban" && isKanbanBearerAuthorized(req))
+  ) {
     return sendJson(res, 401, { error: "unauthorized" });
+  }
+
+  // ---- Kanban: /api/kanban/* ----
+  if (parts[1] === "kanban") {
+    return handleKanban(req, res, url);
   }
 
   // ---- Web Push: /api/push/* ----

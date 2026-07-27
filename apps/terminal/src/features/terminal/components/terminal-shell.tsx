@@ -29,12 +29,20 @@ import {
 } from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
-import { FolderTree, Globe2, Loader2, Menu, Unplug } from "lucide-react";
+import {
+  FolderTree,
+  Globe2,
+  Loader2,
+  Menu,
+  SquareKanban,
+  Unplug,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
 import { FileExplorerDialog } from "./file-explorer-dialog";
+import { KanbanDialog } from "./kanban-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
@@ -94,6 +102,8 @@ export function TerminalShell() {
     setSettingsSection,
     explorerOpen,
     setExplorerOpen,
+    kanbanOpen,
+    setKanbanOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -145,6 +155,7 @@ export function TerminalShell() {
   );
   useUrlFlagSync("agent", agentPanelOpen, setAgentPanelOpen);
   useUrlFlagSync("explorer", explorerOpen, setExplorerOpen);
+  useUrlFlagSync("kanban", kanbanOpen, setKanbanOpen);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
@@ -396,6 +407,22 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Browse files</TooltipContent>
           </Tooltip>
+          {/* Kanban is gateway-global (D7), never session-scoped — always
+              enabled, unlike the Browse-files button above. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Kanban board"
+                onClick={() => setKanbanOpen(true)}
+              >
+                <SquareKanban className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Kanban board</TooltipContent>
+          </Tooltip>
           {browserView && !browserVisible && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -516,6 +543,10 @@ export function TerminalShell() {
         serverName={activeServer?.name}
         unreachable={activeServerUnreachable}
       />
+
+      {/* Kanban board modal — gateway-global (D7), not session-scoped. Mounted
+          once; open state lives in the store (deep-linked via `?kanban`). */}
+      <KanbanDialog open={kanbanOpen} onOpenChange={setKanbanOpen} />
     </div>
   );
 }

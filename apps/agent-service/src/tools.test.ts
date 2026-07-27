@@ -7,7 +7,7 @@ process.env.AZURE_OPENAI_ENDPOINT = "https://example.invalid";
 process.env.AZURE_OPENAI_API_KEY = "test-key";
 process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 
-const { TOOLS, WRITE_TOOLS, describeCall, executeTool } =
+const { TOOLS, WRITE_TOOLS, ONE_TIME_TOOLS, describeCall, executeTool } =
   await import("./tools.js");
 const { gateway } = await import("./gateway-client.js");
 
@@ -122,4 +122,101 @@ test("run_codex forwards agent-service Azure config outside the JSON body", asyn
     "test-deployment",
   );
   assert.ok(!seenBody.includes("test-key"), "secret leaked into request body");
+});
+
+// ---- Kanban tools -----------------------------------------------------------
+
+const KANBAN_TOOLS = [
+  "kanban_list",
+  "kanban_get",
+  "kanban_create",
+  "kanban_delete",
+  "kanban_move",
+  "kanban_add_card",
+  "kanban_update_card",
+];
+
+test("all seven Kanban tools are exposed", () => {
+  const names = toolNames();
+  for (const t of KANBAN_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("every Kanban tool has a closed parameters schema", () => {
+  for (const name of KANBAN_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("Kanban reads are auto (NOT write tools)", () => {
+  assert.equal(WRITE_TOOLS.has("kanban_list"), false);
+  assert.equal(WRITE_TOOLS.has("kanban_get"), false);
+});
+
+test("the four routine Kanban writes are WRITE tools", () => {
+  for (const t of [
+    "kanban_create",
+    "kanban_move",
+    "kanban_add_card",
+    "kanban_update_card",
+  ]) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+  }
+});
+
+test("kanban_delete is approval-gated AND coerced one-time (D9)", () => {
+  // Must be a WRITE tool (so approval runs at all) AND in the one-time set
+  // (so allow-always is coerced to a single allow) — the browser_act shape.
+  assert.equal(WRITE_TOOLS.has("kanban_delete"), true);
+  assert.equal(ONE_TIME_TOOLS.has("kanban_delete"), true);
+});
+
+test("the routine Kanban writes are NOT in the one-time set (allow-always ok)", () => {
+  for (const t of [
+    "kanban_create",
+    "kanban_move",
+    "kanban_add_card",
+    "kanban_update_card",
+  ]) {
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      false,
+      `${t} should permit allow-always`,
+    );
+  }
+});
+
+test("describeCall returns a non-empty summary for each Kanban tool", () => {
+  const args = {
+    board_id: "kb-1",
+    card_id: "card-1",
+    to_column_id: "col-2",
+    to_index: 1,
+    name: "My Board",
+    title: "My Card",
+  };
+  for (const t of KANBAN_TOOLS) {
+    const s = describeCall(t, args);
+    assert.equal(typeof s, "string");
+    assert.ok(s.length > 0, `${t} produced an empty describeCall`);
+  }
+});
+
+test("kanban_get requires board_id (no gateway call when missing)", async () => {
+  assert.equal(
+    await executeTool("kanban_get", {}),
+    "error: board_id is required",
+  );
 });

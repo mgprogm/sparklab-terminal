@@ -15,6 +15,14 @@ import type {
   CreateSessionResponse,
   CodexRunResponse,
   CodexSandboxMode,
+  KanbanBoard,
+  KanbanBoardSummary,
+  KanbanCard,
+  KanbanListResponse,
+  CreateBoardRequest,
+  UpdateBoardRequest,
+  CreateCardRequest,
+  UpdateCardRequest,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -194,6 +202,133 @@ class GatewayClient {
         body: JSON.stringify(opts),
       }),
     );
+  }
+
+  // --- Kanban -------------------------------------------------------------
+  // The agent drives the gateway-owned Kanban board purely as a REST client
+  // (mirrors how it drives terminals); the gateway stays the single store of
+  // record and enforcement point.
+
+  async listKanbanBoards(): Promise<KanbanBoardSummary[]> {
+    const r = await this.json<KanbanListResponse>(
+      await this.call("/api/kanban/boards"),
+    );
+    return r.boards;
+  }
+
+  async getKanbanBoard(boardId: string): Promise<KanbanBoard> {
+    return this.json<KanbanBoard>(
+      await this.call(`/api/kanban/boards/${encodeURIComponent(boardId)}`),
+    );
+  }
+
+  async createKanbanBoard(body: CreateBoardRequest): Promise<KanbanBoard> {
+    return this.json<KanbanBoard>(
+      await this.call("/api/kanban/boards", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  async updateKanbanBoard(
+    boardId: string,
+    body: UpdateBoardRequest,
+  ): Promise<KanbanBoard> {
+    return this.json<KanbanBoard>(
+      await this.call(`/api/kanban/boards/${encodeURIComponent(boardId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  /** Delete a whole board. Gateway returns 204 on success (no body). */
+  async deleteKanbanBoard(boardId: string): Promise<void> {
+    const res = await this.call(
+      `/api/kanban/boards/${encodeURIComponent(boardId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async addKanbanCard(
+    boardId: string,
+    body: CreateCardRequest,
+  ): Promise<KanbanCard> {
+    return this.json<KanbanCard>(
+      await this.call(
+        `/api/kanban/boards/${encodeURIComponent(boardId)}/cards`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async updateKanbanCard(
+    boardId: string,
+    cardId: string,
+    body: Omit<UpdateCardRequest, "boardId">,
+  ): Promise<KanbanCard> {
+    return this.json<KanbanCard>(
+      await this.call(`/api/kanban/cards/${encodeURIComponent(cardId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ boardId, ...body }),
+      }),
+    );
+  }
+
+  /**
+   * Move (or reorder) a card. The gateway rejects a stale `rev` with 409 and
+   * echoes the current board; we surface that as `{ stale: true, board }` so
+   * the tool executor can refetch the fresh rev and retry once — the model
+   * never has to manage rev itself.
+   */
+  async moveKanbanCard(
+    boardId: string,
+    cardId: string,
+    body: { toColumnId: string; toIndex: number; rev: number },
+  ): Promise<{ stale: boolean; board: KanbanBoard }> {
+    const res = await this.call(
+      `/api/kanban/cards/${encodeURIComponent(cardId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ boardId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as { error?: string; board: KanbanBoard };
+      return { stale: true, board: b.board };
+    }
+    return { stale: false, board: await this.json<KanbanBoard>(res) };
+  }
+
+  /** Delete a card. `?boardId=` locates it; 204 on success (no body). */
+  async deleteKanbanCard(boardId: string, cardId: string): Promise<void> {
+    const res = await this.call(
+      `/api/kanban/cards/${encodeURIComponent(cardId)}?boardId=${encodeURIComponent(boardId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  /** Build a GatewayError from a non-2xx response (used by the 204 methods). */
+  private async error(res: Response): Promise<GatewayError> {
+    let msg = `${res.status}`;
+    try {
+      const b = (await res.json()) as { error?: string };
+      if (b?.error) msg = b.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    return new GatewayError(res.status, msg);
   }
 
   /** Verify a browser's cookie by proxying to GET /api/auth/me. */

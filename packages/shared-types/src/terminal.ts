@@ -687,3 +687,127 @@ export const TestServerResponseSchema = z.object({
   error: z.string().optional(),
 });
 export type TestServerResponse = z.infer<typeof TestServerResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: Kanban /api/kanban/*
+// ---------------------------------------------------------------------------
+// A gateway-owned, multi-board task tracker. State lives in a data/kanban.json
+// sidecar (see apps/terminal-gateway/src/kanban.js). Ordering authority is
+// Column.cardIds[] ONLY — cards carry no columnId/order (a derived `columnId`
+// is added to GET responses for consumer convenience but never persisted).
+// Every board carries a monotonic `rev` for optimistic concurrency (see D3 in
+// docs/KANBAN-PLAN.md); a `move` with a stale rev is rejected 409.
+
+/** A single Kanban card. Persisted shape carries no column/order — position is
+ *  determined solely by the enclosing Column.cardIds[]. */
+export const KanbanCardSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** Derived on GET (the id of the column currently holding this card). Never
+   *  persisted — Column.cardIds is the source of truth. */
+  columnId: z.string().optional(),
+});
+export type KanbanCard = z.infer<typeof KanbanCardSchema>;
+
+/** A board column. `cardIds` is the ordered, authoritative card sequence. */
+export const KanbanColumnSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  cardIds: z.array(z.string()),
+});
+export type KanbanColumn = z.infer<typeof KanbanColumnSchema>;
+
+/** A full board with its columns and cards. Returned by GET /api/kanban/boards/:id. */
+export const KanbanBoardSchema = z.object({
+  id: z.string(),
+  /** The project name. */
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)),
+  /** Monotonic revision; bumped on every mutation of this board (optimistic concurrency). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columns: z.array(KanbanColumnSchema),
+  cards: z.array(KanbanCardSchema),
+});
+export type KanbanBoard = z.infer<typeof KanbanBoardSchema>;
+
+/** Lightweight board row for the list view (no cards/columns payload). */
+export const KanbanBoardSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tags: z.array(z.string()),
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columnCount: z.number().int(),
+  cardCount: z.number().int(),
+});
+export type KanbanBoardSummary = z.infer<typeof KanbanBoardSummarySchema>;
+
+/** Response body for GET /api/kanban/boards (200 OK). */
+export const KanbanListResponseSchema = z.object({
+  boards: z.array(KanbanBoardSummarySchema),
+});
+export type KanbanListResponse = z.infer<typeof KanbanListResponseSchema>;
+
+/** Request body for POST /api/kanban/boards (create a board). `columns` is
+ *  optional; when omitted the gateway seeds Backlog/To Do/In Progress/Done. */
+export const CreateBoardRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  columns: z.array(z.string().min(1).max(128)).optional(),
+});
+export type CreateBoardRequest = z.infer<typeof CreateBoardRequestSchema>;
+
+/** Request body for PATCH /api/kanban/boards/:boardId. */
+export const UpdateBoardRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine((b) => b.name !== undefined || b.tags !== undefined, {
+    message: "at least one of name/tags is required",
+  });
+export type UpdateBoardRequest = z.infer<typeof UpdateBoardRequestSchema>;
+
+/** Request body for POST /api/kanban/boards/:boardId/cards. Defaults to the
+ *  first column when columnId is omitted. */
+export const CreateCardRequestSchema = z.object({
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  columnId: z.string().optional(),
+});
+export type CreateCardRequest = z.infer<typeof CreateCardRequestSchema>;
+
+/** Request body for PATCH /api/kanban/cards/:cardId. `boardId` locates the card. */
+export const UpdateCardRequestSchema = z
+  .object({
+    boardId: z.string(),
+    title: z.string().min(1).max(512).optional(),
+    description: z.string().max(8192).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine(
+    (c) =>
+      c.title !== undefined ||
+      c.description !== undefined ||
+      c.tags !== undefined,
+    { message: "at least one of title/description/tags is required" },
+  );
+export type UpdateCardRequest = z.infer<typeof UpdateCardRequestSchema>;
+
+/** Request body for POST /api/kanban/cards/:cardId/move. `rev` is the board
+ *  revision the client observed; a mismatch is rejected 409 (stale). */
+export const MoveCardRequestSchema = z.object({
+  boardId: z.string(),
+  toColumnId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveCardRequest = z.infer<typeof MoveCardRequestSchema>;

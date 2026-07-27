@@ -26,6 +26,28 @@ export const WRITE_TOOLS = new Set([
   "run_codex",
   "browser_act",
   "browser_request_handoff",
+  // Kanban writes (D9). The routine four permit allow-always; kanban_delete is
+  // additionally in ONE_TIME_TOOLS so it is re-approved on every call.
+  "kanban_create",
+  "kanban_move",
+  "kanban_add_card",
+  "kanban_update_card",
+  "kanban_delete",
+]);
+
+/**
+ * WRITE tools consequential enough that each invocation is approved
+ * INDIVIDUALLY — the loop passes `allowAlways: false` for these, so an
+ * "allow always" choice is coerced to a one-time allow (see agent-loop.ts).
+ * kanban_delete (destroying a whole board) joins the browser/Codex writes here
+ * per D9 in docs/KANBAN-PLAN.md; the routine kanban writes are NOT listed and
+ * so may be allowed-always.
+ */
+export const ONE_TIME_TOOLS = new Set([
+  "browser_act",
+  "browser_request_handoff",
+  "run_codex",
+  "kanban_delete",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
@@ -268,6 +290,159 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "kanban_list",
+      description:
+        "List all Kanban boards (id, name, tags, rev, card/column counts). Read-only. Call this first to discover which boards exist before getting or mutating one.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kanban_get",
+      description:
+        "Get one Kanban board in full: its columns (with ordered cardIds), all cards, and the board's current rev. Read-only. Use before moving or editing cards so you know the column ids and card ids.",
+      parameters: {
+        type: "object",
+        properties: {
+          board_id: {
+            type: "string",
+            description: "Target board id (kb-...).",
+          },
+        },
+        required: ["board_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kanban_create",
+      description:
+        "Create a new Kanban board. Columns default to Backlog / To Do / In Progress / Done when not supplied. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 200 },
+          tags: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+          columns: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 128 },
+            description:
+              "Optional ordered column names; omit for the defaults.",
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kanban_delete",
+      description:
+        "Delete an entire Kanban board and all its cards. This is destructive and requires user approval EVERY time (no allow-always). Confirm the board id first.",
+      parameters: {
+        type: "object",
+        properties: {
+          board_id: {
+            type: "string",
+            description: "Board id to delete (kb-...).",
+          },
+        },
+        required: ["board_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kanban_move",
+      description:
+        "Move a card to a column at a given position (also used to reorder within a column). You supply board_id, card_id, to_column_id, and to_index; you do NOT manage the board rev — the tool reads it and retries on a concurrent change. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          board_id: { type: "string" },
+          card_id: { type: "string" },
+          to_column_id: {
+            type: "string",
+            description: "Destination column id (from kanban_get).",
+          },
+          to_index: {
+            type: "integer",
+            minimum: 0,
+            description: "0-based position within the destination column.",
+          },
+        },
+        required: ["board_id", "card_id", "to_column_id", "to_index"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kanban_add_card",
+      description:
+        "Add a card to a board. Lands in the given column, or the first column when column_id is omitted. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          board_id: { type: "string" },
+          title: { type: "string", minLength: 1, maxLength: 512 },
+          description: { type: "string", maxLength: 8192 },
+          tags: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+          column_id: {
+            type: "string",
+            description:
+              "Optional destination column id; omit for the first column.",
+          },
+        },
+        required: ["board_id", "title"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kanban_update_card",
+      description:
+        "Update a card's title, description, and/or tags. Provide at least one field to change. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          board_id: { type: "string" },
+          card_id: { type: "string" },
+          title: { type: "string", minLength: 1, maxLength: 512 },
+          description: { type: "string", maxLength: 8192 },
+          tags: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+        },
+        required: ["board_id", "card_id"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
@@ -290,6 +465,16 @@ export interface ToolArgs {
   index?: number;
   direction?: string;
   tab_id?: string;
+  // Kanban
+  board_id?: string;
+  card_id?: string;
+  to_column_id?: string;
+  to_index?: number;
+  column_id?: string;
+  title?: string;
+  description?: string;
+  tags?: string[];
+  columns?: string[];
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -338,6 +523,20 @@ export function describeCall(tool: string, args: ToolArgs): string {
       if (args.action === "close_tab")
         return `close browser tab ${args.tab_id ?? ""}`;
       return "go back in browser";
+    case "kanban_list":
+      return "list Kanban boards";
+    case "kanban_get":
+      return `get Kanban board ${args.board_id ?? ""}`.trimEnd();
+    case "kanban_create":
+      return `create Kanban board "${truncate(String(args.name ?? ""), 80)}"`;
+    case "kanban_delete":
+      return `delete Kanban board ${args.board_id ?? ""}`.trimEnd();
+    case "kanban_move":
+      return `move card ${args.card_id ?? ""} to column ${args.to_column_id ?? ""} (index ${args.to_index ?? 0})`;
+    case "kanban_add_card":
+      return `add card "${truncate(String(args.title ?? ""), 80)}"`;
+    case "kanban_update_card":
+      return `update card ${args.card_id ?? ""}`.trimEnd();
     default:
       return tool;
   }
@@ -490,6 +689,79 @@ export async function executeTool(
           truncated: r.truncated,
           output: r.output,
         });
+      }
+      case "kanban_list": {
+        const boards = await gateway.listKanbanBoards();
+        return JSON.stringify(boards);
+      }
+      case "kanban_get": {
+        if (!args.board_id) return "error: board_id is required";
+        const b = await gateway.getKanbanBoard(args.board_id);
+        return JSON.stringify(b);
+      }
+      case "kanban_create": {
+        if (!args.name) return "error: name is required";
+        const b = await gateway.createKanbanBoard({
+          name: args.name,
+          tags: args.tags ?? [],
+          ...(args.columns ? { columns: args.columns } : {}),
+        });
+        return JSON.stringify(b);
+      }
+      case "kanban_delete": {
+        if (!args.board_id) return "error: board_id is required";
+        await gateway.deleteKanbanBoard(args.board_id);
+        return `ok: board ${args.board_id} deleted`;
+      }
+      case "kanban_add_card": {
+        if (!args.board_id || !args.title)
+          return "error: board_id and title are required";
+        const c = await gateway.addKanbanCard(args.board_id, {
+          title: args.title,
+          description: args.description ?? "",
+          tags: args.tags ?? [],
+          ...(args.column_id ? { columnId: args.column_id } : {}),
+        });
+        return JSON.stringify(c);
+      }
+      case "kanban_update_card": {
+        if (!args.board_id || !args.card_id)
+          return "error: board_id and card_id are required";
+        const c = await gateway.updateKanbanCard(args.board_id, args.card_id, {
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.description !== undefined
+            ? { description: args.description }
+            : {}),
+          ...(args.tags ? { tags: args.tags } : {}),
+        });
+        return JSON.stringify(c);
+      }
+      case "kanban_move": {
+        if (
+          !args.board_id ||
+          !args.card_id ||
+          !args.to_column_id ||
+          typeof args.to_index !== "number"
+        )
+          return "error: board_id, card_id, to_column_id and to_index are required";
+        // The model does not manage rev: read the board's current rev, move,
+        // and on a 409 (stale) retry ONCE using the fresh board the gateway
+        // echoed back in the 409 body.
+        const board = await gateway.getKanbanBoard(args.board_id);
+        const move = { toColumnId: args.to_column_id, toIndex: args.to_index };
+        let r = await gateway.moveKanbanCard(args.board_id, args.card_id, {
+          ...move,
+          rev: board.rev,
+        });
+        if (r.stale) {
+          r = await gateway.moveKanbanCard(args.board_id, args.card_id, {
+            ...move,
+            rev: r.board.rev,
+          });
+        }
+        if (r.stale)
+          return "error: board changed concurrently; refetch and retry";
+        return JSON.stringify(r.board);
       }
       default:
         return `error: unknown tool ${tool}`;
