@@ -1,24 +1,35 @@
-// Agentic AI Creator REST integration test (iteration 1) — proves /api/agentic/*
-// against a real gateway with a temp AGENTIC_FILE sidecar (no tmux; the Creator
-// artifact is gateway-global, and iter1 spawns NO runs).
+// Agentic AI Creator REST integration test — proves /api/agentic/* against a real
+// gateway with a temp AGENTIC_FILE sidecar. Two halves:
 //
-// Covers (docs/AGENTIC-AI-CREATOR-PLAN.md §7, iter1 CRUD slice):
-//   - Agents:      create / list / get / patch / delete (+ rev bump + stale 409)
-//   - Connections: create / list / delete (NO patch, NO get-by-id — plan §3)
-//   - Apps:        create / list / get / patch / delete (+ rev bump + stale 409)
-//   - Publish:     PATCH /apps/:id/status flips status, bumps rev, NOT version;
-//                  PATCH /apps/:id (definition edit) bumps BOTH version + rev (D9)
-//   - Workflow validation: dangling edge / cycle -> 422 (with offending edge)
-//   - GET /mcp-servers -> pm + kanban
-//   - Auth:        cookie session AND scoped bearer token; bad bearer -> 401
-//   - CSRF:        foreign Origin -> 403 on a write; GET Origin-exempt;
-//                  missing Origin allowed (the bearer/CLI path)
-//   - 404s for unknown ids; 413 for an oversize body
-//   - Run routes are NOT active in iter1: GET /runs is read-only ([]), but
-//     POST /apps/:id/run and DELETE /runs/:id fall through to 404 and spawn nothing.
-// Auth ENABLED, like the kanban/pm tests.
-import { spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+//   ITERATION 1 (CRUD, no tmux): agents / connections / AgenticAIs CRUD + rev +
+//   optimistic-concurrency 409, workflow validation (dangling edge / cycle → 422),
+//   mcp-servers, bearer auth, CSRF, 404s, 413 oversize body. Auth ENABLED.
+//
+//   ITERATION 2 (RUN ENGINE, real tmux + a STUB CLI): the run-lifecycle routes are
+//   now ACTIVE (POST /apps/:id/run → 202, GET /runs/:id, DELETE /runs/:id → 204).
+//   Covered here (docs/AGENTIC-AI-CREATOR-PLAN.md §7):
+//     (g) referential integrity — deleting an agent/connection scrubs every
+//         dangling ref (agentIds / workflow node agentId / connectionIds /
+//         toolPolicies[].connectionId); closed node type (router → 422).
+//     (b) end-to-end run — codex-cli AND claude-cli stub → done (exit 0) /
+//         failed (exit non-zero); logTail surfaces the stub's stdout.
+//     (h) run tmux sessions use the `agrun-` prefix and NEVER appear in
+//         GET /api/sessions.
+//     (c) DELETE /runs/:id kills the run's live agrun- tmux job + marks cancelled.
+//     (f) config-freeze (D9) — editing the AgenticAI (and its agent) after a run
+//         starts does NOT change the run's resolvedConfig / agenticAiVersion.
+//     (a) THE LOAD-BEARING TEST — start a multi-step run mid-flight, SIGKILL the
+//         gateway (simulated crash), boot a FRESH gateway at the SAME AGENTIC_FILE
+//         + AGENT_RUNS_DIR, assert boot-rediscovery advances the run to completion
+//         (n1 done is only reachable if the new gateway spawned it) — D3 layer-2.
+//     (d) AGENT_MAX_CONCURRENT_RUNS exceeded → 429 too_many_runs.
+//     (e) per-step AGENT_RUN_TIMEOUT_MS → the step is reaped as `failed`.
+//
+// The STUB CLI (CODEX_COMMAND / CLAUDE_COMMAND both point at it — mirrors
+// test:codex's stub) reads the prompt on stdin, echoes known markers, and branches
+// on sentinels embedded in the objective: `SLEEP=<n>` sleeps n seconds; `__FAIL__`
+// exits non-zero. Never the real claude/codex binaries.
+import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,15 +45,36 @@ const ALLOWED_ORIGIN = "http://localhost:3000";
 const FOREIGN_ORIGIN = "http://evil.example.com";
 const API_TOKEN = "agentic-test-bearer-token-xyz";
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 let server;
+let serverOut = "";
 let cookie = "";
+let tmpDir = ""; // holds AGENTIC_FILE, AGENT_RUNS_DIR, stub, session cwd
 let agenticFile = "";
+let runsDir = "";
+let stubPath = "";
+let sessDir = "";
 let checks = 0;
 let tmuxBefore = new Set();
 
-// Snapshot current tmux session names (empty when no server is running). Used to
-// assert iter1 spawns NO new tmux session — a before/after diff so unrelated,
-// pre-existing dev sessions never trip the check.
+// The STUB provider CLI. Stands in for BOTH codex and claude (their command envs
+// both point here). Reads the prompt on stdin (codex: `- < prompt`; claude:
+// `cat prompt | claude ...`), echoes known markers to stdout (captured into
+// out.log by the wrapper), and branches on sentinels in the prompt. argv ignored.
+const STUB = `#!/usr/bin/env bash
+prompt="$(cat)"
+echo "STUB-PROVIDER-RAN"
+secs="$(printf '%s' "$prompt" | sed -n 's/.*SLEEP=\\([0-9][0-9]*\\).*/\\1/p' | head -n1)"
+if [ -n "$secs" ]; then sleep "$secs"; fi
+case "$prompt" in
+  *__FAIL__*) echo "stub-failure-boom" >&2; exit 7 ;;
+esac
+echo "STUB-DONE-OK"
+exit 0
+`;
+
+// All tmux session names right now (agrun- run jobs + web- targets included).
 function tmuxSessions() {
   try {
     const out = execFileSync("tmux", ["ls", "-F", "#{session_name}"], {
@@ -56,15 +88,31 @@ function tmuxSessions() {
         .filter(Boolean),
     );
   } catch {
-    // `tmux ls` exits non-zero when no server is running — that's fine.
     return new Set();
   }
 }
+function tmuxHasSession(name) {
+  try {
+    execFileSync("tmux", ["has-session", "-t", name], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function tmuxKill(name) {
+  try {
+    execFileSync("tmux", ["kill-session", "-t", name], { stdio: "ignore" });
+  } catch {
+    /* already gone */
+  }
+}
 
-function startServer() {
+// Start (or restart) the gateway. `env` overrides merge onto the run-engine base.
+// The SAME AGENTIC_FILE + AGENT_RUNS_DIR + stub are always used so a restart
+// rediscovers persisted runs from disk (the point of the load-bearing test).
+function startServer(extraEnv = {}) {
+  serverOut = "";
   return new Promise((resolve, reject) => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-endpoints-"));
-    agenticFile = path.join(tmpDir, "agentic.json");
     server = spawn("node", ["src/server.js"], {
       cwd: ROOT,
       env: {
@@ -73,31 +121,60 @@ function startServer() {
         HOST: "127.0.0.1",
         GATEWAY_AUTH_USER: AUTH_USER,
         GATEWAY_AUTH_PASSWORD: AUTH_PASS,
-        // Neutralize any leaked parent-env auth vars that would change the mode.
         GATEWAY_AUTH_PASSWORD_HASH: "",
         GATEWAY_AUTH_TOKEN: "",
         ALLOWED_ORIGINS: ALLOWED_ORIGIN,
         AGENTIC_FILE: agenticFile,
-        GATEWAY_API_TOKEN: API_TOKEN, // scoped bearer for the CLI path
+        GATEWAY_API_TOKEN: API_TOKEN,
         KANBAN_API_TOKEN: "",
+        // ---- Run engine ----
+        CODEX_COMMAND: stubPath,
+        CLAUDE_COMMAND: stubPath,
+        AGENT_RUNS_DIR: runsDir,
+        AGENTIC_POLL_INTERVAL_MS: "400", // drain fast in the test
+        ...extraEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let out = "";
+    let resolved = false;
     server.stdout.on("data", (d) => {
-      out += d.toString();
-      if (out.includes("listening on")) resolve();
+      serverOut += d.toString();
+      if (!resolved && serverOut.includes("listening on")) {
+        resolved = true;
+        resolve();
+      }
     });
     server.stderr.on("data", (d) => process.stderr.write(`[gw] ${d}`));
-    setTimeout(() => reject(new Error("server did not start in time")), 8000);
+    setTimeout(() => {
+      if (!resolved) reject(new Error("server did not start in time"));
+    }, 8000);
   });
 }
+// Kill the current gateway and WAIT for the process to exit (so the next start
+// doesn't hit EADDRINUSE on the shared port).
+function stopServer(signal = "SIGTERM") {
+  return new Promise((resolve) => {
+    if (!server || server.killed || server.exitCode !== null) return resolve();
+    server.once("exit", () => resolve());
+    server.kill(signal);
+  });
+}
+
 function cleanup() {
-  if (server && !server.killed) server.kill("SIGTERM");
-  try {
-    if (agenticFile)
-      fs.rmSync(path.dirname(agenticFile), { recursive: true, force: true });
-  } catch {}
+  // Kill any tmux session this test created (agrun- run jobs + web- targets),
+  // diffed against the pre-test snapshot so unrelated dev sessions are untouched.
+  const after = tmuxSessions();
+  for (const name of after) {
+    if (tmuxBefore.has(name)) continue;
+    if (name.startsWith("agrun-") || name.startsWith("web-")) tmuxKill(name);
+  }
+  if (tmpDir) {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
+  }
+  if (server && !server.killed && server.exitCode === null)
+    server.kill("SIGTERM");
 }
 function fail(m) {
   console.error(`\nFAIL: ${m}`);
@@ -137,18 +214,125 @@ async function login() {
   cookie = /gw_session=[^;]+/.exec(res.headers.get("set-cookie") || "")[0];
 }
 
+// Poll GET /runs/:id until `pred(run)` is true or the deadline elapses.
+async function pollRun(runId, pred, { deadlineMs = 20000, label = "" } = {}) {
+  const t0 = Date.now();
+  let last;
+  while (Date.now() - t0 < deadlineMs) {
+    const res = await req("GET", `/api/agentic/runs/${enc(runId)}`);
+    if (res.status === 200) {
+      last = await res.json();
+      if (pred(last)) return last;
+    }
+    await sleep(200);
+  }
+  fail(
+    `pollRun timeout ${label}: run ${runId} never satisfied predicate; last=${JSON.stringify(
+      last,
+    )}`,
+  );
+}
+const nodeOf = (run, nodeId) =>
+  (run.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+
+// Create a fresh runner app (N codex-cli agents unless overridden) and return
+// its id. Agents are created fresh so referential-integrity tests can't touch it.
+async function createRunnerApp({
+  mode = "single",
+  providers = ["codex-cli"],
+} = {}) {
+  const agentIds = [];
+  for (let i = 0; i < providers.length; i++) {
+    const res = await req("POST", "/api/agentic/agents", {
+      body: {
+        name: `runner-agent-${providers[i]}-${Date.now()}-${i}`,
+        runtimeProvider: providers[i],
+        sandboxMode: "read-only",
+        systemPrompt: "",
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 201, `runner agent create -> ${res.status}`);
+    agentIds.push((await res.json()).id);
+  }
+  const res = await req("POST", "/api/agentic/apps", {
+    body: {
+      name: `runner-app-${Date.now()}`,
+      orchestrationMode: mode,
+      agentIds,
+    },
+    origin: ALLOWED_ORIGIN,
+  });
+  assert(res.status === 201, `runner app create -> ${res.status}`);
+  const app = await res.json();
+  return { appId: app.id, agentIds };
+}
+
 async function main() {
+  // ---- Unit check: claude-cli agent-task is MCP fail-closed (iter2) ----------
+  // claude -p otherwise does ambient MCP discovery from the run cwd's ~/.claude.json
+  // project scope; an unhardened run would silently inherit that cwd's MCP servers
+  // UNMEDIATED. The builder must pin an empty --mcp-config + --strict-mcp-config so
+  // an iter2 run reaches ZERO MCP servers. This asserts that at the source (no
+  // gateway needed) so it can never silently regress before the iter3 proxy lands.
+  {
+    const rt = (await import("../src/agent-runtime.js")).default;
+    const inv = rt.buildInvocation({
+      runId: "utR",
+      nodeId: "utN",
+      agent: {
+        runtimeProvider: "claude-cli",
+        sandboxMode: "workspace-write",
+        systemPrompt: "SYS",
+      },
+      cwd: "/tmp/ut-cwd",
+      promptText: "UNIT-PROMPT-SENTINEL",
+      scratchDir: "/tmp/ut-scratch/utR/utN",
+      server: { type: "local" },
+    });
+    const wrapper = inv.files.find((f) => f.relPath === "wrapper.sh").content;
+    const mcp = inv.files.find((f) => f.relPath === "mcp.json");
+    assert(
+      wrapper.includes("--strict-mcp-config") &&
+        wrapper.includes("--mcp-config"),
+      "claude-cli invocation must pass --mcp-config + --strict-mcp-config (MCP fail-closed)",
+    );
+    assert(
+      !!mcp && /\{\s*"mcpServers"\s*:\s*\{\s*\}\s*\}/.test(mcp.content),
+      "claude-cli must ship an EMPTY per-run mcp.json (zero MCP servers under --strict-mcp-config)",
+    );
+    assert(
+      !inv.tmuxArg.includes("UNIT-PROMPT-SENTINEL"),
+      "prompt text must never appear on the tmux/argv command line",
+    );
+    console.log(
+      `  ok: claude-cli agent-task is MCP fail-closed (empty --mcp-config + --strict-mcp-config; prompt off-argv)`,
+    );
+  }
+
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-endpoints-"));
+  agenticFile = path.join(tmpDir, "agentic.json");
+  runsDir = path.join(tmpDir, "agentic-runs"); // absolute — required
+  sessDir = path.join(tmpDir, "sess");
+  stubPath = path.join(tmpDir, "provider-stub.sh");
+  fs.mkdirSync(runsDir, { recursive: true });
+  fs.mkdirSync(sessDir, { recursive: true });
+  fs.writeFileSync(stubPath, STUB, { mode: 0o755 });
+
   tmuxBefore = tmuxSessions();
   await startServer();
   await login();
   console.log(
-    `gateway up on :${PORT} (auth enabled, temp AGENTIC_FILE, bearer configured)`,
+    `gateway up on :${PORT} (auth enabled, temp AGENTIC_FILE + AGENT_RUNS_DIR, stub CLI, bearer)`,
   );
+
+  // ======================================================================
+  // ITERATION 1 — CRUD surface (unchanged)
+  // ======================================================================
 
   // ---- Agents: create / list / get / patch / delete ---------------------
   let agent;
   {
-    // Missing runtimeProvider -> 400 (valid-body guard).
     const bad = await req("POST", "/api/agentic/agents", {
       body: { name: "NoProvider" },
       origin: ALLOWED_ORIGIN,
@@ -188,7 +372,6 @@ async function main() {
     console.log(`  ok: list + get agent`);
   }
   {
-    // PATCH bumps rev.
     const res = await req("PATCH", `/api/agentic/agents/${enc(agent.id)}`, {
       body: { role: "senior-research", sandboxMode: "workspace-write" },
       origin: ALLOWED_ORIGIN,
@@ -202,14 +385,12 @@ async function main() {
     console.log(`  ok: patch agent (rev ${agent.rev})`);
   }
   {
-    // Stale optimistic-concurrency: wrong expectedRev -> 409 (no record in body).
     const stale = await req("PATCH", `/api/agentic/agents/${enc(agent.id)}`, {
       body: { role: "x", expectedRev: agent.rev - 1 },
       origin: ALLOWED_ORIGIN,
     });
     assert(stale.status === 409, `stale agent patch -> ${stale.status}`);
     assert(/stale/i.test((await stale.json()).error), "409 stale message");
-    // Correct expectedRev -> 200.
     const ok = await req("PATCH", `/api/agentic/agents/${enc(agent.id)}`, {
       body: { role: "y", expectedRev: agent.rev },
       origin: ALLOWED_ORIGIN,
@@ -289,7 +470,6 @@ async function main() {
     console.log(`  ok: list (summary) + get (full) app`);
   }
   {
-    // PATCH (definition edit, D9) bumps BOTH version and rev.
     const res = await req("PATCH", `/api/agentic/apps/${enc(app.id)}`, {
       body: {
         description: "Updated objective",
@@ -306,7 +486,6 @@ async function main() {
     console.log(`  ok: patch app bumps version + rev (v${app.version})`);
   }
   {
-    // PATCH /status (publish) flips status, bumps rev, NOT version.
     const versionBefore = app.version;
     const res = await req("PATCH", `/api/agentic/apps/${enc(app.id)}/status`, {
       body: { status: "published" },
@@ -321,13 +500,11 @@ async function main() {
     );
     assert(p.rev === app.rev + 1, "rev bumped by publish");
     app = p;
-    // Bad status -> 400.
     const bad = await req("PATCH", `/api/agentic/apps/${enc(app.id)}/status`, {
       body: { status: "nonsense" },
       origin: ALLOWED_ORIGIN,
     });
     assert(bad.status === 400, `bad status -> ${bad.status}`);
-    // Stale publish -> 409.
     const stale = await req(
       "PATCH",
       `/api/agentic/apps/${enc(app.id)}/status`,
@@ -342,7 +519,6 @@ async function main() {
     );
   }
   {
-    // App stale PATCH (definition edit) -> 409.
     const stale = await req("PATCH", `/api/agentic/apps/${enc(app.id)}`, {
       body: { description: "z", expectedRev: app.rev - 1 },
       origin: ALLOWED_ORIGIN,
@@ -354,7 +530,6 @@ async function main() {
 
   // ---- Workflow validation: dangling edge / cycle -> 422 ----------------
   {
-    // Valid workflow accepted.
     const okWf = await req("POST", "/api/agentic/apps", {
       body: {
         name: "GraphOK",
@@ -373,7 +548,6 @@ async function main() {
     const okApp = await okWf.json();
     assert(okApp.workflow.edges.length === 1, "valid workflow edge kept");
 
-    // Dangling edge -> 422 with offending edge in the body.
     const dangling = await req("POST", "/api/agentic/apps", {
       body: {
         name: "Dangling",
@@ -389,7 +563,6 @@ async function main() {
     const dj = await dangling.json();
     assert(dj.edge && dj.edge.to === "ghost", "422 carries offending edge");
 
-    // Cycle -> 422.
     const cyc = await req("POST", "/api/agentic/apps", {
       body: {
         name: "Cycle",
@@ -407,7 +580,6 @@ async function main() {
     assert(cyc.status === 422, `cycle -> ${cyc.status}`);
     assert(/cycle/i.test((await cyc.json()).error), "cycle error message");
 
-    // Cycle rejection on PATCH leaves the store clean (still fetchable, v unchanged).
     const before = await (
       await req("GET", `/api/agentic/apps/${enc(okApp.id)}`)
     ).json();
@@ -437,6 +609,27 @@ async function main() {
     );
   }
 
+  // ---- Closed WorkflowNode.type — non "agent-task" rejected (422) -------
+  {
+    const bad = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: "RouterNode",
+        workflow: {
+          nodes: [{ id: "n1", type: "router", agentId: agent.id }],
+          edges: [],
+          entryNodeId: "n1",
+        },
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(bad.status === 422, `router node type -> ${bad.status} (exp 422)`);
+    assert(
+      /unsupported node type/i.test((await bad.json()).error),
+      "422 names the unsupported node type",
+    );
+    console.log(`  ok: WorkflowNode.type closed to agent-task (router -> 422)`);
+  }
+
   // ---- GET /mcp-servers -> pm + kanban ----------------------------------
   {
     const res = await req("GET", "/api/agentic/mcp-servers");
@@ -451,26 +644,22 @@ async function main() {
 
   // ---- Bearer-token auth (the external-CLI path) ------------------------
   {
-    // Bearer GET, no cookie -> 200 (missing Origin is allowed).
     const g = await req("GET", "/api/agentic/agents", {
       cookie: false,
       headers: { authorization: `Bearer ${API_TOKEN}` },
     });
     assert(g.status === 200, `bearer GET -> ${g.status}`);
-    // Bearer write, no cookie, no Origin -> 201 (CSRF guard is a no-op w/o Origin).
     const w = await req("POST", "/api/agentic/agents", {
       cookie: false,
       headers: { authorization: `Bearer ${API_TOKEN}` },
       body: { name: "ViaCli", runtimeProvider: "claude-cli" },
     });
     assert(w.status === 201, `bearer write -> ${w.status}`);
-    // Bad bearer, no cookie -> 401.
     const bad = await req("GET", "/api/agentic/agents", {
       cookie: false,
       headers: { authorization: "Bearer wrong-token" },
     });
     assert(bad.status === 401, `bad bearer -> ${bad.status}`);
-    // No auth at all -> 401.
     const none = await req("GET", "/api/agentic/agents", { cookie: false });
     assert(none.status === 401, `no auth -> ${none.status}`);
     console.log(`  ok: bearer auth (GET 200, write 201, bad 401, none 401)`);
@@ -507,40 +696,8 @@ async function main() {
     console.log(`  ok: 404 for unknown agent/app/connection ids`);
   }
 
-  // ---- Run routes NOT active in iter1 -----------------------------------
-  {
-    // GET /runs IS active (read-only) and empty.
-    const runs = await req("GET", "/api/agentic/runs");
-    assert(runs.status === 200, `list runs -> ${runs.status}`);
-    assert(Array.isArray((await runs.json()).runs), "runs list is an array");
-    const rGet = await req("GET", "/api/agentic/runs/run-nope");
-    assert(rGet.status === 404, `unknown run -> ${rGet.status}`);
-    // POST /apps/:id/run must NOT be wired -> 404 (cookie + allowed origin so
-    // the CSRF/auth gate does not mask the fall-through 404).
-    const start = await req("POST", `/api/agentic/apps/${enc(app.id)}/run`, {
-      body: { objective: "do a thing" },
-      origin: ALLOWED_ORIGIN,
-    });
-    assert(
-      start.status === 404,
-      `start-run route -> ${start.status} (must be inactive in iter1)`,
-    );
-    // DELETE /runs/:id (kill) also not wired -> 404.
-    const kill = await req("DELETE", "/api/agentic/runs/run-nope", {
-      origin: ALLOWED_ORIGIN,
-    });
-    assert(kill.status === 404, `kill-run route -> ${kill.status}`);
-    console.log(
-      `  ok: run engine inactive — GET /runs read-only, run/kill routes 404`,
-    );
-  }
-
   // ---- 413 for an oversize body -----------------------------------------
   {
-    // > BODY_LIMIT (64 KiB). readBody rejects at the cap and destroys the
-    // socket, so the gateway may either send a clean 413 OR the socket close
-    // may surface as a fetch network error — both prove the oversize body was
-    // rejected (never processed into a 201). Accept either; forbid a 2xx.
     const huge = JSON.stringify({
       name: "Huge",
       runtimeProvider: "codex-cli",
@@ -563,45 +720,516 @@ async function main() {
     console.log(`  ok: oversize body rejected (${status})`);
   }
 
-  // ---- delete agent / connection / app (round out CRUD) -----------------
+  // ---- GET /runs read-only + unknown run 404 ----------------------------
   {
-    const da = await req("DELETE", `/api/agentic/agents/${enc(agent.id)}`, {
-      origin: ALLOWED_ORIGIN,
-    });
-    assert(da.status === 204, `delete agent -> ${da.status}`);
-    assert(
-      (await req("GET", `/api/agentic/agents/${enc(agent.id)}`)).status === 404,
-      "deleted agent now 404",
-    );
-    const dc = await req(
-      "DELETE",
-      `/api/agentic/connections/${enc(connection.id)}`,
-      { origin: ALLOWED_ORIGIN },
-    );
-    assert(dc.status === 204, `delete connection -> ${dc.status}`);
-    const dp = await req("DELETE", `/api/agentic/apps/${enc(app.id)}`, {
-      origin: ALLOWED_ORIGIN,
-    });
-    assert(dp.status === 204, `delete app -> ${dp.status}`);
-    assert(
-      (await req("GET", `/api/agentic/apps/${enc(app.id)}`)).status === 404,
-      "deleted app now 404",
-    );
-    console.log(`  ok: delete agent/connection/app (204 + subsequent 404)`);
+    const runs = await req("GET", "/api/agentic/runs");
+    assert(runs.status === 200, `list runs -> ${runs.status}`);
+    assert(Array.isArray((await runs.json()).runs), "runs list is an array");
+    const rGet = await req("GET", "/api/agentic/runs/run-nope");
+    assert(rGet.status === 404, `unknown run -> ${rGet.status}`);
+    console.log(`  ok: GET /runs read-only (array), unknown run -> 404`);
   }
 
-  // ---- No NEW tmux sessions were spawned by iter1 -----------------------
-  // Diff against the pre-test snapshot so unrelated, long-lived dev sessions
-  // don't cause a false positive. iter1 has no route that reaches the run
-  // engine, so nothing should be added.
+  // ---- (g) referential integrity: delete agent / connection scrubs refs -
   {
-    const after = tmuxSessions();
-    const added = [...after].filter((s) => !tmuxBefore.has(s));
+    const c = await req("POST", "/api/agentic/connections", {
+      body: { targetType: "kanban", scope: "fixed" },
+      origin: ALLOWED_ORIGIN,
+    });
+    const connId = (await c.json()).id;
+    const a = await req("POST", "/api/agentic/agents", {
+      body: {
+        name: "ScrubMe",
+        runtimeProvider: "codex-cli",
+        toolPolicies: [{ connectionId: connId, tools: "all", policy: "allow" }],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    const scrubAgent = await a.json();
+    const p = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: "ScrubApp",
+        orchestrationMode: "single",
+        agentIds: [scrubAgent.id],
+        connectionIds: [connId],
+        workflow: {
+          nodes: [{ id: "n1", type: "agent-task", agentId: scrubAgent.id }],
+          edges: [],
+          entryNodeId: "n1",
+        },
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    const scrubApp = await p.json();
+    const vBefore = scrubApp.version;
+
+    // Delete the agent -> scrub agentIds[] + null the node's agentId (node kept).
+    const da = await req(
+      "DELETE",
+      `/api/agentic/agents/${enc(scrubAgent.id)}`,
+      {
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(da.status === 204, `delete scrub agent -> ${da.status}`);
+    const afterAgent = await (
+      await req("GET", `/api/agentic/apps/${enc(scrubApp.id)}`)
+    ).json();
+    assert(
+      !afterAgent.agentIds.includes(scrubAgent.id),
+      "deleted agent scrubbed from app.agentIds",
+    );
+    const node = afterAgent.workflow.nodes.find((n) => n.id === "n1");
+    assert(node, "workflow node KEPT after agent delete (edges not dangled)");
+    assert(
+      node.agentId === undefined || node.agentId === null,
+      "workflow node agentId cleared after agent delete",
+    );
+    assert(
+      afterAgent.version === vBefore + 1,
+      `agent-delete scrub bumped app version (${vBefore} -> ${afterAgent.version})`,
+    );
+
+    // Delete the connection -> scrub connectionIds[] + agent.toolPolicies[].
+    const dc = await req("DELETE", `/api/agentic/connections/${enc(connId)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(dc.status === 204, `delete scrub connection -> ${dc.status}`);
+    const afterConn = await (
+      await req("GET", `/api/agentic/apps/${enc(scrubApp.id)}`)
+    ).json();
+    assert(
+      !afterConn.connectionIds.includes(connId),
+      "deleted connection scrubbed from app.connectionIds",
+    );
+    // A separate agent still referencing the connection has its policy scrubbed.
+    const a2 = await req("POST", "/api/agentic/agents", {
+      body: { name: "PolicyHolder", runtimeProvider: "codex-cli" },
+      origin: ALLOWED_ORIGIN,
+    });
+    // (re-add a connection + policy, then delete, to prove toolPolicy scrub)
+    const c2 = await req("POST", "/api/agentic/connections", {
+      body: { targetType: "pm", scope: "fixed" },
+      origin: ALLOWED_ORIGIN,
+    });
+    const conn2 = (await c2.json()).id;
+    const holder = await a2.json();
+    await req("PATCH", `/api/agentic/agents/${enc(holder.id)}`, {
+      body: {
+        toolPolicies: [{ connectionId: conn2, tools: "all", policy: "deny" }],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    await req("DELETE", `/api/agentic/connections/${enc(conn2)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    const holderAfter = await (
+      await req("GET", `/api/agentic/agents/${enc(holder.id)}`)
+    ).json();
+    assert(
+      !holderAfter.toolPolicies.some((tp) => tp.connectionId === conn2),
+      "deleted connection scrubbed from agent.toolPolicies",
+    );
+    // Clean up scrub fixtures.
+    await req("DELETE", `/api/agentic/apps/${enc(scrubApp.id)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    await req("DELETE", `/api/agentic/agents/${enc(holder.id)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    console.log(
+      `  ok: (g) referential integrity — agent/connection deletes scrub agentIds, node agentId, connectionIds, toolPolicies`,
+    );
+  }
+
+  // ---- No tmux sessions spawned by any CRUD op --------------------------
+  {
+    const added = [...tmuxSessions()].filter((s) => !tmuxBefore.has(s));
     assert(
       added.length === 0,
-      `iter1 spawned no new tmux sessions (new: ${added.join(" | ")})`,
+      `CRUD spawned no tmux sessions (new: ${added.join(" | ")})`,
     );
-    console.log(`  ok: no new tmux sessions spawned by iter1`);
+    console.log(`  ok: CRUD phase spawned no tmux sessions`);
+  }
+
+  // ======================================================================
+  // ITERATION 2 — RUN ENGINE (real tmux + stub CLI)
+  // ======================================================================
+
+  // Create ONE reusable target terminal session (a real web- tmux session).
+  let targetSessionId;
+  {
+    const res = await req("POST", "/api/sessions", {
+      body: { name: "agentic-run-target", cwd: sessDir },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 201, `create target session -> ${res.status}`);
+    targetSessionId = (await res.json()).id;
+    await sleep(700); // let the shell settle so pane_current_path resolves
+    console.log(`  ok: created run target session ${targetSessionId}`);
+  }
+
+  // ---- (b) end-to-end: codex-cli happy path (exit 0 -> done) + (h) prefix
+  {
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "do the thing SLEEP=2" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start run -> ${res.status} (exp 202)`);
+    const run = await res.json();
+    assert(/^run-/.test(run.id), "run id prefix run-");
+    assert(run.agenticAiId === appId, "run tied to app");
+    assert(
+      run.resolvedConfig && run.resolvedConfig.workflow,
+      "run froze resolvedConfig",
+    );
+    // startRun awaits the first advance, so n0 is spawned+running by 202.
+    const n0 = nodeOf(run, "n0");
+    assert(
+      n0 && n0.status === "running",
+      `n0 running at 202 (got ${n0 && n0.status})`,
+    );
+
+    // (h) the run tmux session is live under the agrun- prefix and is NOT a web-
+    //     session in GET /api/sessions.
+    const agrun = `agrun-${run.id}-n0`;
+    assert(tmuxHasSession(agrun), `agrun tmux session live: ${agrun}`);
+    assert(!agrun.startsWith("web-"), "run session is NOT web- prefixed");
+    const sess = await (await req("GET", "/api/sessions")).json();
+    const ids = (sess.sessions || sess || []).map((s) => s.id || s);
+    assert(
+      !ids.some((id) => String(id).includes("agrun-")),
+      `agrun- session must NOT appear in GET /api/sessions (got: ${ids.join(",")})`,
+    );
+
+    const done = await pollRun(run.id, (r) => r.status === "completed", {
+      label: "codex happy path",
+    });
+    assert(nodeOf(done, "n0").status === "done", "n0 done after exit 0");
+    assert(
+      /STUB-PROVIDER-RAN/.test(nodeOf(done, "n0").logTail || "") &&
+        /STUB-DONE-OK/.test(nodeOf(done, "n0").logTail || ""),
+      "logTail surfaces the stub's stdout markers",
+    );
+    assert(!tmuxHasSession(agrun), "agrun tmux session gone after completion");
+    console.log(
+      `  ok: (b)+(h) codex-cli run -> completed, n0 done, logTail present, agrun- prefix + absent from /api/sessions`,
+    );
+  }
+
+  // ---- (b) failure path: exit non-zero -> node failed + run failed ------
+  {
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "boom __FAIL__" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start fail run -> ${res.status}`);
+    const run = await res.json();
+    const done = await pollRun(
+      run.id,
+      (r) => r.status === "failed" || r.status === "completed",
+      { label: "codex fail path" },
+    );
+    assert(done.status === "failed", `run failed (got ${done.status})`);
+    assert(nodeOf(done, "n0").status === "failed", "n0 failed after exit 7");
+    assert(
+      /stub-failure-boom/.test(nodeOf(done, "n0").logTail || ""),
+      "failure logTail captured",
+    );
+    console.log(
+      `  ok: (b) codex-cli exit non-zero -> node failed + run failed`,
+    );
+  }
+
+  // ---- (b) claude-cli provider happy path (proves the second provider) --
+  {
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["claude-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "claude does it" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start claude run -> ${res.status}`);
+    const run = await res.json();
+    const done = await pollRun(run.id, (r) => r.status === "completed", {
+      label: "claude happy path",
+    });
+    assert(nodeOf(done, "n0").status === "done", "claude n0 done");
+    assert(
+      /STUB-DONE-OK/.test(nodeOf(done, "n0").logTail || ""),
+      "claude logTail present (cat prompt | claude stub path)",
+    );
+    console.log(`  ok: (b) claude-cli provider run -> completed, n0 done`);
+  }
+
+  // ---- (c) DELETE /runs/:id kills the live agrun- job + marks cancelled --
+  {
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "long job SLEEP=30" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start long run -> ${res.status}`);
+    const run = await res.json();
+    const agrun = `agrun-${run.id}-n0`;
+    assert(tmuxHasSession(agrun), "long run agrun job live before DELETE");
+
+    const del = await req("DELETE", `/api/agentic/runs/${enc(run.id)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(del.status === 204, `DELETE run -> ${del.status} (exp 204)`);
+    await sleep(300);
+    assert(!tmuxHasSession(agrun), "agrun tmux job killed by DELETE");
+    const after = await (
+      await req("GET", `/api/agentic/runs/${enc(run.id)}`)
+    ).json();
+    assert(after.status === "cancelled", `run cancelled (got ${after.status})`);
+    assert(
+      nodeOf(after, "n0").status === "skipped",
+      "running node flipped to skipped on cancel",
+    );
+    console.log(`  ok: (c) DELETE run -> 204, agrun- killed, run cancelled`);
+  }
+
+  // ---- (f) config-freeze (D9): editing app+agent after start is invisible
+  {
+    const { appId, agentIds } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "freeze me SLEEP=30" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start freeze run -> ${res.status}`);
+    const run = await res.json();
+    const frozenVersion = run.agenticAiVersion;
+    const frozenAgentPrompt =
+      run.resolvedConfig.agents[agentIds[0]].systemPrompt;
+
+    // Edit the app (definition edit -> version bump) AND the agent's systemPrompt.
+    const pApp = await req("PATCH", `/api/agentic/apps/${enc(appId)}`, {
+      body: { description: "edited after run started" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(
+      (await pApp.json()).version === frozenVersion + 1,
+      "app version bumped by the post-start edit",
+    );
+    await req("PATCH", `/api/agentic/agents/${enc(agentIds[0])}`, {
+      body: { systemPrompt: "MUTATED-AFTER-START" },
+      origin: ALLOWED_ORIGIN,
+    });
+
+    // The run's frozen snapshot is untouched.
+    const after = await (
+      await req("GET", `/api/agentic/runs/${enc(run.id)}`)
+    ).json();
+    assert(
+      after.agenticAiVersion === frozenVersion,
+      `run agenticAiVersion frozen (${after.agenticAiVersion} vs ${frozenVersion})`,
+    );
+    assert(
+      after.resolvedConfig.agents[agentIds[0]].systemPrompt ===
+        frozenAgentPrompt,
+      "run resolvedConfig agent systemPrompt frozen (not the mutated value)",
+    );
+    assert(
+      after.resolvedConfig.agents[agentIds[0]].systemPrompt !==
+        "MUTATED-AFTER-START",
+      "run did NOT pick up the post-start agent edit",
+    );
+    // Kill the freeze run to free the slot.
+    await req("DELETE", `/api/agentic/runs/${enc(run.id)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    await sleep(200);
+    console.log(
+      `  ok: (f) config-freeze — post-start app+agent edits invisible to the run`,
+    );
+  }
+
+  // ---- (a) THE LOAD-BEARING TEST: crash mid-run, boot rediscovery -------
+  {
+    const { appId } = await createRunnerApp({
+      mode: "sequential",
+      providers: ["codex-cli", "codex-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: {
+        sessionId: targetSessionId,
+        objective: "survive restart SLEEP=5",
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start restart run -> ${res.status}`);
+    const run = await res.json();
+    const runId = run.id;
+    const n0Sess = `agrun-${runId}-n0`;
+    const n1Sess = `agrun-${runId}-n1`;
+    // 202 guarantees n0 spawned+running; n1 not yet (sequential, edge-gated).
+    assert(nodeOf(run, "n0").status === "running", "n0 running at 202");
+    assert(nodeOf(run, "n1").status === "pending", "n1 still pending at 202");
+    assert(tmuxHasSession(n0Sess), "n0 agrun job live before crash");
+    assert(!tmuxHasSession(n1Sess), "n1 NOT spawned before crash");
+
+    // Simulate a CRASH: SIGKILL (not SIGTERM) the gateway while n0 sleeps.
+    await stopServer("SIGKILL");
+    // The detached tmux job must OUTLIVE the gateway (the whole point of D3/tmux).
+    assert(
+      tmuxHasSession(n0Sess),
+      "n0 agrun job survived the gateway SIGKILL (tmux is the process owner)",
+    );
+
+    // Boot a FRESH gateway at the SAME AGENTIC_FILE + AGENT_RUNS_DIR + stub.
+    await startServer();
+    await login(); // in-memory sessions were lost on restart
+    // Boot rediscovery should have logged (best-effort corroboration).
+    const bootSawRun = /rediscovered at boot/.test(serverOut);
+
+    // THE assertion: the run advances to completion under the NEW gateway. n1
+    // done is ONLY reachable if the fresh gateway reaped n0 and spawned n1.
+    const done = await pollRun(
+      runId,
+      (r) => r.status === "completed" || r.status === "failed",
+      { deadlineMs: 40000, label: "restart rediscovery" },
+    );
+    assert(
+      done.status === "completed",
+      `run completed after restart (got ${done.status}; nodes ${JSON.stringify(
+        done.nodeExecutions.map((n) => [n.nodeId, n.status]),
+      )})`,
+    );
+    assert(nodeOf(done, "n0").status === "done", "n0 done after restart");
+    assert(
+      nodeOf(done, "n1").status === "done",
+      "n1 done — spawned by the FRESH gateway via boot rediscovery (D3 layer 2)",
+    );
+    assert(!tmuxHasSession(n0Sess), "n0 agrun cleaned up post-completion");
+    assert(!tmuxHasSession(n1Sess), "n1 agrun cleaned up post-completion");
+    console.log(
+      `  ok: (a) LOAD-BEARING — SIGKILL mid-run, fresh gateway rediscovered${
+        bootSawRun ? " (logged)" : ""
+      } + advanced n0->n1 to completion`,
+    );
+  }
+
+  // Stop the restarted gateway before spinning dedicated-config gateways.
+  await stopServer("SIGTERM");
+
+  // ---- (d) AGENT_MAX_CONCURRENT_RUNS exceeded -> 429 --------------------
+  {
+    await startServer({ AGENT_MAX_CONCURRENT_RUNS: "1" });
+    await login();
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const a = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "hold a slot SLEEP=30" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(a.status === 202, `run A (fills cap) -> ${a.status}`);
+    const runA = await a.json();
+    const b = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: { sessionId: targetSessionId, objective: "over cap SLEEP=30" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(b.status === 429, `run B over cap -> ${b.status} (exp 429)`);
+    assert(
+      /too many|concurrent/i.test((await b.json()).error),
+      "429 body names the concurrency cap",
+    );
+    // Free the slot.
+    await req("DELETE", `/api/agentic/runs/${enc(runA.id)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    await sleep(300);
+    await stopServer("SIGTERM");
+    console.log(`  ok: (d) AGENT_MAX_CONCURRENT_RUNS cap -> 429 too_many_runs`);
+  }
+
+  // ---- (e) per-step AGENT_RUN_TIMEOUT_MS -> step reaped as failed -------
+  {
+    await startServer({ AGENT_RUN_TIMEOUT_MS: "1500" });
+    await login();
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const res = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: {
+        sessionId: targetSessionId,
+        objective: "hang forever SLEEP=3600",
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(res.status === 202, `start hang run -> ${res.status}`);
+    const run = await res.json();
+    const agrun = `agrun-${run.id}-n0`;
+    const done = await pollRun(
+      run.id,
+      (r) => r.status === "failed" || r.status === "completed",
+      { deadlineMs: 15000, label: "timeout" },
+    );
+    assert(
+      done.status === "failed",
+      `hung run reaped to failed (got ${done.status})`,
+    );
+    assert(
+      nodeOf(done, "n0").status === "failed",
+      "timed-out step reaped as failed (no distinct timeout status in the model)",
+    );
+    await sleep(300);
+    assert(
+      !tmuxHasSession(agrun),
+      "timed-out agrun job was killed by the reap",
+    );
+    console.log(
+      `  ok: (e) per-step AGENT_RUN_TIMEOUT_MS -> step killed + reaped as failed`,
+    );
+
+    // Teardown the reusable target session via the (still-running) gateway, then
+    // stop it — so the leak check below sees a truly clean tmux state.
+    const delSess = await req(
+      "DELETE",
+      `/api/sessions/${enc(targetSessionId)}`,
+      {
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(
+      delSess.status === 204,
+      `delete target session -> ${delSess.status}`,
+    );
+    await sleep(400);
+    await stopServer("SIGTERM");
+  }
+
+  // ---- Final: no agrun-/web- tmux sessions leaked -----------------------
+  {
+    const leaked = [...tmuxSessions()].filter(
+      (s) =>
+        !tmuxBefore.has(s) && (s.startsWith("agrun-") || s.startsWith("web-")),
+    );
+    assert(
+      leaked.length === 0,
+      `no agrun-/web- tmux sessions leaked (leaked: ${leaked.join(" | ")})`,
+    );
+    console.log(`  ok: no agrun-/web- tmux sessions leaked`);
   }
 
   cleanup();

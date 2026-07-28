@@ -94,7 +94,10 @@ approval step that might sit for hours — so survivability has to be solved at 
 distinct levels:
 
 1. **Process survivability, per agent-task step** — unchanged from v1: each "agent
-   task" step spawns a detached tmux session (`web-agentic-<runId>-<nodeId>`) through
+   task" step spawns a detached tmux session (`agrun-<runId>-<nodeId>` — **NOT** a
+   `web-` prefix: that prefix is filtered by `list-sessions` and would surface run
+   jobs in the terminal sidebar and the attach/kill machinery; corrected during iter2
+   implementation) through
    the existing tmux exec seam, wrapper writes the prompt to a private temp file
    (mode `0600`, never argv), redirects stdout+stderr to a log file, writes exit code
    to a marker file on completion. `AGENT_RUN_TIMEOUT_MS` still bounds each individual

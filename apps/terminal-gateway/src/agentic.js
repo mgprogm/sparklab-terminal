@@ -36,6 +36,23 @@ const CONNECTION_SCOPES = new Set(["fixed", "runtime-selection"]);
 const APP_STATUSES = new Set(["draft", "published", "paused", "archived"]);
 const ORCH_MODES = new Set(["single", "supervisor", "sequential", "parallel"]);
 
+// Terminal statuses (used by the run-engine primitives below).
+const NODE_TERMINAL = new Set(["done", "failed", "skipped"]);
+const RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "waiting-approval",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+const RUN_TERMINAL = new Set(["completed", "failed", "cancelled"]);
+// Fan-out cap for parallel groups — decide() returns at most this many toSpawn
+// ids (minus the count already running), so a wide group spawns in waves. Same
+// env name server.js reads for its own cap; the two share the value.
+const AGENT_MAX_PARALLEL_FANOUT =
+  Number(process.env.AGENT_MAX_PARALLEL_FANOUT) || 4;
+
 // { agents:{[id]}, agenticAis:{[id]}, connections:{[id]}, runs:{[id]} }
 let store = { agents: {}, agenticAis: {}, connections: {}, runs: {} };
 
@@ -101,6 +118,25 @@ function requireName(name) {
   return name;
 }
 
+// Referential-integrity guard (the write-side half of the delete-scrub below,
+// mirrors pm.js validating a task's dependsOn against live task ids). Rejects an
+// agentIds/connectionIds array that points at an id not in the store so a
+// dangling reference can never be persisted in the first place. NOTE: workflow
+// NODE agentIds are deliberately NOT validated here — a node may legitimately be
+// authored before its agent is wired, and node-agentId resolution is startRun's
+// job (iter2). Only the top-level agentIds/connectionIds arrays are checked.
+function assertKnownIds(ids, collection, kind) {
+  if (ids === undefined) return;
+  if (!Array.isArray(ids)) throw err("bad_request", `${kind} must be an array`);
+  for (const raw of ids) {
+    const id = String(raw);
+    if (!collection[id])
+      throw err("bad_request", `${kind} references unknown id: ${id}`, {
+        [kind]: id,
+      });
+  }
+}
+
 function cleanToolPolicies(raw) {
   if (raw === undefined) return [];
   if (!Array.isArray(raw))
@@ -124,6 +160,19 @@ function cleanToolPolicies(raw) {
   });
 }
 
+// Reject a toolPolicy whose connectionId does not resolve to a live connection
+// (the write-side complement to deleteConnection's scrub below).
+function assertKnownToolPolicyConnections(policies) {
+  for (const p of policies) {
+    if (!store.connections[p.connectionId])
+      throw err(
+        "bad_request",
+        `toolPolicy references unknown connection: ${p.connectionId}`,
+        { connectionId: p.connectionId },
+      );
+  }
+}
+
 // Validate + normalize a workflow BEFORE mutating the store. Rejects a dangling
 // edge, a bad entryNodeId, or a cycle → invalid_workflow (with the offending
 // edge in details where relevant). An empty/absent workflow is allowed.
@@ -142,9 +191,17 @@ function resolveWorkflow(raw) {
     if (nodeIds.has(id))
       throw err("invalid_workflow", `duplicate node id: ${id}`, { node: id });
     nodeIds.add(id);
+    // WorkflowNode.type is CLOSED to "agent-task" in iter2 (matches shared-types
+    // WorkflowNodeSchema.type = z.enum(["agent-task"])). Reject any other type at
+    // the store boundary so a "router"/etc node can never reach the run engine.
+    const type = n.type ? String(n.type) : "agent-task";
+    if (type !== "agent-task")
+      throw err("invalid_workflow", `unsupported node type: ${type}`, {
+        node: id,
+      });
     cleanNodes.push({
       id,
-      type: n.type ? String(n.type) : "agent-task",
+      type,
       ...(n.agentId != null ? { agentId: String(n.agentId) } : {}),
     });
   }
@@ -276,6 +333,10 @@ function shapeNodeExecution(ne) {
     ...(ne.parentNodeId != null ? { parentNodeId: ne.parentNodeId } : {}),
     ...(ne.startedAt != null ? { startedAt: ne.startedAt } : {}),
     ...(ne.finishedAt != null ? { finishedAt: ne.finishedAt } : {}),
+    // logTail is a DISPLAY-ONLY passthrough injected by server.js on GET (a tail
+    // of the step's out.log). It is NEVER persisted; the internal spawnAttempts
+    // counter is likewise never shaped (it's read via getSpawnAttempts()).
+    ...(ne.logTail != null ? { logTail: ne.logTail } : {}),
   };
 }
 
@@ -326,6 +387,7 @@ function createAgent(body = {}) {
   if (!SANDBOX_MODES.has(sandboxMode))
     throw err("bad_request", "sandboxMode must be read-only|workspace-write");
   const toolPolicies = cleanToolPolicies(body.toolPolicies);
+  assertKnownToolPolicyConnections(toolPolicies);
   const ts = now();
   const agent = {
     id: newId("ag"),
@@ -364,16 +426,46 @@ function updateAgent(id, patch = {}, expectedRev) {
       throw err("bad_request", "sandboxMode must be read-only|workspace-write");
     a.sandboxMode = patch.sandboxMode;
   }
-  if (patch.toolPolicies !== undefined)
-    a.toolPolicies = cleanToolPolicies(patch.toolPolicies);
+  if (patch.toolPolicies !== undefined) {
+    const next = cleanToolPolicies(patch.toolPolicies);
+    assertKnownToolPolicyConnections(next);
+    a.toolPolicies = next;
+  }
   if (patch.model !== undefined)
     a.model = patch.model ? String(patch.model) : null;
   touch(a);
   persist();
   return shapeAgent(a);
 }
+// Delete an agent and SCRUB every dangling reference to it (mirrors pm.js
+// scrubbing a deleted task's id out of every other task's dependsOn). For each
+// AgenticAI we drop the id from agentIds[] and null the agentId on any
+// workflow node that pointed at it — the node is KEPT (removing it would dangle
+// its edges); a definition edit bumps version+rev. All scrubbing happens BEFORE
+// the delete and there is exactly ONE persist() at the end (kept synchronous +
+// atomic, per the store's no-mutex convention).
 function deleteAgent(id) {
-  if (!store.agents[id]) return false;
+  if (!store.agents[id]) return false; // early-out ahead of any persist
+  for (const aa of Object.values(store.agenticAis)) {
+    let changed = false;
+    if (Array.isArray(aa.agentIds) && aa.agentIds.includes(id)) {
+      aa.agentIds = aa.agentIds.filter((x) => x !== id);
+      changed = true;
+    }
+    const nodes = aa.workflow && aa.workflow.nodes;
+    if (Array.isArray(nodes)) {
+      for (const n of nodes) {
+        if (n && n.agentId === id) {
+          delete n.agentId; // clear the ref, keep the node (don't dangle edges)
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      aa.version += 1; // D9 — definition edit
+      touch(aa);
+    }
+  }
   delete store.agents[id];
   persist();
   return true;
@@ -407,8 +499,28 @@ function createConnection(body = {}) {
   persist();
   return shapeConnection(conn);
 }
+// Delete a connection and SCRUB every dangling reference to it: drop the id from
+// each AgenticAI's connectionIds[] (a definition edit → version+rev) and from
+// each Agent's toolPolicies[] (a plain rev bump — agents carry no version).
+// One persist() at the end (synchronous + atomic, no mutex).
 function deleteConnection(id) {
-  if (!store.connections[id]) return false;
+  if (!store.connections[id]) return false; // early-out ahead of any persist
+  for (const aa of Object.values(store.agenticAis)) {
+    if (Array.isArray(aa.connectionIds) && aa.connectionIds.includes(id)) {
+      aa.connectionIds = aa.connectionIds.filter((x) => x !== id);
+      aa.version += 1; // D9 — definition edit
+      touch(aa);
+    }
+  }
+  for (const a of Object.values(store.agents)) {
+    if (
+      Array.isArray(a.toolPolicies) &&
+      a.toolPolicies.some((p) => p.connectionId === id)
+    ) {
+      a.toolPolicies = a.toolPolicies.filter((p) => p.connectionId !== id);
+      touch(a); // rev bump only (agents carry no version)
+    }
+  }
   delete store.connections[id];
   persist();
   return true;
@@ -432,7 +544,11 @@ function createAgenticAi(body = {}) {
       "bad_request",
       "orchestrationMode must be single|supervisor|sequential|parallel",
     );
-  // Validate workflow BEFORE mutating so a rejection leaves the store clean.
+  // Validate refs + workflow BEFORE mutating so a rejection leaves the store
+  // clean. agentIds/connectionIds must resolve to live records (the write-side
+  // complement to the delete-scrub in deleteAgent/deleteConnection).
+  assertKnownIds(body.agentIds, store.agents, "agentIds");
+  assertKnownIds(body.connectionIds, store.connections, "connectionIds");
   const workflow = resolveWorkflow(body.workflow);
   const ts = now();
   const aa = {
@@ -464,7 +580,9 @@ function updateAgenticAi(id, patch = {}, expectedRev) {
   if (!aa) throw err("not_found", "agentic AI not found");
   if (expectedRev !== undefined && expectedRev !== aa.rev)
     throw err("stale", "agentic AI revision is stale");
-  // Validate a new workflow BEFORE mutating.
+  // Validate refs + a new workflow BEFORE mutating.
+  assertKnownIds(patch.agentIds, store.agents, "agentIds");
+  assertKnownIds(patch.connectionIds, store.connections, "connectionIds");
   let nextWorkflow;
   if (patch.workflow !== undefined)
     nextWorkflow = resolveWorkflow(patch.workflow);
@@ -526,22 +644,219 @@ function getRun(id) {
   return r ? shapeRun(r) : undefined;
 }
 
-// ---- Run engine (STUBS — implemented in a later iteration) ----
-const NOT_IMPLEMENTED = "not implemented until iter2 (run engine)";
-function startRun() {
-  throw err("bad_request", NOT_IMPLEMENTED);
+// ---------------------------------------------------------------------------
+// Run engine — SYNC/ATOMIC store primitives + the PURE decide() reducer (iter2)
+// ---------------------------------------------------------------------------
+// DELIBERATE SPLIT (resolves the task's "implement startRun/advanceRun/killRun
+// in the store" wording vs. hard-constraint #3 "agentic.js stays synchronous-
+// atomic, no mutex"): the async tmux/marker I/O those drivers need CANNOT live
+// in a synchronous mutator. So this file keeps ONLY pure/sync pieces —
+//   - a PURE decide(run, resolvedConfig) reducer (no I/O; reads the persisted
+//     nodeExecutions[] ledger, returns a decision object), and
+//   - sync atomic recorders (createRunRecord/recordSpawned/recordNodeResult/
+//     setRunStatus), each persisting exactly once (PM/kanban convention).
+// The async orchestration (startRun/advanceRun/killRun, tmux spawn, marker reap,
+// poll loop, boot rediscovery) lives in server.js, which composes these sync
+// primitives with its tmux exec seam — keeping the gateway the single tmux
+// enforcement point AND agentic.js a structural clone of pm.js.
+//
+// approveAction/rejectAction remain THROWING stubs (human-approval nodes are
+// iter3). startRun/advanceRun/killRun are NO LONGER store methods — the route
+// handler calls the server.js drivers, not the store.
+
+function findRun(runId) {
+  const r = store.runs[runId];
+  if (!r) throw err("not_found", "run not found");
+  return r;
 }
-function advanceRun() {
-  throw err("bad_request", NOT_IMPLEMENTED);
+function findNode(run, nodeId) {
+  const ne = (run.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+  if (!ne) throw err("not_found", `node execution not found: ${nodeId}`);
+  return ne;
 }
-function killRun() {
-  throw err("bad_request", NOT_IMPLEMENTED);
+
+// Insert a run-<uuid> with status:"running", startedAt, and a nodeExecutions[]
+// pre-seeded one entry per frozen workflow node at status:"pending". The frozen
+// resolvedConfig (agents+workflow+toolPolicies snapshot, D9) + agenticAiVersion
+// are stored so a later agent/app edit can never change a running run. Persists
+// once. `nodeExecutions` may be passed explicitly (server.js builds it from the
+// resolved workflow); otherwise it is derived from resolvedConfig.workflow.nodes.
+function createRunRecord({
+  agenticAiId,
+  sessionId,
+  objective,
+  resolvedConfig,
+  agenticAiVersion,
+  nodeExecutions,
+} = {}) {
+  const ts = now();
+  let seeded;
+  if (Array.isArray(nodeExecutions) && nodeExecutions.length) {
+    seeded = nodeExecutions.map((ne) => ({
+      nodeId: String(ne.nodeId),
+      status: "pending",
+      parentNodeId: ne.parentNodeId != null ? String(ne.parentNodeId) : null,
+    }));
+  } else {
+    const nodes =
+      (resolvedConfig &&
+        resolvedConfig.workflow &&
+        resolvedConfig.workflow.nodes) ||
+      [];
+    seeded = nodes.map((n) => ({
+      nodeId: String(n.id),
+      status: "pending",
+      parentNodeId: null,
+    }));
+  }
+  const run = {
+    id: newId("run"),
+    agenticAiId: String(agenticAiId),
+    agenticAiVersion: Number(agenticAiVersion) || 0,
+    resolvedConfig: resolvedConfig
+      ? JSON.parse(JSON.stringify(resolvedConfig))
+      : undefined,
+    sessionId: sessionId != null ? String(sessionId) : null,
+    objective: typeof objective === "string" ? objective : "",
+    status: "running",
+    nodeExecutions: seeded,
+    startedAt: ts,
+    finishedAt: null,
+  };
+  store.runs[run.id] = run;
+  persist();
+  return shapeRun(run);
 }
+
+// Run ids whose status is still active (running|queued; iter2 never produces
+// waiting-approval). Drives the poll-loop gating and boot rediscovery. Pure read.
+function listActiveRuns() {
+  return Object.values(store.runs)
+    .filter((r) => r.status === "running" || r.status === "queued")
+    .map((r) => r.id);
+}
+
+// Mark a node RUNNING and tie it to its tmux job. Increments an internal
+// spawnAttempts counter (persisted to disk for restart-safety — the reap table's
+// "never-ran → respawn unless attempts>=2" cap — but NEVER shaped/in shared-types).
+// PERSISTS BEFORE the caller spawns tmux (ordering is load-bearing: a crash after
+// this persist but before spawn leaves a "running" node with no session/markers,
+// which the reap table re-spawns idempotently rather than losing).
+function recordSpawned(runId, nodeId, { agentRunId, startedAt } = {}) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.status = "running";
+  if (agentRunId != null) ne.agentRunId = String(agentRunId);
+  ne.startedAt = startedAt != null ? Number(startedAt) : now();
+  ne.finishedAt = null;
+  ne.spawnAttempts = (ne.spawnAttempts || 0) + 1;
+  persist();
+  return shapeRun(run);
+}
+
+// The internal (un-shaped) spawn-attempt counter for a node, 0 if none. Read by
+// the server.js reap table; kept off the wire shape by design.
+function getSpawnAttempts(runId, nodeId) {
+  const r = store.runs[runId];
+  if (!r) return 0;
+  const ne = (r.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+  return ne && ne.spawnAttempts ? ne.spawnAttempts : 0;
+}
+
+// Record a node's TERMINAL result (done|failed|skipped) + finishedAt. Persists.
+function recordNodeResult(runId, nodeId, { status, finishedAt } = {}) {
+  if (!NODE_TERMINAL.has(status))
+    throw err("bad_request", "node status must be done|failed|skipped");
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.status = status;
+  ne.finishedAt = finishedAt != null ? Number(finishedAt) : now();
+  persist();
+  return shapeRun(run);
+}
+
+// Set the run status (+ finishedAt when terminal). On a terminal run
+// (completed|failed|cancelled) every still-pending node flips to skipped so the
+// ledger has no dangling "pending" after the run ends. Persists.
+function setRunStatus(runId, status, { finishedAt } = {}) {
+  if (!RUN_STATUSES.has(status))
+    throw err("bad_request", `invalid run status: ${status}`);
+  const run = findRun(runId);
+  run.status = status;
+  if (RUN_TERMINAL.has(status)) {
+    const ts = finishedAt != null ? Number(finishedAt) : now();
+    run.finishedAt = ts;
+    for (const ne of run.nodeExecutions || []) {
+      if (ne.status === "pending") {
+        ne.status = "skipped";
+        ne.finishedAt = ts;
+      }
+    }
+  }
+  persist();
+  return shapeRun(run);
+}
+
+// PURE reducer (no I/O). Given the current ledger + frozen config, returns:
+//   { toSpawn: [nodeId,…]  pending nodes whose EVERY in-edge predecessor is done,
+//     running: [nodeId,…]  nodes currently running (caller reaps via tmux/markers),
+//     terminal: null | "completed" | "failed" }
+// Rules (walk the frozen resolvedConfig.workflow DAG):
+//   - ready  ⇔ status:"pending" AND every predecessor (in-edge `from`) is done.
+//              Entry / no-predecessor nodes are ready immediately — this uniformly
+//              covers single, sequential, supervisor, and parallel.
+//   - terminal:"failed"    ⇔ ANY node is failed (fail-fast).
+//   - terminal:"completed" ⇔ every node is done|skipped.
+//   - fan-out cap: at most AGENT_MAX_PARALLEL_FANOUT toSpawn ids MINUS the count
+//     already running, so a wide parallel group spawns in waves.
+// Recomputed fresh on every call — the ledger is the ONLY source of truth, so a
+// gateway crash mid-advance is harmless (the next call re-derives from disk).
+function decide(run, resolvedConfig) {
+  const nodeExecs = (run && run.nodeExecutions) || [];
+  const byId = new Map(nodeExecs.map((ne) => [ne.nodeId, ne]));
+  const workflow = (resolvedConfig && resolvedConfig.workflow) || {};
+  const edges = Array.isArray(workflow.edges) ? workflow.edges : [];
+
+  const preds = new Map();
+  for (const ne of nodeExecs) preds.set(ne.nodeId, []);
+  for (const e of edges) {
+    if (preds.has(e.to)) preds.get(e.to).push(e.from);
+  }
+
+  const running = nodeExecs
+    .filter((ne) => ne.status === "running")
+    .map((ne) => ne.nodeId);
+
+  // Fail-fast: any failed node terminates the whole run (the driver kills any
+  // still-running siblings before flipping the run to failed).
+  if (nodeExecs.some((ne) => ne.status === "failed"))
+    return { toSpawn: [], running, terminal: "failed" };
+
+  // Completed: every node terminal-and-not-failed (done|skipped). Empty ledger
+  // is trivially complete.
+  if (nodeExecs.every((ne) => ne.status === "done" || ne.status === "skipped"))
+    return { toSpawn: [], running, terminal: "completed" };
+
+  const ready = [];
+  for (const ne of nodeExecs) {
+    if (ne.status !== "pending") continue;
+    const ps = preds.get(ne.nodeId) || [];
+    const ok = ps.every((pid) => {
+      const p = byId.get(pid);
+      return p && p.status === "done";
+    });
+    if (ok) ready.push(ne.nodeId);
+  }
+  const budget = Math.max(0, AGENT_MAX_PARALLEL_FANOUT - running.length);
+  return { toSpawn: ready.slice(0, budget), running, terminal: null };
+}
+
+// ---- Human-approval nodes (iter3) — still THROWING stubs ----
 function approveAction() {
-  throw err("bad_request", NOT_IMPLEMENTED);
+  throw err("bad_request", "approveAction is iter3 (human-approval nodes)");
 }
 function rejectAction() {
-  throw err("bad_request", NOT_IMPLEMENTED);
+  throw err("bad_request", "rejectAction is iter3 (human-approval nodes)");
 }
 
 load();
@@ -566,13 +881,18 @@ export default {
   updateAgenticAi,
   setAgenticAiStatus,
   deleteAgenticAi,
-  // Runs (read-only in iter1)
+  // Runs (read + engine primitives)
   listRuns,
   getRun,
-  // Run engine stubs (iter2)
-  startRun,
-  advanceRun,
-  killRun,
+  // Run-engine sync primitives (iter2) — server.js composes these with tmux I/O.
+  createRunRecord,
+  listActiveRuns,
+  recordSpawned,
+  getSpawnAttempts,
+  recordNodeResult,
+  setRunStatus,
+  decide,
+  // Human-approval nodes (iter3) — throwing stubs.
   approveAction,
   rejectAction,
 };

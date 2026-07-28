@@ -6,12 +6,15 @@
   Pluggable Agentic AI Creator artifact (AGENTIC-AI-CREATOR-PLAN.md D8: ONE
   artifact, an in-app catalog — NOT a per-app artifact).
 
-  ITERATION 1 SCOPE: a MINIMAL catalog. It lists Agentic AIs from
-  GET /api/agentic/apps (name + status badge + agent/connection counts), offers
-  a "New Agentic AI" form (POST /api/agentic/apps), and a publish/unpublish
-  toggle (PATCH /api/agentic/apps/:id/status). The full four-view
-  Builder/Run/History UI is a later, human-checkpointed iteration and is
-  deliberately NOT built here.
+  SCOPE (iter1 + iter2): a catalog + a minimal Run view. The catalog lists
+  Agentic AIs from GET /api/agentic/apps (name + status badge + agent/connection
+  counts), offers a "New Agentic AI" form (POST /api/agentic/apps), and a
+  publish/unpublish toggle (PATCH /api/agentic/apps/:id/status). The Run view
+  (iter2) picks a target terminal session, starts a run (POST /apps/:id/run),
+  polls GET /runs/:id to render per-node status + tailed logs, and can Kill
+  (DELETE /runs/:id). The full visual Builder / workflow-DAG editor and the
+  human-approval UI are later, human-checkpointed iterations and are deliberately
+  NOT built here.
 
   A SINGLE self-contained document — inline <style> + inline <script>, ZERO
   external requests (no CDN, no fetched web fonts, no imports). Loaded into a
@@ -336,6 +339,150 @@
     justify-content: flex-end;
   }
 
+  /* ---- Run view (iteration 2) ---- */
+  .run-view {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: column;
+  }
+
+  .run-view.show {
+    display: flex;
+  }
+
+  .run-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .run-head .run-title {
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: -0.2px;
+    word-break: break-word;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .run-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .run-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 560px;
+  }
+
+  .run-form label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .run-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .run-status-bar .grow {
+    flex: 1 1 auto;
+  }
+
+  .run-meta {
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .node-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .node-card {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .node-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .node-id {
+    font-size: 13px;
+    font-weight: 500;
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .node-dur {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .node-log {
+    margin: 0;
+    max-height: 200px;
+    overflow: auto;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--body);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .badge-running,
+  .badge-queued,
+  .badge-waiting-approval {
+    color: var(--accent);
+  }
+
+  .badge-done,
+  .badge-completed {
+    color: var(--ok);
+    border-color: rgba(143, 185, 138, 0.5);
+  }
+
+  .badge-failed {
+    color: var(--danger);
+    border-color: rgba(224, 122, 106, 0.5);
+  }
+
+  .badge-pending,
+  .badge-skipped,
+  .badge-cancelled {
+    color: var(--mute);
+  }
+
   /* Scrollbars */
   ::-webkit-scrollbar {
     width: 8px;
@@ -358,6 +505,53 @@
 <div id="banner" class="banner" role="alert"></div>
 
 <div id="catalog" class="catalog"></div>
+
+<!-- Run view (iteration 2): pick a target session, start a run, watch the
+     nodeExecutions[] ledger + tailed logs, kill it. No workflow/DAG editor. -->
+<div id="run-view" class="run-view">
+  <div class="run-head">
+    <button id="run-back-btn" class="btn btn-ghost" type="button">← Back</button>
+    <span id="run-title" class="run-title"></span>
+  </div>
+  <div class="run-body">
+    <form id="run-form" class="run-form">
+      <div>
+        <label for="run-session">Target terminal session</label>
+        <select id="run-session" class="field"></select>
+        <div class="hint">
+          The run executes on this session's server, in its working directory.
+        </div>
+      </div>
+      <div>
+        <label for="run-objective">Objective</label>
+        <textarea
+          id="run-objective"
+          class="field"
+          placeholder="What should this Agentic AI do?"
+        ></textarea>
+      </div>
+      <div class="row-end">
+        <button id="run-start-btn" type="submit" class="btn btn-primary">
+          Start run
+        </button>
+      </div>
+    </form>
+
+    <div id="run-active" style="display: none">
+      <div class="run-status-bar">
+        <span id="run-status-badge" class="badge"></span>
+        <span id="run-status-meta" class="run-meta"></span>
+        <span class="grow"></span>
+        <button id="run-kill-btn" class="btn btn-ghost" type="button">Kill</button>
+        <button id="run-new-btn" class="btn" type="button" style="display: none">
+          New run
+        </button>
+      </div>
+      <div id="run-objective-echo" class="run-meta" style="margin-top: 8px"></div>
+      <div id="node-list" class="node-list" style="margin-top: 12px"></div>
+    </div>
+  </div>
+</div>
 
 <!-- New Agentic AI modal -->
 <div id="new-app-overlay" class="overlay">
@@ -411,6 +605,11 @@
   // ---------------------------------------------------------------------------
   var state = {
     apps: [], // summaries: {id,name,status,orchestrationMode,agentCount,connectionCount,version,...}
+    view: "catalog", // "catalog" | "run"
+    runApp: null, // the app being run (a catalog summary)
+    activeRunId: null, // the id of the run currently being polled
+    pollToken: 0, // bumped to invalidate in-flight poll ticks
+    pollTimer: null, // the setTimeout handle for the poll loop
   };
 
   var el = {
@@ -422,7 +621,26 @@
     naName: document.getElementById("na-name"),
     naDesc: document.getElementById("na-desc"),
     naMode: document.getElementById("na-mode"),
+    // Run view
+    runView: document.getElementById("run-view"),
+    runBack: document.getElementById("run-back-btn"),
+    runTitle: document.getElementById("run-title"),
+    runForm: document.getElementById("run-form"),
+    runSession: document.getElementById("run-session"),
+    runObjective: document.getElementById("run-objective"),
+    runStartBtn: document.getElementById("run-start-btn"),
+    runActive: document.getElementById("run-active"),
+    runStatusBadge: document.getElementById("run-status-badge"),
+    runStatusMeta: document.getElementById("run-status-meta"),
+    runObjectiveEcho: document.getElementById("run-objective-echo"),
+    runKillBtn: document.getElementById("run-kill-btn"),
+    runNewBtn: document.getElementById("run-new-btn"),
+    nodeList: document.getElementById("node-list"),
   };
+
+  // Run status buckets — mirror the gateway's RUN_TERMINAL set (agentic.js).
+  var RUN_TERMINAL = { completed: true, failed: true, cancelled: true };
+  var POLL_INTERVAL_MS = 1500;
 
   // ---------------------------------------------------------------------------
   // API layer
@@ -595,6 +813,14 @@
     card.appendChild(meta);
 
     var actions = elem("div", "app-actions");
+
+    var runBtn = elem("button", "btn", "Run");
+    runBtn.type = "button";
+    runBtn.addEventListener("click", function () {
+      openRunView(app);
+    });
+    actions.appendChild(runBtn);
+
     var pubBtn = elem(
       "button",
       "btn btn-ghost",
@@ -618,6 +844,251 @@
     actions.appendChild(delBtn);
 
     card.appendChild(actions);
+    return card;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Run view (iteration 2)
+  // ---------------------------------------------------------------------------
+
+  // The session list lives at the bare /api/sessions endpoint, NOT under
+  // /api/agentic — the api() helper hardcodes the agentic prefix, so this fetch
+  // is done directly. Returns a plain array; we keep reachable sessions only.
+  async function loadSessions() {
+    var res;
+    try {
+      res = await fetch("/api/sessions", { credentials: "same-origin" });
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (!res.ok) throw new ApiError(res.status, "Failed to load sessions");
+    var list = await res.json();
+    if (!Array.isArray(list)) return [];
+    return list.filter(function (s) {
+      return s && s.reachable !== false;
+    });
+  }
+
+  function sessionLabel(s) {
+    var name = s.name || s.id;
+    if (s.serverId && s.serverId !== "local") name += " (" + s.serverId + ")";
+    return name;
+  }
+
+  async function populateSessionPicker() {
+    var sel = el.runSession;
+    sel.textContent = "";
+    var loading = elem("option", null, "Loading sessions…");
+    loading.value = "";
+    sel.appendChild(loading);
+    var sessions;
+    try {
+      sessions = await loadSessions();
+    } catch (e) {
+      sel.textContent = "";
+      var errOpt = elem("option", null, "Could not load sessions");
+      errOpt.value = "";
+      sel.appendChild(errOpt);
+      throw e;
+    }
+    sel.textContent = "";
+    if (sessions.length === 0) {
+      var none = elem("option", null, "No reachable sessions");
+      none.value = "";
+      sel.appendChild(none);
+      return;
+    }
+    sessions.forEach(function (s) {
+      var opt = elem("option", null, sessionLabel(s));
+      opt.value = s.id;
+      sel.appendChild(opt);
+    });
+  }
+
+  function setView(view) {
+    state.view = view;
+    var isRun = view === "run";
+    el.runView.classList.toggle("show", isRun);
+    el.catalog.style.display = isRun ? "none" : "";
+    el.newAppBtn.style.display = isRun ? "none" : "";
+    if (!isRun) stopPolling();
+  }
+
+  function openRunView(app) {
+    clearBanner();
+    state.runApp = app;
+    state.activeRunId = null;
+    stopPolling();
+    el.runTitle.textContent = "Run · " + app.name;
+    el.runObjective.value = "";
+    el.runForm.style.display = "";
+    el.runActive.style.display = "none";
+    el.nodeList.textContent = "";
+    setView("run");
+    populateSessionPicker().catch(handleError);
+  }
+
+  function leaveRunView() {
+    stopPolling();
+    state.runApp = null;
+    state.activeRunId = null;
+    setView("catalog");
+  }
+
+  async function startRunForApp() {
+    var app = state.runApp;
+    if (!app) return;
+    var sessionId = el.runSession.value;
+    if (!sessionId) {
+      showBanner("Pick a reachable target session first.");
+      return;
+    }
+    clearBanner();
+    el.runStartBtn.disabled = true;
+    var run;
+    try {
+      run = await api(
+        "POST",
+        "/apps/" + encodeURIComponent(app.id) + "/run",
+        { sessionId: sessionId, objective: el.runObjective.value },
+      );
+    } catch (e) {
+      el.runStartBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    el.runStartBtn.disabled = false;
+    if (!run || !run.id) {
+      showBanner("Run did not start (no run id returned).");
+      return;
+    }
+    state.activeRunId = run.id;
+    el.runForm.style.display = "none";
+    el.runActive.style.display = "";
+    renderRun(run);
+    // A run may already be terminal (a fast/empty job): only poll if not.
+    if (!RUN_TERMINAL[run.status]) startPolling();
+  }
+
+  function startPolling() {
+    stopPolling();
+    var token = ++state.pollToken;
+    var tick = async function () {
+      if (token !== state.pollToken) return; // superseded
+      var runId = state.activeRunId;
+      if (!runId) return;
+      var run;
+      try {
+        run = await api("GET", "/runs/" + encodeURIComponent(runId));
+      } catch (e) {
+        if (token !== state.pollToken) return;
+        // A transient poll failure shouldn't tear the view down — surface it
+        // and keep trying on the next tick.
+        handleError(e);
+        state.pollTimer = window.setTimeout(tick, POLL_INTERVAL_MS);
+        return;
+      }
+      if (token !== state.pollToken) return;
+      renderRun(run);
+      if (RUN_TERMINAL[run.status]) {
+        stopPolling();
+        return;
+      }
+      state.pollTimer = window.setTimeout(tick, POLL_INTERVAL_MS);
+    };
+    state.pollTimer = window.setTimeout(tick, POLL_INTERVAL_MS);
+  }
+
+  function stopPolling() {
+    state.pollToken++;
+    if (state.pollTimer) {
+      window.clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  async function killActiveRun() {
+    var runId = state.activeRunId;
+    if (!runId) return;
+    el.runKillBtn.disabled = true;
+    try {
+      await api("DELETE", "/runs/" + encodeURIComponent(runId));
+    } catch (e) {
+      el.runKillBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    el.runKillBtn.disabled = false;
+    // Poll once more so the cancelled state + final logs are reflected.
+    try {
+      var run = await api("GET", "/runs/" + encodeURIComponent(runId));
+      renderRun(run);
+      if (RUN_TERMINAL[run.status]) stopPolling();
+    } catch (e) {
+      /* the next poll tick will reconcile */
+    }
+  }
+
+  function fmtDuration(startedAt, finishedAt) {
+    if (!startedAt) return "";
+    var end = finishedAt || Date.now();
+    var ms = end - startedAt;
+    if (ms < 0) ms = 0;
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + "s";
+    var m = Math.floor(s / 60);
+    return m + "m " + (s % 60) + "s";
+  }
+
+  function renderRun(run) {
+    var status = run.status || "running";
+    el.runStatusBadge.className = "badge badge-" + status;
+    el.runStatusBadge.textContent = status;
+
+    var terminal = !!RUN_TERMINAL[status];
+    el.runKillBtn.style.display = terminal ? "none" : "";
+    el.runNewBtn.style.display = terminal ? "" : "none";
+
+    var meta = "v" + (run.agenticAiVersion || 1);
+    var dur = fmtDuration(run.startedAt, run.finishedAt);
+    if (dur) meta += " · " + dur;
+    el.runStatusMeta.textContent = meta;
+
+    el.runObjectiveEcho.textContent = run.objective
+      ? "Objective: " + run.objective
+      : "";
+
+    el.nodeList.textContent = "";
+    var nodes = run.nodeExecutions || [];
+    if (nodes.length === 0) {
+      el.nodeList.appendChild(
+        elem("div", "run-meta", "This run has no steps to execute."),
+      );
+      return;
+    }
+    nodes.forEach(function (ne) {
+      el.nodeList.appendChild(renderNode(ne));
+    });
+  }
+
+  function renderNode(ne) {
+    var card = elem("div", "node-card");
+
+    var head = elem("div", "node-head");
+    var label = ne.nodeId || "step";
+    if (ne.parentNodeId) label = ne.parentNodeId + " › " + label;
+    head.appendChild(elem("span", "node-id", label));
+
+    var dur = fmtDuration(ne.startedAt, ne.finishedAt);
+    if (dur) head.appendChild(elem("span", "node-dur", dur));
+
+    var st = ne.status || "pending";
+    head.appendChild(elem("span", "badge badge-" + st, st));
+    card.appendChild(head);
+
+    if (ne.logTail) {
+      card.appendChild(elem("pre", "node-log", ne.logTail));
+    }
     return card;
   }
 
@@ -665,6 +1136,35 @@
     };
     closeOverlay(el.newAppOverlay);
     createApp(fields).catch(handleError);
+  });
+
+  // ---- Run view wiring ----
+  el.runBack.addEventListener("click", leaveRunView);
+
+  el.runForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    startRunForApp();
+  });
+
+  el.runKillBtn.addEventListener("click", function () {
+    killActiveRun();
+  });
+
+  // "New run" (shown once a run is terminal) resets the run view for the same
+  // app so the operator can fire another run without leaving.
+  el.runNewBtn.addEventListener("click", function () {
+    if (state.runApp) openRunView(state.runApp);
+  });
+
+  // Don't keep hammering the gateway while the modal/tab is hidden (the host
+  // dialog keeps this iframe mounted). Resume polling a live run when visible.
+  document.addEventListener("visibilitychange", function () {
+    if (state.view !== "run" || !state.activeRunId) return;
+    if (document.hidden) {
+      stopPolling();
+    } else {
+      startPolling();
+    }
   });
 
   // ---------------------------------------------------------------------------

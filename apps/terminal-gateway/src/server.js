@@ -24,6 +24,7 @@ import kanban from "./kanban.js";
 import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
 import agentic from "./agentic.js";
+import agentRuntime from "./agent-runtime.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -2167,6 +2168,14 @@ function agenticErrorStatus(code) {
       return 409;
     case "invalid_workflow":
       return 422;
+    // Run-engine (iter2) driver codes:
+    case "parallel_write_forbidden":
+      return 422; // distinct reason, same class as invalid_workflow
+    case "too_many_runs":
+      return 429; // AGENT_MAX_CONCURRENT_RUNS cap
+    case "session_unreachable":
+    case "cwd_unresolved":
+      return 502; // target server/session could not be reached/resolved
     case "backend_unavailable":
       return 503;
     default:
@@ -2183,11 +2192,691 @@ const AGENTIC_MCP_SERVERS = [
   { id: "kanban", name: "Kanban" },
 ];
 
+// ===========================================================================
+// Agentic AI Creator — RUN ENGINE (iter2). The async orchestration half of the
+// deliberate split described in agentic.js: agentic.js holds ONLY the pure
+// decide() reducer + sync atomic recorders; THESE drivers compose those with the
+// tmux exec seam (serverExec/serverCmd), keeping the gateway the single tmux
+// enforcement point (CLAUDE.md invariant) and agentic.js a pure sync store
+// (hard-constraint #3). Progress lives ONLY in the persisted nodeExecutions[]
+// ledger — the module-level state below is pure concurrency control; losing it
+// on a crash is harmless because boot re-derives everything from the ledger.
+// ===========================================================================
+
+// tmux run-session prefix — DELIBERATELY not "web-" (HARD-constraint #1). Three
+// consequences, all intentional:
+//   1. listSessions() filters name.startsWith(PREFIX="web-"), so agrun- jobs
+//      NEVER surface in the user's sidebar (verified: server.js listSessions).
+//   2. the push poll loop iterates listSessions() output only, so agrun- jobs
+//      never fire "job finished" pushes.
+//   3. attach/keys/DELETE machinery gate on ID_RE=/^web-.../, which agrun- fails,
+//      so a run job is unreachable via the human-session machinery.
+const AGENT_RUN_PREFIX = "agrun-";
+
+// Run-engine caps/config (plan §10; all optional, defaults keep boot unchanged).
+// AGENT_RUNS_DIR must be ABSOLUTE on the TARGET server (a relative default is
+// meaningless over ssh). Local default lives under the gateway data dir; remote
+// resolves a home-relative absolute base (see scratchBaseFor).
+const AGENT_RUNS_DIR =
+  (process.env.AGENT_RUNS_DIR || "").trim() ||
+  path.join(__dirname, "..", "data", "agentic-runs");
+const AGENT_RUN_TIMEOUT_MS =
+  Number(process.env.AGENT_RUN_TIMEOUT_MS) || 1_800_000; // per-step wall clock
+const AGENT_MAX_CONCURRENT_RUNS =
+  Number(process.env.AGENT_MAX_CONCURRENT_RUNS) || 4;
+const AGENTIC_RUN_MAX_AGE_MS =
+  Number(process.env.AGENTIC_RUN_MAX_AGE_MS) || 259_200_000; // whole-run notify
+const AGENTIC_POLL_INTERVAL_MS =
+  Number(process.env.AGENTIC_POLL_INTERVAL_MS) || 4000;
+const AGENT_OUTPUT_MAX_BYTES =
+  Number(process.env.AGENT_OUTPUT_MAX_BYTES) || 128 * 1024;
+
+// ---- In-memory concurrency control (NOT run progress; see header) ----
+// advanceRun re-entrancy guard: a run advances one driver-invocation at a time.
+// A concurrent request coalesces into a single re-run (rerunRequested), so a
+// poll tick that lands mid-advance never double-spawns.
+const advancing = new Set(); // runId currently inside advanceRun
+const rerunRequested = new Map(); // runId -> true (a re-advance is queued)
+// Runs we've already sent the whole-run max-age reminder for (notify-once).
+const agenticAgeNotified = new Set();
+// Resolved absolute scratch base per server (avoids an ssh round-trip per tick).
+const scratchBaseCache = new Map(); // serverId -> absolute base path
+
+let agenticPollTimer = null;
+
+// The registry server a run targets (derived from its qualified sessionId).
+function runServer(run) {
+  const { serverId } = parseSessionRef(String((run && run.sessionId) || ""));
+  return registry.get(serverId);
+}
+
+// Resolve the ABSOLUTE scratch base on a server. Local = AGENT_RUNS_DIR (already
+// absolute). Remote = a remote-set AGENT_RUNS_DIR if absolute, else
+// $HOME/.cache/agentic-runs — resolved once per server and cached. The gateway's
+// LOCAL AGENT_RUNS_DIR is never used as a remote path (it wouldn't exist there).
+async function scratchBaseFor(server) {
+  const key = server ? server.id : LOCAL_SERVER_ID;
+  if (scratchBaseCache.has(key)) return scratchBaseCache.get(key);
+  let base;
+  if (!server || server.type === "local") {
+    base = AGENT_RUNS_DIR;
+  } else {
+    const { stdout } = await serverCmd(server, [
+      "sh",
+      "-c",
+      'if [ -n "$AGENT_RUNS_DIR" ]; then printf %s "$AGENT_RUNS_DIR"; else printf %s "$HOME/.cache/agentic-runs"; fi',
+    ]);
+    base = stdout.trim();
+    if (!base.startsWith("/"))
+      throw new Error(`remote AGENT_RUNS_DIR not absolute: ${base}`);
+  }
+  scratchBaseCache.set(key, base);
+  return base;
+}
+
+function nodeSessionName(runId, nodeId) {
+  return `${AGENT_RUN_PREFIX}${runId}-${nodeId}`;
+}
+
+async function tmuxHasSession(server, name) {
+  try {
+    await serverExec(server, ["has-session", "-t", name]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function tmuxKill(server, name) {
+  // ONLY EVER an agrun- name derived from a run (HARD-constraint #2: run
+  // teardown never kills a web- session — this helper is only ever passed
+  // nodeSessionName() output).
+  try {
+    await serverExec(server, ["kill-session", "-t", name]);
+  } catch {
+    /* already gone — idempotent */
+  }
+}
+// Read a marker file's contents; "" when it exists-but-empty (start.marker), or
+// null when it does not exist. Existence checks reuse this (val !== null).
+async function readMarker(server, p) {
+  try {
+    const { stdout } = await serverCmd(server, ["cat", "--", p]);
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+// The frozen resolved config + workflow for a start. iter2 mode->workflow mapping
+// is the authority (no DAG editor ships in iter2, so a hand-authored workflow is
+// ignored). All nodes type:"agent-task". supervisor COLLAPSES to sequential in
+// iter2 (true delegation needs the deferred agent-to-agent protocol — FLAGGED).
+function buildResolvedWorkflow(app) {
+  const agentIds = (app.agentIds || []).filter(Boolean);
+  const resolvedAgents = {};
+  for (const id of agentIds) {
+    const a = agentic.getAgent(id);
+    if (a) resolvedAgents[id] = a; // frozen snapshot (shaped copy)
+  }
+  const mode = app.orchestrationMode;
+  let nodes = [];
+  let edges = [];
+  let entryNodeId = null;
+  if (mode === "single") {
+    nodes = [{ id: "n0", type: "agent-task", agentId: agentIds[0] }];
+    entryNodeId = "n0";
+  } else if (mode === "parallel") {
+    // No ordering — every node is ready at once (decide fans out in waves).
+    nodes = agentIds.map((aid, i) => ({
+      id: `n${i}`,
+      type: "agent-task",
+      agentId: aid,
+    }));
+    entryNodeId = null;
+  } else {
+    // sequential + supervisor(=sequential in iter2): n_i -> n_{i+1}.
+    nodes = agentIds.map((aid, i) => ({
+      id: `n${i}`,
+      type: "agent-task",
+      agentId: aid,
+    }));
+    for (let i = 0; i < nodes.length - 1; i++)
+      edges.push({ from: `n${i}`, to: `n${i + 1}` });
+    entryNodeId = nodes.length ? "n0" : null;
+  }
+  return { workflow: { nodes, edges, entryNodeId }, resolvedAgents };
+}
+
+// The per-node prompt (iter2: STATIC — objectiveTemplate + objective, NO
+// inter-node data threading; every node runs the objective independently. The
+// agent's systemPrompt is layered in by agent-runtime.buildInvocation).
+function composePromptText(run, cfg) {
+  const tmpl = (cfg && cfg.objectiveTemplate) || "";
+  const obj = (run && run.objective) || "";
+  return tmpl ? `${tmpl}\n\n${obj}` : obj;
+}
+
+function agenticErr(code, message, extra) {
+  const e = new Error(message || code);
+  e.code = code;
+  if (extra) Object.assign(e, extra);
+  return e;
+}
+
+// Spawn ONE agent-task node. Ordering is load-bearing for restart-safety:
+//   1. recordSpawned() persists status:"running" BEFORE any tmux spawn;
+//   2. materialize wrapper.sh/prompt/system (0600) on the target server;
+//   3. has-session guard — if the agrun- session already exists, DO NOTHING
+//      (idempotent: a retried/boot advance never double-spawns a live job);
+//   4. tmux new-session -d the wrapper.
+// A crash/throw at any step leaves a recoverable ledger: the reap table re-spawns
+// a never-started node (no markers) or fails it after the spawnAttempts cap.
+async function spawnNode(run, cfg, nodeId) {
+  const server = runServer(run);
+  const node = (cfg.workflow.nodes || []).find((n) => n.id === nodeId);
+  const agent = node && cfg.agents && cfg.agents[node.agentId];
+  if (!agent) {
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+    });
+    return;
+  }
+  const sessionName = nodeSessionName(run.id, nodeId);
+  let scratchDir;
+  try {
+    const base = await scratchBaseFor(server);
+    scratchDir = path.posix.join(base, run.id, nodeId);
+  } catch (e) {
+    console.warn(`[agentic] scratch base resolve failed: ${e.message}`);
+    return; // leave pending/running; retried next tick
+  }
+
+  // (1) persist RUNNING before spawning tmux.
+  agentic.recordSpawned(run.id, nodeId, {
+    agentRunId: sessionName,
+    startedAt: Date.now(),
+  });
+
+  let inv;
+  try {
+    inv = agentRuntime.buildInvocation({
+      runId: run.id,
+      nodeId,
+      agent,
+      cwd: cfg.cwd,
+      promptText: composePromptText(run, cfg),
+      scratchDir,
+      server,
+    });
+  } catch (e) {
+    console.warn(`[agentic] buildInvocation failed (${nodeId}): ${e.message}`);
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+    });
+    return;
+  }
+
+  // (2) materialize files on the target (each path a single argv token — never
+  //     concatenated; content via tee stdin; then chmod 600).
+  try {
+    await serverCmd(server, ["mkdir", "-p", "--", scratchDir]);
+    for (const f of inv.files) {
+      const dest = path.posix.join(scratchDir, f.relPath);
+      await serverCmdStdin(server, ["tee", "--", dest], f.content);
+      await serverCmd(server, ["chmod", f.mode, "--", dest]);
+    }
+  } catch (e) {
+    console.warn(`[agentic] materialize failed (${nodeId}): ${e.message}`);
+    return; // running with no session/markers -> reap respawns (or fails at cap)
+  }
+
+  // (3)+(4) idempotent spawn: has-session guard, then detached new-session.
+  try {
+    if (await tmuxHasSession(server, sessionName)) return; // already alive
+    await serverExec(server, [
+      "new-session",
+      "-d",
+      "-s",
+      sessionName,
+      "-c",
+      cfg.cwd,
+      inv.tmuxArg, // "bash '<scratchDir>/wrapper.sh'" — the ONLY thing on the cmd line
+    ]);
+  } catch (e) {
+    console.warn(`[agentic] tmux spawn failed (${sessionName}): ${e.message}`);
+    // leave running; reap disambiguates via the two-marker scheme.
+  }
+}
+
+// Kill every RUNNING node's agrun- session and mark it skipped (fail-fast /
+// cancel path). Only ever kills agrun- names derived from the run.
+async function killRunningJobs(run) {
+  const server = runServer(run);
+  for (const ne of run.nodeExecutions || []) {
+    if (ne.status !== "running") continue;
+    if (server) await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
+    agentic.recordNodeResult(run.id, ne.nodeId, {
+      status: "skipped",
+      finishedAt: Date.now(),
+    });
+  }
+}
+
+// Defensive sweep: kill the agrun- session for EVERY node of a run (idempotent).
+async function killAllRunSessions(run) {
+  const server = runServer(run);
+  if (!server) return;
+  for (const ne of run.nodeExecutions || [])
+    await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
+}
+
+// Reap the reap table (§D) for every currently-running node. Reads
+// {hasSession, exit.marker, start.marker} on the run's server. Returns true if
+// any node changed (so advanceRun re-reads the ledger). This is where
+// restart-safety is ENFORCED — every running node is reaped on every advance /
+// poll / boot, so a step is never lost, never double-spawned, never duplicated.
+async function reapRunningNodes(run, cfg) {
+  const server = runServer(run);
+  let base;
+  try {
+    base = await scratchBaseFor(server);
+  } catch {
+    return false; // couldn't resolve remote base this tick — leave untouched
+  }
+  let changed = false;
+  for (const ne of run.nodeExecutions || []) {
+    if (ne.status !== "running") continue;
+    const nodeId = ne.nodeId;
+    const sessionName = nodeSessionName(run.id, nodeId);
+    const scratchDir = path.posix.join(base, run.id, nodeId);
+    const hasSession = await tmuxHasSession(server, sessionName);
+    const exitVal = await readMarker(
+      server,
+      path.posix.join(scratchDir, "exit.marker"),
+    );
+    const startVal = await readMarker(
+      server,
+      path.posix.join(scratchDir, "start.marker"),
+    );
+    const started = startVal !== null;
+    const elapsed = Date.now() - (ne.startedAt || Date.now());
+
+    if (hasSession) {
+      if (exitVal == null) {
+        // Alive, not yet finished. Timeout -> kill + fail; else leave running.
+        if (elapsed > AGENT_RUN_TIMEOUT_MS) {
+          await tmuxKill(server, sessionName);
+          agentic.recordNodeResult(run.id, nodeId, {
+            status: "failed",
+            finishedAt: Date.now(),
+          });
+          changed = true;
+        }
+        continue;
+      }
+      // Session lingering but exit.marker already written (rare) — treat as done.
+      await tmuxKill(server, sessionName);
+      const code = parseInt(String(exitVal).trim(), 10);
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: code === 0 ? "done" : "failed",
+        finishedAt: Date.now(),
+      });
+      changed = true;
+      continue;
+    }
+
+    // No live session.
+    if (exitVal != null) {
+      // Finished (possibly during downtime): exit.marker is the verdict.
+      const code = parseInt(String(exitVal).trim(), 10);
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: code === 0 ? "done" : "failed",
+        finishedAt: Date.now(),
+      });
+      changed = true;
+      continue;
+    }
+    if (started) {
+      // Started then died without finishing (reboot/OOM/killed) — FAIL, do NOT
+      // auto-respawn (avoids a duplicate workspace-write).
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "failed",
+        finishedAt: Date.now(),
+      });
+      changed = true;
+      continue;
+    }
+    // No session, no markers => the node NEVER actually ran (crash between
+    // persist-running and spawn). Re-spawn idempotently, unless we've already
+    // tried twice (cap) -> fail.
+    if (agentic.getSpawnAttempts(run.id, nodeId) >= 2) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "failed",
+        finishedAt: Date.now(),
+      });
+      changed = true;
+      continue;
+    }
+    await spawnNode(run, cfg, nodeId);
+    changed = true;
+  }
+  return changed;
+}
+
+// Whole-run max-age reminder (D3): notify ONCE, NEVER auto-cancel.
+function maybeNotifyMaxAge(run) {
+  if (!run.startedAt) return;
+  if (Date.now() - run.startedAt < AGENTIC_RUN_MAX_AGE_MS) return;
+  if (agenticAgeNotified.has(run.id)) return;
+  agenticAgeNotified.add(run.id);
+  if (!push.isConfigured()) return;
+  emitNotify(
+    {
+      title: "Agentic run still active",
+      body: `A run has been active for over ${Math.round(
+        AGENTIC_RUN_MAX_AGE_MS / 3_600_000,
+      )}h.`,
+      tag: `agentic-age-${run.id}`,
+    },
+    { runId: run.id, kind: "agentic-age" },
+  );
+}
+
+// ---- DRIVER: startRun ----
+// Freezes resolvedConfig + agenticAiVersion (D9), validates the target session +
+// dangling refs, creates the Run (+ pending nodeExecutions), starts the poll loop,
+// and advances once to spawn the entry/ready node(s). Returns the shaped Run.
+async function startRun({ agenticAiId, sessionId, objective } = {}) {
+  const app = agentic.getAgenticAi(agenticAiId);
+  if (!app) throw agenticErr("not_found", "agentic AI not found");
+  if (app.status === "archived")
+    throw agenticErr("bad_request", "cannot run an archived agentic AI");
+
+  // Concurrency cap (429).
+  if (agentic.listActiveRuns().length >= AGENT_MAX_CONCURRENT_RUNS)
+    throw agenticErr(
+      "too_many_runs",
+      `at most ${AGENT_MAX_CONCURRENT_RUNS} concurrent runs`,
+    );
+
+  // Resolve + validate the target session/server.
+  const ref = String(sessionId || "");
+  const { serverId, tmuxName } = parseSessionRef(ref);
+  if (!ID_RE.test(tmuxName))
+    throw agenticErr("bad_request", "invalid sessionId");
+  const server = registry.get(serverId);
+  if (!server) throw agenticErr("bad_request", `unknown server: ${serverId}`);
+  const probe = await probeServer(server);
+  if (probe.reachability !== "ok")
+    throw agenticErr("session_unreachable", "target server is unreachable");
+
+  // Resolve the session cwd (same display-message mechanism as codex/git) and
+  // FREEZE it into resolvedConfig so a boot re-spawn never re-resolves (the
+  // user session may be gone by then; the run job is independent of it).
+  let cwd;
+  try {
+    const r = await serverExec(server, [
+      "display-message",
+      "-p",
+      "-t",
+      tmuxName,
+      "#{pane_current_path}",
+    ]);
+    cwd = r.stdout.trim();
+  } catch {
+    throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+  }
+  if (!isAbsPath(cwd))
+    throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+
+  // Build the frozen workflow from the orchestration mode + validate agents.
+  const agentIds = (app.agentIds || []).filter(Boolean);
+  if (!agentIds.length)
+    throw agenticErr("invalid_workflow", "agentic AI has no agents");
+  const { workflow, resolvedAgents } = buildResolvedWorkflow(app);
+  for (const n of workflow.nodes) {
+    if (!n.agentId || !resolvedAgents[n.agentId])
+      throw agenticErr(
+        "invalid_workflow",
+        `node ${n.id} has no resolvable agent`,
+        {
+          node: n.id,
+        },
+      );
+  }
+  // parallel + any workspace-write agent -> 422 (§9): concurrent writers to one
+  // cwd are unsafe.
+  if (app.orchestrationMode === "parallel") {
+    for (const n of workflow.nodes) {
+      const ag = resolvedAgents[n.agentId];
+      if (ag && ag.sandboxMode === "workspace-write")
+        throw agenticErr(
+          "parallel_write_forbidden",
+          "parallel mode forbids workspace-write agents",
+          { node: n.id },
+        );
+    }
+  }
+
+  // Prompt byte cap at start (all nodes share the prompt in iter2) -> 400.
+  const promptText = composePromptText(
+    { objective },
+    { objectiveTemplate: app.objectiveTemplate },
+  );
+  const promptBytes = Buffer.byteLength(promptText, "utf8");
+  if (promptBytes > agentRuntime.AGENT_PROMPT_MAX_BYTES)
+    throw agenticErr(
+      "bad_request",
+      `prompt exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
+    );
+
+  const resolvedConfig = {
+    agents: resolvedAgents,
+    workflow,
+    // toolPolicies are DEFINED-but-UNUSED at runtime in iter2 (the per-run MCP
+    // proxy is iter3); copied for provenance only.
+    toolPolicies: {},
+    // Frozen execution context (not in shared-types; internal to the run).
+    cwd,
+    serverId,
+    objectiveTemplate: app.objectiveTemplate || "",
+  };
+
+  const run = agentic.createRunRecord({
+    agenticAiId,
+    sessionId: ref,
+    objective: typeof objective === "string" ? objective : "",
+    resolvedConfig,
+    agenticAiVersion: app.version,
+    nodeExecutions: workflow.nodes.map((n) => ({ nodeId: n.id })),
+  });
+
+  startAgenticLoop();
+  await advanceRun(run.id);
+  return agentic.getRun(run.id);
+}
+
+// ---- DRIVER: advanceRun (idempotent, re-entrancy-guarded) ----
+// Recomputed fresh from the persisted ledger on every call — the gateway holds
+// NO run progress in memory. Loop: reap running -> decide -> spawn ready / apply
+// terminal, re-looping while the ledger changes. The advancing Set is pure
+// concurrency control (a mid-advance re-invocation coalesces into ONE rerun).
+async function advanceRun(runId) {
+  if (advancing.has(runId)) {
+    rerunRequested.set(runId, true);
+    return;
+  }
+  advancing.add(runId);
+  try {
+    // Reachability gate (mirrors the push loop's `if (!s.reachable) continue`):
+    // a transient ssh blip must NOT let reap read "no session" and wrongly fail /
+    // respawn a live remote job. Leave the ledger untouched this tick. Local is
+    // always ok, so this never affects the local path.
+    const first = agentic.getRun(runId);
+    if (!first) return;
+    if (first.status === "running" || first.status === "queued") {
+      const srv = runServer(first);
+      // Server removed from the registry mid-run: we cannot safely act (running
+      // tmux commands "locally" for a remote run could mis-spawn). Leave the
+      // ledger untouched this tick.
+      if (!srv) return;
+      const probe = await probeServer(srv);
+      if (probe.reachability !== "ok") return;
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const run = agentic.getRun(runId);
+      if (!run) break;
+      if (run.status !== "running" && run.status !== "queued") break;
+      const cfg = run.resolvedConfig || {};
+      try {
+        // 1) reap running nodes (finished/died/timed-out/never-ran).
+        if (await reapRunningNodes(run, cfg)) {
+          changed = true;
+          continue;
+        }
+        // 2) whole-run age reminder (notify-only).
+        maybeNotifyMaxAge(run);
+        // 3) decide from the fresh ledger.
+        const decision = agentic.decide(run, cfg);
+        if (decision.terminal === "failed") {
+          await killRunningJobs(run); // fail-fast: no orphan jobs
+          agentic.setRunStatus(runId, "failed", { finishedAt: Date.now() });
+          changed = true;
+          continue;
+        }
+        if (decision.terminal === "completed") {
+          agentic.setRunStatus(runId, "completed", { finishedAt: Date.now() });
+          changed = true;
+          continue;
+        }
+        // 4) spawn ready nodes (fan-out already capped by decide).
+        if (decision.toSpawn.length) {
+          for (const nodeId of decision.toSpawn)
+            await spawnNode(run, cfg, nodeId);
+          changed = true;
+          continue;
+        }
+        // else: running nodes still in flight — nothing to do this tick.
+      } catch (e) {
+        // A transient error retries on the next tick (fire-and-forget caller).
+        console.warn(`[agentic] advance ${runId} error: ${e.message}`);
+        break;
+      }
+    }
+  } finally {
+    advancing.delete(runId);
+    const rerun = rerunRequested.get(runId);
+    if (rerun) {
+      rerunRequested.delete(runId);
+      void advanceRun(runId);
+    } else if (agentic.listActiveRuns().length === 0) {
+      stopAgenticLoop();
+    }
+  }
+}
+
+// Wait out an in-flight advance for a run (bounded), so killRun's final sweep
+// can catch a straggler node spawned during the race.
+async function waitForAdvanceIdle(runId, tries = 100) {
+  while (advancing.has(runId) && tries-- > 0)
+    await new Promise((r) => setTimeout(r, 20));
+}
+
+// ---- DRIVER: killRun ----
+// Kills the run's live agrun- job(s) — the ONLY kill path, always an agrun- name
+// derived from the run, NEVER a web- id (HARD-constraint #2 by construction) —
+// then marks the run cancelled. Idempotent on an already-terminal run (sweep,
+// leave status untouched — never clobber a completed run to cancelled).
+async function killRun(runId) {
+  const run = agentic.getRun(runId);
+  if (!run) throw agenticErr("not_found", "run not found");
+  if (run.status !== "running" && run.status !== "queued") {
+    await killAllRunSessions(run); // idempotent sweep; DO NOT touch status
+    return agentic.getRun(runId);
+  }
+  // Mark cancelled synchronously FIRST so a racing advanceRun's status guard
+  // bails before it can spawn anything new.
+  agentic.setRunStatus(runId, "cancelled", { finishedAt: Date.now() });
+  await killRunningJobs(run);
+  // Catch a node the in-flight advance may have spawned during the race.
+  await waitForAdvanceIdle(runId);
+  const after = agentic.getRun(runId);
+  if (after) await killAllRunSessions(after);
+  if (agentic.listActiveRuns().length === 0) stopAgenticLoop();
+  return agentic.getRun(runId);
+}
+
+// ---- Poll loop (mirrors the push loop) + boot rediscovery ----
+// Gated on there being >=1 active run so it NEVER runs idle. Each tick advances
+// every active run; the loop stops itself when the last run goes terminal.
+function agenticPollTick() {
+  const ids = agentic.listActiveRuns();
+  if (ids.length === 0) {
+    stopAgenticLoop();
+    return;
+  }
+  for (const id of ids) void advanceRun(id);
+}
+function startAgenticLoop() {
+  if (agenticPollTimer) return;
+  if (agentic.listActiveRuns().length === 0) return;
+  agenticPollTimer = setInterval(agenticPollTick, AGENTIC_POLL_INTERVAL_MS);
+  if (agenticPollTimer.unref) agenticPollTimer.unref();
+  console.log("[agentic] run poll loop started");
+}
+function stopAgenticLoop() {
+  if (!agenticPollTimer) return;
+  clearInterval(agenticPollTimer);
+  agenticPollTimer = null;
+  console.log("[agentic] run poll loop stopped");
+}
+
+// Boot rediscovery: for every active run, advanceRun runs the reap table — a
+// still-alive job resumes (has-session), a job that finished during downtime is
+// reaped via its exit.marker, a never-ran step is re-spawned, a started-then-died
+// step fails. Same idiom as the session-level `tmux ls`-on-boot rediscovery.
+function bootRediscoverRuns() {
+  const active = agentic.listActiveRuns();
+  for (const id of active) void advanceRun(id);
+  if (active.length) startAgenticLoop();
+  if (active.length)
+    console.log(
+      `[agentic] ${active.length} active run(s) rediscovered at boot.`,
+    );
+}
+
+// Read a bounded tail of a node's out.log (display-only; injected by the GET
+// /api/agentic/runs/:id route in BE-3's routing work — exported below).
+async function agenticNodeLogTail(run, nodeId) {
+  const server = runServer(run);
+  if (!server) return "";
+  try {
+    const base = await scratchBaseFor(server);
+    const log = path.posix.join(base, run.id, nodeId, "out.log");
+    const { stdout } = await serverCmd(server, [
+      "tail",
+      "-c",
+      String(AGENT_OUTPUT_MAX_BYTES),
+      "--",
+      log,
+    ]);
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
 // ---- Agentic AI Creator (/api/agentic/*) ----
 // The Creator artifact (docs/AGENTIC-AI-CREATOR-PLAN.md §3). Store: src/agentic.js
 // (synchronous mutators => atomic). Coded store errors map via agenticErrorStatus().
-// `seg` = path after /api/agentic. ITERATION 1: CRUD only — no run/approve/reject/
-// guidance routes (the run engine is a later, checkpoint-gated iteration).
+// `seg` = path after /api/agentic. ITERATION 1: CRUD only. The run-lifecycle
+// write routes (POST .../run, DELETE .../runs/:id, GET logTail) are wired by BE-3
+// on top of the startRun/advanceRun/killRun drivers above.
 async function handleAgentic(req, res, url) {
   const seg = url.pathname.split("/").filter(Boolean).slice(2);
   try {
@@ -2321,15 +3010,63 @@ async function handleAgentic(req, res, url) {
     if (req.method === "GET" && seg.length === 1 && seg[0] === "runs") {
       return sendJson(res, 200, { runs: agentic.listRuns() });
     }
-    // GET /api/agentic/runs/:id — get (full, incl. nodeExecutions[])
+    // GET /api/agentic/runs/:id — get (full, incl. nodeExecutions[] + a bounded
+    // tailed log excerpt per step). logTail is DISPLAY-ONLY (never persisted): we
+    // inject it here by tailing each node's out.log (capped at AGENT_OUTPUT_MAX_BYTES
+    // by agenticNodeLogTail). Only nodes past `pending` have a scratch dir, so we
+    // skip pending ones (no wasted SSH round-trip) and Promise.all the rest so a
+    // multi-node run doesn't serialize per-node SSH latency.
     if (req.method === "GET" && seg.length === 2 && seg[0] === "runs") {
       const run = agentic.getRun(seg[1]);
       if (!run) return sendJson(res, 404, { error: "run not found" });
+      const nodes = run.nodeExecutions || [];
+      await Promise.all(
+        nodes.map(async (ne) => {
+          if (ne.status === "pending") return;
+          ne.logTail = await agenticNodeLogTail(run, ne.nodeId);
+        }),
+      );
       return sendJson(res, 200, run);
     }
 
-    // Run-lifecycle write routes (POST .../run, kill, approve, reject, guidance)
-    // are the later, checkpoint-gated iteration — not wired here yet.
+    // ---- Run-lifecycle write routes (iteration 2) ----
+    // These call the async drivers in this module (startRun/killRun), which own
+    // the tmux/marker I/O. Origin/CSRF + auth parity is enforced upstream in
+    // handleApi (A1 checks Origin on POST/DELETE; A2 requires cookie-or-bearer).
+    // Coded driver errors flow through the shared catch → agenticErrorStatus
+    // (too_many_runs→429, session_unreachable/cwd_unresolved→502, dangling ref /
+    // parallel-write→422, not_found→404, bad_request→400, backend_unavailable→503).
+
+    // POST /api/agentic/apps/:id/run {sessionId, objective} — freeze resolvedConfig
+    // + spawn the entry node(s). 202 (accepted; the run advances asynchronously).
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "run"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const run = await startRun({
+        agenticAiId: seg[1],
+        sessionId: r.body.sessionId,
+        objective: r.body.objective,
+      });
+      return sendJson(res, 202, run);
+    }
+
+    // DELETE /api/agentic/runs/:id — kill the run's live agrun- job(s) and mark it
+    // cancelled. The ONLY kill path, always an agrun- name derived from the run —
+    // never a web- session (HARD-constraint #2 by construction). 204.
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "runs") {
+      await killRun(seg[1]);
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // approve/reject/guidance (human-approval workflow nodes) are iteration 3 —
+    // deliberately left to fall through to the 404 below.
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
     if (e && e.code) {
@@ -4519,4 +5256,20 @@ server.listen(PORT, HOST, () => {
       `[push] ${push.count()} persisted subscription(s); loop active.`,
     );
   }
+  // Agentic run-engine boot rediscovery: reap finished/died steps, re-spawn
+  // never-ran steps, resume still-alive jobs, and advance every active run.
+  bootRediscoverRuns();
 });
+
+// Test/BE-3 seam: the run-engine drivers live in server.js (they own the async
+// tmux/marker I/O). These are NOT routes — BE-3's /api/agentic/*/run routes live
+// in the same module and call them directly. The export exists only so the
+// out-of-process smoke/acceptance test can drive the REAL drivers.
+export {
+  startRun,
+  advanceRun,
+  killRun,
+  startAgenticLoop,
+  stopAgenticLoop,
+  agenticNodeLogTail,
+};
