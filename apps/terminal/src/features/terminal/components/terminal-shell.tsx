@@ -30,6 +30,7 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  Bot,
   FolderTree,
   Globe2,
   Loader2,
@@ -40,6 +41,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AgenticDialog } from "./agentic-dialog";
 import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
 import { FileExplorerDialog } from "./file-explorer-dialog";
@@ -108,6 +110,8 @@ export function TerminalShell() {
     setKanbanOpen,
     pmOpen,
     setPmOpen,
+    agenticOpen,
+    setAgenticOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -161,6 +165,7 @@ export function TerminalShell() {
   useUrlFlagSync("explorer", explorerOpen, setExplorerOpen);
   useUrlFlagSync("kanban", kanbanOpen, setKanbanOpen);
   useUrlFlagSync("pm", pmOpen, setPmOpen);
+  useUrlFlagSync("agentic", agenticOpen, setAgenticOpen);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
@@ -443,6 +448,21 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Project management</TooltipContent>
           </Tooltip>
+          {/* Agentic AI Creator is gateway-global (D8) too — always enabled. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Agentic AI Creator"
+                onClick={() => setAgenticOpen(true)}
+              >
+                <Bot className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Agentic AI Creator</TooltipContent>
+          </Tooltip>
           {browserView && !browserVisible && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -571,6 +591,11 @@ export function TerminalShell() {
       {/* Project management modal — gateway-global, not session-scoped.
           Mounted once; open state lives in the store (deep-linked via `?pm`). */}
       <PmDialog open={pmOpen} onOpenChange={setPmOpen} />
+
+      {/* Agentic AI Creator modal — gateway-global (D8), not session-scoped.
+          Mounted once; open state lives in the store (deep-linked via
+          `?agentic`). */}
+      <AgenticDialog open={agenticOpen} onOpenChange={setAgenticOpen} />
     </div>
   );
 }

@@ -1121,3 +1121,293 @@ export const MarkNotificationsReadRequestSchema = z.object({
 export type MarkNotificationsReadRequest = z.infer<
   typeof MarkNotificationsReadRequestSchema
 >;
+
+// ---------------------------------------------------------------------------
+// REST: Agentic AI Creator /api/agentic/*
+// ---------------------------------------------------------------------------
+// A third gateway-owned pluggable artifact (docs/AGENTIC-AI-CREATOR-PLAN.md),
+// separate from Kanban and PM. State lives in a data/agentic.json sidecar
+// (apps/terminal-gateway/src/agentic.js) with FOUR top-level collections:
+// agents, connections, agenticAis, runs. Like Kanban/PM, mutators are fully
+// synchronous (atomic read-modify-write, no mutex). `rev` guards edits on
+// agents/agenticAis/connections; `runs` carry NO rev (only the gateway's own
+// poll/marker/approval paths mutate them — no cross-client race). Ordering /
+// structure authority is agentIds[] + workflow.edges (D8/§2). An AgenticAI
+// carries a monotonic `version` bumped on every definition edit (D9); each Run
+// snapshots the version + resolved config it executed with, for reproducibility.
+// NOTE (iteration 1): the CRUD surface only. Run records stay empty until the
+// run engine (startRun/reducer/tmux) lands in a later iteration.
+
+/** Backend that powers an Agent (D6). */
+export const AgentRuntimeProviderSchema = z.enum(["codex-cli", "claude-cli"]);
+export type AgentRuntimeProvider = z.infer<typeof AgentRuntimeProviderSchema>;
+
+/** Sandbox mode for a spawned agent-task step — clamped in code (D4). */
+export const AgentSandboxModeSchema = z.enum(["read-only", "workspace-write"]);
+export type AgentSandboxMode = z.infer<typeof AgentSandboxModeSchema>;
+
+/** Per-connection, per-tool policy for one Agent (D5). `tools` is either the
+ *  literal "all" or an explicit tool-name allowlist. `policy` is the default
+ *  disposition the per-run proxy applies to matching calls. */
+export const AgentToolPolicySchema = z.object({
+  connectionId: z.string(),
+  tools: z.union([z.literal("all"), z.array(z.string().min(1).max(128))]),
+  policy: z.enum(["allow", "deny", "approval"]),
+});
+export type AgentToolPolicy = z.infer<typeof AgentToolPolicySchema>;
+
+/** One team member inside an Agentic AI, backed by a runtime provider. */
+export const AgentSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(512),
+  runtimeProvider: AgentRuntimeProviderSchema,
+  /** Free-form label ("supervisor"/"worker"/"reviewer"); not enforced. */
+  role: z.string().max(128).nullable().default(null),
+  systemPrompt: z.string().max(8192).default(""),
+  sandboxMode: AgentSandboxModeSchema.default("read-only"),
+  toolPolicies: z.array(AgentToolPolicySchema).default([]),
+  /** Optional model override; null = provider default. */
+  model: z.string().max(256).nullable().default(null),
+  /** Monotonic revision; bumped on every mutation (optimistic concurrency). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type Agent = z.infer<typeof AgentSchema>;
+
+/** Scoped access from an Agentic AI's agents to another artifact's MCP server. */
+export const ArtifactConnectionSchema = z.object({
+  id: z.string(),
+  targetType: z.enum(["pm", "kanban"]),
+  scope: z.enum(["fixed", "runtime-selection"]),
+  /** A specific project/board id, when scope = "fixed". */
+  targetId: z.string().nullable().default(null),
+  createdAt: z.number(),
+  /** Monotonic revision (optional — connections are POST/DELETE only, no PATCH). */
+  rev: z.number().int().optional(),
+});
+export type ArtifactConnection = z.infer<typeof ArtifactConnectionSchema>;
+
+/** One workflow node. DAG-shaped from day one so future node types are additive. */
+export const WorkflowNodeSchema = z.object({
+  id: z.string().min(1).max(128),
+  type: z.enum(["agent-task"]),
+  /** The Agent that executes this node (for type = "agent-task"). */
+  agentId: z.string().optional(),
+});
+export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
+
+/** A directed edge between two workflow nodes. */
+export const WorkflowEdgeSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+});
+export type WorkflowEdge = z.infer<typeof WorkflowEdgeSchema>;
+
+/** The workflow DAG. Empty/absent is allowed (default {[],[],null}). */
+export const WorkflowDefinitionSchema = z.object({
+  nodes: z.array(WorkflowNodeSchema).default([]),
+  edges: z.array(WorkflowEdgeSchema).default([]),
+  entryNodeId: z.string().nullable().default(null),
+});
+export type WorkflowDefinition = z.infer<typeof WorkflowDefinitionSchema>;
+
+/** A full Agentic AI (catalog entry). Returned by GET /api/agentic/apps/:id. */
+export const AgenticAiSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  objectiveTemplate: z.string().max(8192).default(""),
+  status: z.enum(["draft", "published", "paused", "archived"]),
+  orchestrationMode: z.enum(["single", "supervisor", "sequential", "parallel"]),
+  /** Member agent ids; order = supervisor/pipeline order. */
+  agentIds: z.array(z.string()).default([]),
+  connectionIds: z.array(z.string()).default([]),
+  workflow: WorkflowDefinitionSchema,
+  /** Monotonic definition version, bumped on every definition edit (D9). */
+  version: z.number().int(),
+  /** Monotonic revision (optimistic concurrency). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type AgenticAi = z.infer<typeof AgenticAiSchema>;
+
+/** Lightweight catalog row for GET /api/agentic/apps. Counts derived on GET. */
+export const AgenticAiSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  status: z.enum(["draft", "published", "paused", "archived"]),
+  orchestrationMode: z.enum(["single", "supervisor", "sequential", "parallel"]),
+  /** Derived on GET (agentIds.length); never persisted. */
+  agentCount: z.number().int(),
+  /** Derived on GET (connectionIds.length); never persisted. */
+  connectionCount: z.number().int(),
+  version: z.number().int(),
+  updatedAt: z.number(),
+});
+export type AgenticAiSummary = z.infer<typeof AgenticAiSummarySchema>;
+
+/** One workflow step's durable execution record (D3 — the run's position). */
+export const NodeExecutionSchema = z.object({
+  nodeId: z.string(),
+  status: z.enum([
+    "pending",
+    "running",
+    "waiting-approval",
+    "done",
+    "failed",
+    "skipped",
+  ]),
+  /** Ties an agent-task step to its tmux job (D3 layer 1). */
+  agentRunId: z.string().nullable().optional(),
+  /** For parallel fan-out: the parent step whose children these are. */
+  parentNodeId: z.string().nullable().optional(),
+  startedAt: z.number().nullable().optional(),
+  finishedAt: z.number().nullable().optional(),
+  /** Derived on GET (tailed step log); never persisted. */
+  logTail: z.string().optional(),
+});
+export type NodeExecution = z.infer<typeof NodeExecutionSchema>;
+
+/** One execution of an Agentic AI. Returned by GET /api/agentic/runs/:id. */
+export const RunSchema = z.object({
+  id: z.string(),
+  agenticAiId: z.string(),
+  /** Snapshot of the definition version this run executed with (D9). */
+  agenticAiVersion: z.number().int(),
+  /** Frozen, resolved config (agents+workflow+toolPolicies) at start time (D9). */
+  resolvedConfig: z.record(z.string(), z.unknown()).optional(),
+  sessionId: z.string().nullable().default(null),
+  objective: z.string().default(""),
+  status: z.enum([
+    "queued",
+    "running",
+    "waiting-approval",
+    "completed",
+    "failed",
+    "cancelled",
+  ]),
+  /** The durable workflow ledger — this array IS the run's position (D3). */
+  nodeExecutions: z.array(NodeExecutionSchema).default([]),
+  startedAt: z.number().nullable().default(null),
+  finishedAt: z.number().nullable().default(null),
+});
+export type Run = z.infer<typeof RunSchema>;
+
+/** Lightweight run row for GET /api/agentic/runs (no nodeExecutions/logs). */
+export const RunSummarySchema = z.object({
+  id: z.string(),
+  agenticAiId: z.string(),
+  agenticAiVersion: z.number().int(),
+  status: z.enum([
+    "queued",
+    "running",
+    "waiting-approval",
+    "completed",
+    "failed",
+    "cancelled",
+  ]),
+  objective: z.string(),
+  startedAt: z.number().nullable(),
+  finishedAt: z.number().nullable(),
+});
+export type RunSummary = z.infer<typeof RunSummarySchema>;
+
+/** Request body for POST /api/agentic/agents. */
+export const CreateAgentRequestSchema = z.object({
+  name: z.string().min(1).max(512),
+  runtimeProvider: AgentRuntimeProviderSchema,
+  role: z.string().max(128).optional(),
+  systemPrompt: z.string().max(8192).default(""),
+  sandboxMode: AgentSandboxModeSchema.default("read-only"),
+  toolPolicies: z.array(AgentToolPolicySchema).optional(),
+  model: z.string().max(256).nullable().optional(),
+});
+export type CreateAgentRequest = z.infer<typeof CreateAgentRequestSchema>;
+
+/** Request body for PATCH /api/agentic/agents/:id (partial; ≥1 field). */
+export const UpdateAgentRequestSchema = z
+  .object({
+    name: z.string().min(1).max(512).optional(),
+    runtimeProvider: AgentRuntimeProviderSchema.optional(),
+    role: z.string().max(128).nullable().optional(),
+    systemPrompt: z.string().max(8192).optional(),
+    sandboxMode: AgentSandboxModeSchema.optional(),
+    toolPolicies: z.array(AgentToolPolicySchema).optional(),
+    model: z.string().max(256).nullable().optional(),
+  })
+  .refine(
+    (b) =>
+      b.name !== undefined ||
+      b.runtimeProvider !== undefined ||
+      b.role !== undefined ||
+      b.systemPrompt !== undefined ||
+      b.sandboxMode !== undefined ||
+      b.toolPolicies !== undefined ||
+      b.model !== undefined,
+    { message: "at least one field is required" },
+  );
+export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequestSchema>;
+
+/** Request body for POST /api/agentic/connections. */
+export const CreateConnectionRequestSchema = z.object({
+  targetType: z.enum(["pm", "kanban"]),
+  scope: z.enum(["fixed", "runtime-selection"]).default("fixed"),
+  targetId: z.string().nullable().optional(),
+});
+export type CreateConnectionRequest = z.infer<
+  typeof CreateConnectionRequestSchema
+>;
+
+/** Request body for POST /api/agentic/apps (creates at version 1, draft). */
+export const CreateAgenticAiRequestSchema = z.object({
+  name: z.string().min(1).max(512),
+  description: z.string().max(8192).optional(),
+  objectiveTemplate: z.string().max(8192).optional(),
+  orchestrationMode: z
+    .enum(["single", "supervisor", "sequential", "parallel"])
+    .default("single"),
+  agentIds: z.array(z.string()).default([]),
+  connectionIds: z.array(z.string()).optional(),
+  workflow: WorkflowDefinitionSchema.optional(),
+});
+export type CreateAgenticAiRequest = z.infer<
+  typeof CreateAgenticAiRequestSchema
+>;
+
+/** Request body for PATCH /api/agentic/apps/:id (partial; bumps version, D9). */
+export const UpdateAgenticAiRequestSchema = z
+  .object({
+    name: z.string().min(1).max(512).optional(),
+    description: z.string().max(8192).optional(),
+    objectiveTemplate: z.string().max(8192).optional(),
+    orchestrationMode: z
+      .enum(["single", "supervisor", "sequential", "parallel"])
+      .optional(),
+    agentIds: z.array(z.string()).optional(),
+    connectionIds: z.array(z.string()).optional(),
+    workflow: WorkflowDefinitionSchema.optional(),
+  })
+  .refine(
+    (b) =>
+      b.name !== undefined ||
+      b.description !== undefined ||
+      b.objectiveTemplate !== undefined ||
+      b.orchestrationMode !== undefined ||
+      b.agentIds !== undefined ||
+      b.connectionIds !== undefined ||
+      b.workflow !== undefined,
+    { message: "at least one field is required" },
+  );
+export type UpdateAgenticAiRequest = z.infer<
+  typeof UpdateAgenticAiRequestSchema
+>;
+
+/** Request body for PATCH /api/agentic/apps/:id/status — "publish" (D8). */
+export const UpdateAgenticAiStatusRequestSchema = z.object({
+  status: z.enum(["draft", "published", "paused", "archived"]),
+});
+export type UpdateAgenticAiStatusRequest = z.infer<
+  typeof UpdateAgenticAiStatusRequestSchema
+>;

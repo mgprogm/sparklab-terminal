@@ -23,6 +23,7 @@ import push from "./push.js";
 import kanban from "./kanban.js";
 import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
+import agentic from "./agentic.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -2154,6 +2155,193 @@ async function handlePm(req, res, url) {
   }
 }
 
+// Map a coded agentic.js store error to an HTTP status. invalid_workflow (a
+// cycle or dangling edge) uses 422 like PM's business-rule rejections; stale
+// (rev mismatch) 409; not_found 404; backend_unavailable (reserved for the run
+// engine, iter2) 503; everything else (bad_request/validation) 400.
+function agenticErrorStatus(code) {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "stale":
+      return 409;
+    case "invalid_workflow":
+      return 422;
+    case "backend_unavailable":
+      return 503;
+    default:
+      return 400;
+  }
+}
+
+// The artifact MCP targets an Agentic AI's agents may be connected to. These are
+// the currently-registered gateway-owned artifact MCP servers (pm, kanban). Used
+// by the connection picker (GET /api/agentic/mcp-servers) and mirrors the store's
+// CONNECTION_TARGETS set. Additive as future artifacts ship their own MCP server.
+const AGENTIC_MCP_SERVERS = [
+  { id: "pm", name: "Project Management" },
+  { id: "kanban", name: "Kanban" },
+];
+
+// ---- Agentic AI Creator (/api/agentic/*) ----
+// The Creator artifact (docs/AGENTIC-AI-CREATOR-PLAN.md §3). Store: src/agentic.js
+// (synchronous mutators => atomic). Coded store errors map via agenticErrorStatus().
+// `seg` = path after /api/agentic. ITERATION 1: CRUD only — no run/approve/reject/
+// guidance routes (the run engine is a later, checkpoint-gated iteration).
+async function handleAgentic(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // ---- Agents ----
+    // GET /api/agentic/agents — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "agents") {
+      return sendJson(res, 200, { agents: agentic.listAgents() });
+    }
+    // GET /api/agentic/agents/:id — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "agents") {
+      const a = agentic.getAgent(seg[1]);
+      if (!a) return sendJson(res, 404, { error: "agent not found" });
+      return sendJson(res, 200, a);
+    }
+    // POST /api/agentic/agents — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "agents") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(res, 201, agentic.createAgent(r.body));
+    }
+    // PATCH /api/agentic/agents/:id — update (partial)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "agents") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { expectedRev, ...patch } = r.body;
+      return sendJson(
+        res,
+        200,
+        agentic.updateAgent(seg[1], patch, expectedRev),
+      );
+    }
+    // DELETE /api/agentic/agents/:id — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "agents") {
+      if (!agentic.deleteAgent(seg[1])) {
+        return sendJson(res, 404, { error: "agent not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- Connections (POST/DELETE only — no PATCH, plan §3) ----
+    // GET /api/agentic/connections — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "connections") {
+      return sendJson(res, 200, { connections: agentic.listConnections() });
+    }
+    // POST /api/agentic/connections — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "connections") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(res, 201, agentic.createConnection(r.body));
+    }
+    // DELETE /api/agentic/connections/:id — delete
+    if (
+      req.method === "DELETE" &&
+      seg.length === 2 &&
+      seg[0] === "connections"
+    ) {
+      if (!agentic.deleteConnection(seg[1])) {
+        return sendJson(res, 404, { error: "connection not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- MCP servers (connection picker) ----
+    // GET /api/agentic/mcp-servers — the registered artifact MCP targets
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "mcp-servers") {
+      return sendJson(res, 200, { servers: AGENTIC_MCP_SERVERS });
+    }
+
+    // ---- Agentic AIs (the catalog, D8) ----
+    // GET /api/agentic/apps — list (summaries)
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "apps") {
+      return sendJson(res, 200, { apps: agentic.listAgenticAis() });
+    }
+    // GET /api/agentic/apps/:id — get (full, incl. workflow)
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "apps") {
+      const aa = agentic.getAgenticAi(seg[1]);
+      if (!aa) return sendJson(res, 404, { error: "agentic AI not found" });
+      return sendJson(res, 200, aa);
+    }
+    // POST /api/agentic/apps — create (v=1, status=draft)
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "apps") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(res, 201, agentic.createAgenticAi(r.body));
+    }
+    // PATCH /api/agentic/apps/:id/status — "publish" (D8): status-only, bumps rev
+    if (
+      req.method === "PATCH" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "status"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.status !== "string") {
+        return sendJson(res, 400, { error: "status is required" });
+      }
+      return sendJson(
+        res,
+        200,
+        agentic.setAgenticAiStatus(seg[1], r.body.status, r.body.expectedRev),
+      );
+    }
+    // PATCH /api/agentic/apps/:id — update (partial; bumps version, D9)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "apps") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { expectedRev, ...patch } = r.body;
+      return sendJson(
+        res,
+        200,
+        agentic.updateAgenticAi(seg[1], patch, expectedRev),
+      );
+    }
+    // DELETE /api/agentic/apps/:id — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "apps") {
+      if (!agentic.deleteAgenticAi(seg[1])) {
+        return sendJson(res, 404, { error: "agentic AI not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- Runs (read-only in iteration 1) ----
+    // GET /api/agentic/runs — list (summaries)
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "runs") {
+      return sendJson(res, 200, { runs: agentic.listRuns() });
+    }
+    // GET /api/agentic/runs/:id — get (full, incl. nodeExecutions[])
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "runs") {
+      const run = agentic.getRun(seg[1]);
+      if (!run) return sendJson(res, 404, { error: "run not found" });
+      return sendJson(res, 200, run);
+    }
+
+    // Run-lifecycle write routes (POST .../run, kill, approve, reject, guidance)
+    // are the later, checkpoint-gated iteration — not wired here yet.
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      return sendJson(res, agenticErrorStatus(e.code), {
+        error: e.message,
+        ...(e.details || {}),
+      });
+    }
+    throw e;
+  }
+}
+
 // ---- File Explorer (fs/*) helpers ----
 // Read cap for text preview (bytes). Binary/oversized files are downloaded.
 const FS_READ_CAP = 256 * 1024;
@@ -2617,12 +2805,13 @@ async function handleApi(req, res, url) {
   }
 
   // A2: All other /api/* routes require a valid session (or open mode). The
-  // artifact prefixes (/api/kanban/*, /api/pm/*) additionally accept a scoped
-  // bearer token so an external AI CLI can drive them without a cookie login.
+  // artifact prefixes (/api/kanban/*, /api/pm/*, /api/agentic/*) additionally
+  // accept a scoped bearer token so an external AI CLI can drive them without a
+  // cookie login.
   if (
     !isAuthenticated(req) &&
     !(
-      (parts[1] === "kanban" || parts[1] === "pm") &&
+      (parts[1] === "kanban" || parts[1] === "pm" || parts[1] === "agentic") &&
       isArtifactBearerAuthorized(req)
     )
   ) {
@@ -2637,6 +2826,11 @@ async function handleApi(req, res, url) {
   // ---- Project-management tool: /api/pm/* ----
   if (parts[1] === "pm") {
     return handlePm(req, res, url);
+  }
+
+  // ---- Agentic AI Creator: /api/agentic/* ----
+  if (parts[1] === "agentic") {
+    return handleAgentic(req, res, url);
   }
 
   // ---- Web Push: /api/push/* ----

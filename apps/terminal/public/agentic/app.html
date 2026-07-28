@@ -1,0 +1,674 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentic AI Creator</title>
+<!--
+  Pluggable Agentic AI Creator artifact (AGENTIC-AI-CREATOR-PLAN.md D8: ONE
+  artifact, an in-app catalog — NOT a per-app artifact).
+
+  ITERATION 1 SCOPE: a MINIMAL catalog. It lists Agentic AIs from
+  GET /api/agentic/apps (name + status badge + agent/connection counts), offers
+  a "New Agentic AI" form (POST /api/agentic/apps), and a publish/unpublish
+  toggle (PATCH /api/agentic/apps/:id/status). The full four-view
+  Builder/Run/History UI is a later, human-checkpointed iteration and is
+  deliberately NOT built here.
+
+  A SINGLE self-contained document — inline <style> + inline <script>, ZERO
+  external requests (no CDN, no fetched web fonts, no imports). Loaded into a
+  same-origin sandboxed <iframe> by components/agentic-dialog.tsx; it talks to
+  the gateway over relative /api/agentic/* fetches, which carry the app-origin
+  gw_session cookie through the Next proxy.
+
+  Palette/type are hardcoded to mirror DESIGN.md (a documented exception to the
+  "use Tailwind tokens" rule — this isolated document has no access to the
+  app's theme tokens).
+
+  Safety: all user-supplied text is injected via textContent / DOM nodes, never
+  innerHTML, so names/descriptions cannot inject markup.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --ok: #8fb98a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  select,
+  input,
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+
+  .topbar .title {
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: -0.2px;
+  }
+
+  .topbar .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .btn {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--canvas-softer);
+  }
+
+  .btn-primary {
+    background: var(--ink);
+    color: var(--canvas);
+    border-color: var(--ink);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--mute);
+    padding: 4px 8px;
+  }
+
+  .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* ---- Banner ---- */
+  .banner {
+    display: none;
+    padding: 8px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--danger);
+    font-size: 13px;
+  }
+
+  .banner.show {
+    display: block;
+  }
+
+  /* ---- Catalog ---- */
+  .catalog {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    align-content: start;
+  }
+
+  .app-card {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .app-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .app-name {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.3;
+    word-break: break-word;
+    flex: 1 1 auto;
+  }
+
+  .badge {
+    display: inline-block;
+    border-radius: 9999px;
+    padding: 1px 9px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+    border: 1px solid var(--hairline);
+    background: var(--canvas);
+    color: var(--body);
+    text-transform: capitalize;
+  }
+
+  .badge-published {
+    color: var(--ok);
+    border-color: rgba(143, 185, 138, 0.5);
+  }
+
+  .badge-draft {
+    color: var(--mute);
+  }
+
+  .badge-paused,
+  .badge-archived {
+    color: var(--accent);
+  }
+
+  .app-meta {
+    display: flex;
+    gap: 14px;
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .app-mode {
+    color: var(--body);
+    font-size: 12px;
+    text-transform: capitalize;
+  }
+
+  .app-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .app-actions .grow {
+    flex: 1 1 auto;
+  }
+
+  /* ---- Empty / loading states ---- */
+  .placeholder {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--mute);
+    text-align: center;
+    padding: 48px 32px;
+  }
+
+  .placeholder h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--body);
+  }
+
+  /* ---- Modal ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 10;
+  }
+
+  .overlay.show {
+    display: flex;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 460px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  textarea.field {
+    resize: vertical;
+    min-height: 68px;
+    line-height: 1.45;
+  }
+
+  select.field {
+    text-transform: capitalize;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--mute);
+    margin-top: 4px;
+  }
+
+  .row-end {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 9999px;
+  }
+</style>
+
+<div class="topbar">
+  <span class="title grow">Agentic AI Creator</span>
+  <button id="new-app-btn" class="btn btn-primary" type="button">
+    New Agentic AI
+  </button>
+</div>
+
+<div id="banner" class="banner" role="alert"></div>
+
+<div id="catalog" class="catalog"></div>
+
+<!-- New Agentic AI modal -->
+<div id="new-app-overlay" class="overlay">
+  <form id="new-app-form" class="modal">
+    <h3>New Agentic AI</h3>
+    <div>
+      <label for="na-name">Name</label>
+      <input
+        id="na-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Release notes writer"
+        required
+      />
+    </div>
+    <div>
+      <label for="na-desc">Description</label>
+      <textarea
+        id="na-desc"
+        class="field"
+        placeholder="Optional"
+      ></textarea>
+    </div>
+    <div>
+      <label for="na-mode">Orchestration mode</label>
+      <select id="na-mode" class="field">
+        <option value="single">single</option>
+        <option value="supervisor">supervisor</option>
+        <option value="sequential">sequential</option>
+        <option value="parallel">parallel</option>
+      </select>
+      <div class="hint">
+        How the agents in this app coordinate. You can change it later.
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-app-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  var state = {
+    apps: [], // summaries: {id,name,status,orchestrationMode,agentCount,connectionCount,version,...}
+  };
+
+  var el = {
+    newAppBtn: document.getElementById("new-app-btn"),
+    banner: document.getElementById("banner"),
+    catalog: document.getElementById("catalog"),
+    newAppOverlay: document.getElementById("new-app-overlay"),
+    newAppForm: document.getElementById("new-app-form"),
+    naName: document.getElementById("na-name"),
+    naDesc: document.getElementById("na-desc"),
+    naMode: document.getElementById("na-mode"),
+  };
+
+  // ---------------------------------------------------------------------------
+  // API layer
+  // ---------------------------------------------------------------------------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message || "Request failed";
+  }
+  ApiError.prototype = Object.create(Error.prototype);
+
+  // Performs a same-origin JSON fetch. On non-2xx, throws ApiError with the
+  // parsed body attached (`.body`).
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) {
+      opts.headers["content-type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    var res;
+    try {
+      res = await fetch("/api/agentic" + path, opts);
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = null;
+      }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Request failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error / banner handling
+  // ---------------------------------------------------------------------------
+  function showBanner(message) {
+    el.banner.textContent = message;
+    el.banner.classList.add("show");
+  }
+
+  function clearBanner() {
+    el.banner.textContent = "";
+    el.banner.classList.remove("show");
+  }
+
+  function handleError(e) {
+    if (e && e.status === 401) {
+      showBanner("Session expired — reload the page to sign in again.");
+      return;
+    }
+    showBanner((e && e.message) || "Something went wrong.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOM helpers (textContent-only; never innerHTML with user data)
+  // ---------------------------------------------------------------------------
+  function elem(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+  async function loadApps() {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/apps");
+    } catch (e) {
+      handleError(e);
+      state.apps = [];
+      renderCatalog();
+      return;
+    }
+    state.apps = (data && data.apps) || [];
+    renderCatalog();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------------------------------
+  async function createApp(fields) {
+    await api("POST", "/apps", fields);
+    await loadApps();
+  }
+
+  // Publish / unpublish via the status endpoint. draft -> published and back.
+  async function togglePublish(app) {
+    var next = app.status === "published" ? "draft" : "published";
+    await api("PATCH", "/apps/" + encodeURIComponent(app.id) + "/status", {
+      status: next,
+    });
+    await loadApps();
+  }
+
+  async function deleteApp(app) {
+    await api("DELETE", "/apps/" + encodeURIComponent(app.id));
+    await loadApps();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+  function renderCatalog() {
+    var root = el.catalog;
+    root.textContent = "";
+
+    if (state.apps.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No Agentic AIs yet"));
+      empty.appendChild(
+        elem(
+          "div",
+          null,
+          'Create your first one with "New Agentic AI" above.',
+        ),
+      );
+      root.appendChild(empty);
+      return;
+    }
+
+    state.apps.forEach(function (app) {
+      root.appendChild(renderAppCard(app));
+    });
+  }
+
+  function renderAppCard(app) {
+    var card = elem("div", "app-card");
+
+    var head = elem("div", "app-head");
+    head.appendChild(elem("span", "app-name", app.name));
+    var status = app.status || "draft";
+    head.appendChild(elem("span", "badge badge-" + status, status));
+    card.appendChild(head);
+
+    card.appendChild(elem("div", "app-mode", app.orchestrationMode || "single"));
+
+    var meta = elem("div", "app-meta");
+    meta.appendChild(
+      elem("span", null, plural(app.agentCount || 0, "agent", "agents")),
+    );
+    meta.appendChild(
+      elem(
+        "span",
+        null,
+        plural(app.connectionCount || 0, "connection", "connections"),
+      ),
+    );
+    meta.appendChild(elem("span", null, "v" + (app.version || 1)));
+    card.appendChild(meta);
+
+    var actions = elem("div", "app-actions");
+    var pubBtn = elem(
+      "button",
+      "btn btn-ghost",
+      app.status === "published" ? "Unpublish" : "Publish",
+    );
+    pubBtn.type = "button";
+    pubBtn.addEventListener("click", function () {
+      togglePublish(app).catch(handleError);
+    });
+    actions.appendChild(pubBtn);
+
+    actions.appendChild(elem("span", "grow"));
+
+    var delBtn = elem("button", "btn btn-ghost", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm('Delete "' + app.name + '"? This cannot be undone.')) {
+        deleteApp(app).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+
+    card.appendChild(actions);
+    return card;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modals
+  // ---------------------------------------------------------------------------
+  function openOverlay(overlay) {
+    overlay.classList.add("show");
+  }
+  function closeOverlay(overlay) {
+    overlay.classList.remove("show");
+  }
+
+  document.querySelectorAll("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      closeOverlay(document.getElementById(btn.getAttribute("data-close")));
+    });
+  });
+  el.newAppOverlay.addEventListener("mousedown", function (e) {
+    if (e.target === el.newAppOverlay) closeOverlay(el.newAppOverlay);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeOverlay(el.newAppOverlay);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  el.newAppBtn.addEventListener("click", function () {
+    el.naName.value = "";
+    el.naDesc.value = "";
+    el.naMode.value = "single";
+    openOverlay(el.newAppOverlay);
+    el.naName.focus();
+  });
+
+  el.newAppForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.naName.value.trim();
+    if (!name) return;
+    var fields = {
+      name: name,
+      description: el.naDesc.value,
+      orchestrationMode: el.naMode.value,
+    };
+    closeOverlay(el.newAppOverlay);
+    createApp(fields).catch(handleError);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  void loadApps();
+</script>
