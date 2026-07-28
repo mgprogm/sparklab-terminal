@@ -9,7 +9,7 @@ process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 
 const { TOOLS, WRITE_TOOLS, ONE_TIME_TOOLS, describeCall, executeTool } =
   await import("./tools.js");
-const { gateway } = await import("./gateway-client.js");
+const { gateway, GatewayError } = await import("./gateway-client.js");
 
 function toolNames(): string[] {
   return TOOLS.map((t) => t.function.name);
@@ -223,7 +223,7 @@ test("kanban_get requires board_id (no gateway call when missing)", async () => 
 
 // ---- Project-management (PM) tools ------------------------------------------
 
-const PM_READ_TOOLS = ["pm_list_projects", "pm_get_project"];
+const PM_READ_TOOLS = ["pm_list_projects", "pm_get_project", "pm_get_tree"];
 const PM_WRITE_TOOLS = [
   "pm_create_project",
   "pm_delete_project",
@@ -231,14 +231,43 @@ const PM_WRITE_TOOLS = [
   "pm_update_task",
   "pm_move_task",
   "pm_add_sprint",
+  "pm_add_column",
+  "pm_update_column",
+  "pm_delete_column",
+  "pm_move_column",
 ];
 const PM_TOOLS = [...PM_READ_TOOLS, ...PM_WRITE_TOOLS];
 
-test("all eight PM tools are exposed", () => {
+test("all PM read/write tools (9 base + 4 column) are exposed", () => {
   const names = toolNames();
   for (const t of PM_TOOLS) {
     assert.ok(names.includes(t), `${t} missing from TOOLS`);
   }
+});
+
+test("pm_get_tree is a read tool (auto, NOT a write)", () => {
+  assert.ok(toolNames().includes("pm_get_tree"));
+  assert.equal(WRITE_TOOLS.has("pm_get_tree"), false);
+  assert.equal(ONE_TIME_TOOLS.has("pm_get_tree"), false);
+});
+
+test("pm_add_task and pm_update_task expose type + parent_id params", () => {
+  for (const name of ["pm_add_task", "pm_update_task"]) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const props = (
+      tool.function.parameters as { properties?: Record<string, unknown> }
+    ).properties;
+    assert.ok(props && "type" in props, `${name} missing type param`);
+    assert.ok(props && "parent_id" in props, `${name} missing parent_id param`);
+  }
+});
+
+test("pm_get_tree requires project_id (no gateway call when missing)", async () => {
+  assert.equal(
+    await executeTool("pm_get_tree", {}),
+    "error: project_id is required",
+  );
 });
 
 test("there is no pm_delete_task tool (task deletion stays human-only)", () => {
@@ -268,7 +297,7 @@ test("PM reads are auto (NOT write tools)", () => {
   }
 });
 
-test("the six PM writes are WRITE tools", () => {
+test("the ten PM writes (6 base + 4 column) are WRITE tools", () => {
   for (const t of PM_WRITE_TOOLS) {
     assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
   }
@@ -286,6 +315,9 @@ test("the routine PM writes are NOT in the one-time set (allow-always ok)", () =
     "pm_update_task",
     "pm_move_task",
     "pm_add_sprint",
+    "pm_add_column",
+    "pm_update_column",
+    "pm_move_column",
   ]) {
     assert.equal(
       ONE_TIME_TOOLS.has(t),
@@ -316,4 +348,295 @@ test("pm_get_project requires project_id (no gateway call when missing)", async 
     await executeTool("pm_get_project", {}),
     "error: project_id is required",
   );
+});
+
+// ---- PM Column tools --------------------------------------------------------
+
+const PM_COL_TOOLS = [
+  "pm_add_column",
+  "pm_update_column",
+  "pm_delete_column",
+  "pm_move_column",
+];
+
+test("all four PM column tools are exposed", () => {
+  const names = toolNames();
+  for (const t of PM_COL_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("every PM column tool has a closed parameters schema", () => {
+  for (const name of PM_COL_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("pm column tools are WRITE tools", () => {
+  for (const t of PM_COL_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+  }
+});
+
+test("pm_delete_column is coerced one-time (can strand/relocate many tasks)", () => {
+  assert.equal(ONE_TIME_TOOLS.has("pm_delete_column"), true);
+});
+
+test("routine PM column writes are NOT in the one-time set (allow-always ok)", () => {
+  for (const t of ["pm_add_column", "pm_update_column", "pm_move_column"]) {
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      false,
+      `${t} should permit allow-always`,
+    );
+  }
+});
+
+test("describeCall returns a non-empty summary for each PM column tool", () => {
+  const args = {
+    project_id: "pm-1",
+    column_id: "col-1",
+    to_index: 2,
+    name: "Review",
+    wip_limit: 5,
+    mode: "relocate" as const,
+    to_column_id: "col-2",
+  };
+  for (const t of PM_COL_TOOLS) {
+    const s = describeCall(t, args);
+    assert.equal(typeof s, "string");
+    assert.ok(s.length > 0, `${t} produced an empty describeCall`);
+  }
+});
+
+// ---- AC7: pm_move_task 422 no-retry vs 409 retry ----------------------------
+
+test("AC7: pm_move_task does NOT retry a 422 (single gateway call)", async () => {
+  // Stub gateway methods to count calls and simulate a 422 wip_exceeded.
+  const originalGetPm = gateway.getPmProject.bind(gateway);
+  const originalMovePm = gateway.movePmTask.bind(gateway);
+  let moveCallCount = 0;
+
+  gateway.getPmProject = async () =>
+    ({
+      id: "pm-test",
+      rev: 5,
+      columns: [{ id: "col-a", taskIds: [] }],
+    }) as never;
+
+  gateway.movePmTask = async () => {
+    moveCallCount++;
+    throw new GatewayError(422, "column In Progress is at its WIP limit (3)");
+  };
+
+  try {
+    const result = await executeTool("pm_move_task", {
+      project_id: "pm-test",
+      task_id: "task-1",
+      to_column_id: "col-a",
+      to_index: 0,
+    });
+    assert.equal(
+      moveCallCount,
+      1,
+      `422 must trigger exactly 1 gateway call, got ${moveCallCount}`,
+    );
+    assert.ok(
+      result.startsWith("error: gateway 422:"),
+      `422 surfaces as error string, got: ${result}`,
+    );
+  } finally {
+    gateway.getPmProject = originalGetPm;
+    gateway.movePmTask = originalMovePm;
+  }
+});
+
+// ---- PM Collaboration (Phase 3) tools -----------------------------------------
+
+const PM_COLLAB_READ_TOOLS = [
+  "pm_list_comments",
+  "pm_list_activity",
+  "pm_list_attachments",
+];
+const PM_COLLAB_WRITE_TOOLS = [
+  "pm_add_comment",
+  "pm_watch_task",
+  "pm_unwatch_task",
+];
+const PM_COLLAB_TOOLS = [...PM_COLLAB_READ_TOOLS, ...PM_COLLAB_WRITE_TOOLS];
+
+test("all six PM collaboration tools are exposed", () => {
+  const names = toolNames();
+  for (const t of PM_COLLAB_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("every PM collab tool has a closed parameters schema", () => {
+  for (const name of PM_COLLAB_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("PM collab reads are auto (NOT write tools)", () => {
+  for (const t of PM_COLLAB_READ_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), false, `${t} should NOT be a WRITE tool`);
+  }
+});
+
+test("PM collab writes are WRITE tools (approval-gated)", () => {
+  for (const t of PM_COLLAB_WRITE_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+  }
+});
+
+test("PM collab writes are NOT in the one-time set (allow-always ok)", () => {
+  for (const t of PM_COLLAB_WRITE_TOOLS) {
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      false,
+      `${t} should permit allow-always`,
+    );
+  }
+});
+
+test("no pm_upload_attachment tool exists (human-only per OD7)", () => {
+  assert.ok(!toolNames().includes("pm_upload_attachment"));
+  assert.ok(!toolNames().includes("pm_add_attachment"));
+});
+
+test("no pm_notifications agent tools exist (human-only affordance)", () => {
+  assert.ok(!toolNames().includes("pm_list_notifications"));
+  assert.ok(!toolNames().includes("pm_mark_read"));
+});
+
+test("describeCall returns a non-empty summary for each PM collab tool", () => {
+  const args = {
+    project_id: "pm-1",
+    task_id: "task-1",
+    body: "test comment",
+  };
+  for (const t of PM_COLLAB_TOOLS) {
+    const s = describeCall(t, args);
+    assert.equal(typeof s, "string");
+    assert.ok(s.length > 0, `${t} produced an empty describeCall`);
+  }
+});
+
+test("pm_add_comment requires project_id, task_id, body", async () => {
+  assert.equal(
+    await executeTool("pm_add_comment", { project_id: "pm-1" }),
+    "error: project_id, task_id and body are required",
+  );
+});
+
+test("pm_list_comments requires project_id and task_id", async () => {
+  assert.equal(
+    await executeTool("pm_list_comments", { project_id: "pm-1" }),
+    "error: project_id and task_id are required",
+  );
+});
+
+test("pm_list_activity requires project_id", async () => {
+  assert.equal(
+    await executeTool("pm_list_activity", {}),
+    "error: project_id is required",
+  );
+});
+
+test("pm_watch_task requires project_id and task_id", async () => {
+  assert.equal(
+    await executeTool("pm_watch_task", { project_id: "pm-1" }),
+    "error: project_id and task_id are required",
+  );
+});
+
+test("pm_list_attachments requires project_id and task_id", async () => {
+  assert.equal(
+    await executeTool("pm_list_attachments", { project_id: "pm-1" }),
+    "error: project_id and task_id are required",
+  );
+});
+
+test("AC7: pm_move_task retries once on 409 stale", async () => {
+  const originalGetPm = gateway.getPmProject.bind(gateway);
+  const originalMovePm = gateway.movePmTask.bind(gateway);
+  let moveCallCount = 0;
+
+  gateway.getPmProject = async () =>
+    ({
+      id: "pm-test",
+      rev: 5,
+      columns: [{ id: "col-a", taskIds: [] }],
+      tasks: [],
+    }) as never;
+
+  gateway.movePmTask = async () => {
+    moveCallCount++;
+    if (moveCallCount === 1) {
+      // First call: simulate stale rev.
+      return {
+        stale: true,
+        project: {
+          id: "pm-test",
+          rev: 6,
+          columns: [{ id: "col-a", taskIds: [] }],
+          tasks: [],
+        } as never,
+      };
+    }
+    // Second call: succeed.
+    return {
+      stale: false,
+      project: {
+        id: "pm-test",
+        rev: 7,
+        columns: [{ id: "col-a", taskIds: ["task-1"] }],
+        tasks: [],
+      } as never,
+    };
+  };
+
+  try {
+    const result = await executeTool("pm_move_task", {
+      project_id: "pm-test",
+      task_id: "task-1",
+      to_column_id: "col-a",
+      to_index: 0,
+    });
+    assert.equal(
+      moveCallCount,
+      2,
+      `409 stale must trigger exactly 2 gateway calls, got ${moveCallCount}`,
+    );
+    assert.ok(
+      !result.startsWith("error:"),
+      `retried move should succeed, got: ${result}`,
+    );
+  } finally {
+    gateway.getPmProject = originalGetPm;
+    gateway.movePmTask = originalMovePm;
+  }
 });

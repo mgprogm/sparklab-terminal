@@ -33,15 +33,24 @@ export const WRITE_TOOLS = new Set([
   "kanban_add_card",
   "kanban_update_card",
   "kanban_delete",
-  // PM writes (D12). The routine five permit allow-always; pm_delete_project is
-  // additionally in ONE_TIME_TOOLS so it is re-approved on every call. The two
-  // PM reads (pm_list_projects, pm_get_project) are deliberately absent.
+  // PM writes (D12). The routine writes permit allow-always; pm_delete_project
+  // and pm_delete_column are additionally in ONE_TIME_TOOLS so they are
+  // re-approved on every call. The PM reads are deliberately absent.
   "pm_create_project",
   "pm_delete_project",
   "pm_add_task",
   "pm_update_task",
   "pm_move_task",
   "pm_add_sprint",
+  // Column writes (§3.7). pm_delete_column is one-time (can strand/relocate many tasks).
+  "pm_add_column",
+  "pm_update_column",
+  "pm_delete_column",
+  "pm_move_column",
+  // PM collaboration writes (Phase 3 §4.8). Comment + watch/unwatch are allow-always.
+  "pm_add_comment",
+  "pm_watch_task",
+  "pm_unwatch_task",
 ]);
 
 /**
@@ -60,6 +69,8 @@ export const ONE_TIME_TOOLS = new Set([
   // Destroying a whole project is coerced one-time (D12), like kanban_delete.
   // The routine PM writes are NOT listed and so may be allowed-always.
   "pm_delete_project",
+  // Deleting a column can strand/relocate many tasks — coerce one-time (§3.7).
+  "pm_delete_column",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
@@ -494,6 +505,25 @@ export const TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "pm_get_tree",
+      description:
+        "Get a project's issue hierarchy as a forest: root tasks (no parent) each with a nested `children` array (Epic→Story→Subtask). Read-only. Use to understand parent/child structure before re-parenting or changing types.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: {
+            type: "string",
+            description: "Target project id (pm-...).",
+          },
+        },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "pm_create_project",
       description:
         "Create a new project. Columns default to Backlog / To Do / In Progress / Done when not supplied. Requires user approval.",
@@ -541,13 +571,23 @@ export const TOOLS: ChatCompletionTool[] = [
     function: {
       name: "pm_add_task",
       description:
-        "Add a task to a project. Lands in the given column, or the first column (Backlog) when column_id is omitted. Optional fields: assignee, priority, labels, start/due dates (epoch ms, day-level), a sprint, and dependencies on other tasks in the same project. Requires user approval.",
+        "Add a task to a project. Lands in the given column, or the first column (Backlog) when column_id is omitted. Optional fields: type (epic/story/task/bug/subtask; default task), a parent task id (hierarchy — Epic→Story/Task/Bug→Subtask; a Subtask requires a parent), assignee, priority, labels, start/due dates (epoch ms, day-level), a sprint, and dependencies on other tasks in the same project. An invalid type/parent combination is rejected. Requires user approval.",
       parameters: {
         type: "object",
         properties: {
           project_id: { type: "string" },
           title: { type: "string", minLength: 1, maxLength: 512 },
           description: { type: "string", maxLength: 8192 },
+          type: {
+            type: "string",
+            enum: ["epic", "story", "task", "bug", "subtask"],
+            description: "Issue type; defaults to task.",
+          },
+          parent_id: {
+            type: ["string", "null"],
+            description:
+              "Parent task id (same project). Epic has no parent; Story/Task/Bug may parent under an Epic; a Subtask must parent under a Story/Task/Bug.",
+          },
           assignee: { type: "string", maxLength: 128 },
           priority: {
             type: "string",
@@ -590,7 +630,7 @@ export const TOOLS: ChatCompletionTool[] = [
     function: {
       name: "pm_update_task",
       description:
-        "Update a task's fields and/or its dependency set. Provide at least one field to change. Set depends_on to the FULL list of task ids this task should depend on (it replaces the existing set). A change that would create a dependency cycle is rejected. Requires user approval.",
+        "Update a task's fields, its type/parent (hierarchy), and/or its dependency set. Provide at least one field to change. Set depends_on to the FULL list of task ids this task should depend on (it replaces the existing set). A change that would create a dependency cycle, or that violates the Epic→Story/Task/Bug→Subtask hierarchy, is rejected. Requires user approval.",
       parameters: {
         type: "object",
         properties: {
@@ -598,6 +638,16 @@ export const TOOLS: ChatCompletionTool[] = [
           task_id: { type: "string" },
           title: { type: "string", minLength: 1, maxLength: 512 },
           description: { type: "string", maxLength: 8192 },
+          type: {
+            type: "string",
+            enum: ["epic", "story", "task", "bug", "subtask"],
+            description: "Issue type.",
+          },
+          parent_id: {
+            type: ["string", "null"],
+            description:
+              "Parent task id (same project), or null to detach. Validated against the hierarchy matrix.",
+          },
           assignee: { type: ["string", "null"], maxLength: 128 },
           priority: {
             type: ["string", "null"],
@@ -682,6 +732,236 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // --- Column management (§3.7) ----------------------------------------------
+  {
+    type: "function",
+    function: {
+      name: "pm_add_column",
+      description:
+        "Add a status column to a project. Optional: index (insertion point, 0-based; default = end), wip_limit (positive int, hard-blocks moves/creates when full), transitions (array of column ids that tasks may move to from this column; null = any). Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          name: { type: "string", minLength: 1, maxLength: 128 },
+          index: {
+            type: "integer",
+            minimum: 0,
+            description: "0-based insertion index; omit for end.",
+          },
+          wip_limit: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: "Max tasks in this column, or null for unlimited.",
+          },
+          transitions: {
+            type: ["array", "null"],
+            items: { type: "string" },
+            description:
+              "Column ids tasks may move TO from this column; null = any.",
+          },
+        },
+        required: ["project_id", "name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_update_column",
+      description:
+        "Update a column's name, WIP limit, and/or allowed transitions. Last-writer-wins (no rev needed). Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          column_id: { type: "string" },
+          name: { type: "string", minLength: 1, maxLength: 128 },
+          wip_limit: {
+            type: ["integer", "null"],
+            minimum: 1,
+            description: "Max tasks, or null for unlimited.",
+          },
+          transitions: {
+            type: ["array", "null"],
+            items: { type: "string" },
+            description: "Allowed destination column ids, or null = any.",
+          },
+        },
+        required: ["project_id", "column_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_delete_column",
+      description:
+        "Delete a column. By default blocks if the column has tasks (mode 'block'); pass mode 'relocate' with to_column_id to append the tasks to another column instead. A project must keep at least one column. This is destructive and requires user approval EVERY time (no allow-always).",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          column_id: { type: "string" },
+          mode: {
+            type: "string",
+            enum: ["block", "relocate"],
+            description:
+              "Default 'block'; 'relocate' moves tasks to to_column_id.",
+          },
+          to_column_id: {
+            type: "string",
+            description:
+              "Target column for relocated tasks (required when mode='relocate').",
+          },
+        },
+        required: ["project_id", "column_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_move_column",
+      description:
+        "Move a column to a new position (reorder). You supply project_id, column_id, and to_index; you do NOT manage the project rev — the tool reads it and retries on a concurrent change. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          column_id: { type: "string" },
+          to_index: {
+            type: "integer",
+            minimum: 0,
+            description: "0-based target position.",
+          },
+        },
+        required: ["project_id", "column_id", "to_index"],
+        additionalProperties: false,
+      },
+    },
+  },
+  // --- PM Collaboration (Phase 3 §4.8) ----------------------------------------
+  {
+    type: "function",
+    function: {
+      name: "pm_add_comment",
+      description:
+        "Add a comment to a task. The author is set to the acting agent identity. Also auto-watches the commenter on this task. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          body: {
+            type: "string",
+            minLength: 1,
+            maxLength: 8192,
+            description: "Comment text (max 8192 chars).",
+          },
+        },
+        required: ["project_id", "task_id", "body"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_list_comments",
+      description:
+        "List all comments on a task, sorted by creation time (oldest first). Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_list_activity",
+      description:
+        "List the activity / audit trail for a project, most recent first. Supports cursor-based pagination: pass `before` (epoch ms timestamp) to get entries older than that point. Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 200,
+            description: "Max entries to return (default 50).",
+          },
+          before: {
+            type: "number",
+            description: "Only entries with ts < this value (epoch ms).",
+          },
+        },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_watch_task",
+      description:
+        "Start watching a task (add the acting agent to the watchers list). Watchers receive in-app notifications on task changes. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_unwatch_task",
+      description:
+        "Stop watching a task (remove the acting agent from the watchers list). Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pm_list_attachments",
+      description:
+        "List attachment metadata for a task (id, filename, size, contentType, actor, createdAt). Read-only. No upload tool — attachments are added by humans in the UI.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
@@ -717,6 +997,9 @@ export interface ToolArgs {
   // PM
   project_id?: string;
   task_id?: string;
+  type?: string;
+  parent_id?: string | null;
+  reporter?: string | null;
   assignee?: string | null;
   priority?: string | null;
   labels?: string[];
@@ -725,6 +1008,13 @@ export interface ToolArgs {
   end_date?: number | null;
   sprint_id?: string | null;
   depends_on?: string[];
+  // PM columns
+  wip_limit?: number | null;
+  transitions?: string[] | null;
+  // PM collaboration (Phase 3)
+  body?: string;
+  limit?: number;
+  before?: number;
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -791,18 +1081,40 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return "list projects";
     case "pm_get_project":
       return `get project ${args.project_id ?? ""}`.trimEnd();
+    case "pm_get_tree":
+      return `get hierarchy tree for ${args.project_id ?? ""}`.trimEnd();
     case "pm_create_project":
       return `create project "${truncate(String(args.name ?? ""), 80)}"`;
     case "pm_delete_project":
       return `delete project ${args.project_id ?? ""}`.trimEnd();
     case "pm_add_task":
-      return `add task "${truncate(String(args.title ?? ""), 80)}"`;
+      return `add ${args.type ? String(args.type) : "task"} "${truncate(String(args.title ?? ""), 80)}"${args.parent_id ? ` under ${args.parent_id}` : ""}`;
     case "pm_update_task":
-      return `update task ${args.task_id ?? ""}${args.depends_on ? " (set dependencies)" : ""}`.trimEnd();
+      return `update task ${args.task_id ?? ""}${args.type ? ` (type ${args.type})` : ""}${args.parent_id !== undefined ? " (set parent)" : ""}${args.depends_on ? " (set dependencies)" : ""}`.trimEnd();
     case "pm_move_task":
       return `move task ${args.task_id ?? ""} to column ${args.to_column_id ?? ""} (index ${args.to_index ?? 0})`;
     case "pm_add_sprint":
       return `add sprint "${truncate(String(args.name ?? ""), 80)}"`;
+    case "pm_add_column":
+      return `add column "${truncate(String(args.name ?? ""), 80)}"${args.wip_limit ? ` (WIP ${args.wip_limit})` : ""}`;
+    case "pm_update_column":
+      return `update column ${args.column_id ?? ""}${args.name ? ` name="${truncate(args.name, 40)}"` : ""}${args.wip_limit !== undefined ? ` wip=${args.wip_limit}` : ""}`.trimEnd();
+    case "pm_delete_column":
+      return `delete column ${args.column_id ?? ""}${args.mode === "relocate" ? ` (relocate to ${args.to_column_id ?? "?"})` : ""}`.trimEnd();
+    case "pm_move_column":
+      return `move column ${args.column_id ?? ""} to index ${args.to_index ?? 0}`;
+    case "pm_add_comment":
+      return `comment on task ${args.task_id ?? ""}: ${truncate(String(args.body ?? ""), 80)}`;
+    case "pm_list_comments":
+      return `list comments on task ${args.task_id ?? ""}`.trimEnd();
+    case "pm_list_activity":
+      return `list activity for project ${args.project_id ?? ""}`.trimEnd();
+    case "pm_watch_task":
+      return `watch task ${args.task_id ?? ""}`.trimEnd();
+    case "pm_unwatch_task":
+      return `unwatch task ${args.task_id ?? ""}`.trimEnd();
+    case "pm_list_attachments":
+      return `list attachments on task ${args.task_id ?? ""}`.trimEnd();
     default:
       return tool;
   }
@@ -1038,6 +1350,11 @@ export async function executeTool(
         const p = await gateway.getPmProject(args.project_id);
         return JSON.stringify(p);
       }
+      case "pm_get_tree": {
+        if (!args.project_id) return "error: project_id is required";
+        const tree = await gateway.getPmTree(args.project_id);
+        return JSON.stringify(tree);
+      }
       case "pm_create_project": {
         if (!args.name) return "error: name is required";
         const p = await gateway.createPmProject({
@@ -1058,6 +1375,8 @@ export async function executeTool(
         const t = await gateway.addPmTask(args.project_id, {
           title: args.title,
           description: args.description ?? "",
+          ...(args.type ? { type: args.type as never } : {}),
+          ...(args.parent_id !== undefined ? { parentId: args.parent_id } : {}),
           ...(args.assignee != null ? { assignee: args.assignee } : {}),
           ...(args.priority != null
             ? { priority: args.priority as never }
@@ -1083,6 +1402,8 @@ export async function executeTool(
           ...(args.description !== undefined
             ? { description: args.description }
             : {}),
+          ...(args.type ? { type: args.type as never } : {}),
+          ...(args.parent_id !== undefined ? { parentId: args.parent_id } : {}),
           ...(args.assignee !== undefined ? { assignee: args.assignee } : {}),
           ...(args.priority !== undefined
             ? { priority: args.priority as never }
@@ -1124,6 +1445,69 @@ export async function executeTool(
           return "error: project changed concurrently; refetch and retry";
         return JSON.stringify(r.project);
       }
+      case "pm_add_column": {
+        if (!args.project_id || !args.name)
+          return "error: project_id and name are required";
+        const p = await gateway.createPmColumn(args.project_id, {
+          name: args.name,
+          ...(args.index !== undefined ? { index: args.index } : {}),
+          ...(args.wip_limit !== undefined ? { wipLimit: args.wip_limit } : {}),
+          ...(args.transitions !== undefined
+            ? { transitions: args.transitions }
+            : {}),
+        });
+        return JSON.stringify(p);
+      }
+      case "pm_update_column": {
+        if (!args.project_id || !args.column_id)
+          return "error: project_id and column_id are required";
+        const p = await gateway.updatePmColumn(
+          args.project_id,
+          args.column_id,
+          {
+            ...(args.name !== undefined ? { name: args.name } : {}),
+            ...(args.wip_limit !== undefined
+              ? { wipLimit: args.wip_limit }
+              : {}),
+            ...(args.transitions !== undefined
+              ? { transitions: args.transitions }
+              : {}),
+          },
+        );
+        return JSON.stringify(p);
+      }
+      case "pm_delete_column": {
+        if (!args.project_id || !args.column_id)
+          return "error: project_id and column_id are required";
+        await gateway.deletePmColumn(args.project_id, args.column_id, {
+          mode: args.mode,
+          toColumnId: args.to_column_id,
+        });
+        return `ok: column ${args.column_id} deleted`;
+      }
+      case "pm_move_column": {
+        if (
+          !args.project_id ||
+          !args.column_id ||
+          typeof args.to_index !== "number"
+        )
+          return "error: project_id, column_id and to_index are required";
+        // Auto-manages rev: read current project, move, retry once on 409 stale.
+        const project = await gateway.getPmProject(args.project_id);
+        let r = await gateway.movePmColumn(args.project_id, args.column_id, {
+          toIndex: args.to_index,
+          rev: project.rev,
+        });
+        if (r.stale) {
+          r = await gateway.movePmColumn(args.project_id, args.column_id, {
+            toIndex: args.to_index,
+            rev: r.project.rev,
+          });
+        }
+        if (r.stale)
+          return "error: project changed concurrently; refetch and retry";
+        return JSON.stringify(r.project);
+      }
       case "pm_add_sprint": {
         if (!args.project_id || !args.name)
           return "error: project_id and name are required";
@@ -1135,6 +1519,61 @@ export async function executeTool(
           ...(args.end_date !== undefined ? { endDate: args.end_date } : {}),
         });
         return JSON.stringify(s);
+      }
+      // --- PM Collaboration (Phase 3) ----------------------------------------
+      case "pm_add_comment": {
+        if (!args.project_id || !args.task_id || !args.body)
+          return "error: project_id, task_id and body are required";
+        const comment = await gateway.addPmComment(
+          args.project_id,
+          args.task_id,
+          { body: args.body },
+        );
+        return JSON.stringify(comment);
+      }
+      case "pm_list_comments": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        const comments = await gateway.listPmComments(
+          args.project_id,
+          args.task_id,
+        );
+        return JSON.stringify(comments);
+      }
+      case "pm_list_activity": {
+        if (!args.project_id) return "error: project_id is required";
+        const activity = await gateway.listPmActivity(args.project_id, {
+          limit: args.limit,
+          before: args.before,
+        });
+        return JSON.stringify(activity);
+      }
+      case "pm_watch_task": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        const watched = await gateway.watchPmTask(
+          args.project_id,
+          args.task_id,
+        );
+        return JSON.stringify(watched);
+      }
+      case "pm_unwatch_task": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        const unwatched = await gateway.unwatchPmTask(
+          args.project_id,
+          args.task_id,
+        );
+        return JSON.stringify(unwatched);
+      }
+      case "pm_list_attachments": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        const attachments = await gateway.listPmAttachments(
+          args.project_id,
+          args.task_id,
+        );
+        return JSON.stringify(attachments);
       }
       default:
         return `error: unknown tool ${tool}`;

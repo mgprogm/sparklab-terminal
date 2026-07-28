@@ -75,6 +75,8 @@ function must(res, action) {
 function taskFields(args, body) {
   if (args.title !== undefined) body.title = args.title;
   if (args.description !== undefined) body.description = args.description;
+  if (args.type !== undefined) body.type = args.type;
+  if (args.parent_id !== undefined) body.parentId = args.parent_id;
   if (args.assignee !== undefined) body.assignee = args.assignee;
   if (args.priority !== undefined) body.priority = args.priority;
   if (Array.isArray(args.labels)) body.labels = args.labels;
@@ -96,6 +98,13 @@ const IMPL = {
     return must(
       await api("GET", `/projects/${encodeURIComponent(project_id)}`),
       "get project",
+    );
+  },
+  async pm_get_tree({ project_id }) {
+    if (!project_id) throw new Error("project_id is required");
+    return must(
+      await api("GET", `/projects/${encodeURIComponent(project_id)}/tree`),
+      "get tree",
     );
   },
   async pm_create_project({ name, tags, columns }) {
@@ -168,6 +177,145 @@ const IMPL = {
     }
     return must(res, "move task");
   },
+  async pm_add_column({ project_id, name, index, wip_limit, transitions }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!name) throw new Error("name is required");
+    const body = { name };
+    if (Number.isInteger(index)) body.index = index;
+    if (wip_limit !== undefined) body.wipLimit = wip_limit;
+    if (transitions !== undefined) body.transitions = transitions;
+    return must(
+      await api(
+        "POST",
+        `/projects/${encodeURIComponent(project_id)}/columns`,
+        body,
+      ),
+      "add column",
+    );
+  },
+  async pm_update_column({
+    project_id,
+    column_id,
+    name,
+    wip_limit,
+    transitions,
+  }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!column_id) throw new Error("column_id is required");
+    const body = { projectId: project_id };
+    if (name !== undefined) body.name = name;
+    if (wip_limit !== undefined) body.wipLimit = wip_limit;
+    if (transitions !== undefined) body.transitions = transitions;
+    return must(
+      await api("PATCH", `/columns/${encodeURIComponent(column_id)}`, body),
+      "update column",
+    );
+  },
+  async pm_delete_column({ project_id, column_id, mode, to_column_id }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!column_id) throw new Error("column_id is required");
+    const params = new URLSearchParams({ projectId: project_id });
+    if (mode) params.set("mode", mode);
+    if (to_column_id) params.set("toColumnId", to_column_id);
+    const res = await api(
+      "DELETE",
+      `/columns/${encodeURIComponent(column_id)}?${params}`,
+    );
+    if (!res.ok) must(res, "delete column");
+    return { deleted: column_id };
+  },
+  // Auto-manages rev + retries once on 409 stale, mirroring pm_move_task.
+  async pm_move_column({ project_id, column_id, to_index }) {
+    if (!project_id || !column_id)
+      throw new Error("project_id and column_id are required");
+    const attempt = (project) =>
+      api("POST", `/columns/${encodeURIComponent(column_id)}/move`, {
+        projectId: project_id,
+        toIndex: Number.isInteger(to_index) ? to_index : 0,
+        rev: project.rev,
+      });
+    let project = must(
+      await api("GET", `/projects/${encodeURIComponent(project_id)}`),
+      "get project",
+    );
+    let res = await attempt(project);
+    if (res.status === 409 && res.json && res.json.project) {
+      res = await attempt(res.json.project);
+    }
+    return must(res, "move column");
+  },
+  // --- PM Collaboration (Phase 3) -------------------------------------------
+  async pm_add_comment({ project_id, task_id, body }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!task_id) throw new Error("task_id is required");
+    if (!body) throw new Error("body is required");
+    return must(
+      await api(
+        "POST",
+        `/tasks/${encodeURIComponent(task_id)}/comments?projectId=${encodeURIComponent(project_id)}`,
+        { body },
+      ),
+      "add comment",
+    );
+  },
+  async pm_list_comments({ project_id, task_id }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!task_id) throw new Error("task_id is required");
+    return must(
+      await api(
+        "GET",
+        `/tasks/${encodeURIComponent(task_id)}/comments?projectId=${encodeURIComponent(project_id)}`,
+      ),
+      "list comments",
+    );
+  },
+  async pm_list_activity({ project_id, limit, before }) {
+    if (!project_id) throw new Error("project_id is required");
+    const params = new URLSearchParams();
+    if (Number.isInteger(limit)) params.set("limit", String(limit));
+    if (before !== undefined) params.set("before", String(before));
+    const qs = params.toString();
+    return must(
+      await api(
+        "GET",
+        `/projects/${encodeURIComponent(project_id)}/activity${qs ? `?${qs}` : ""}`,
+      ),
+      "list activity",
+    );
+  },
+  async pm_watch_task({ project_id, task_id }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!task_id) throw new Error("task_id is required");
+    return must(
+      await api(
+        "POST",
+        `/tasks/${encodeURIComponent(task_id)}/watch?projectId=${encodeURIComponent(project_id)}`,
+      ),
+      "watch task",
+    );
+  },
+  async pm_unwatch_task({ project_id, task_id }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!task_id) throw new Error("task_id is required");
+    return must(
+      await api(
+        "POST",
+        `/tasks/${encodeURIComponent(task_id)}/unwatch?projectId=${encodeURIComponent(project_id)}`,
+      ),
+      "unwatch task",
+    );
+  },
+  async pm_list_attachments({ project_id, task_id }) {
+    if (!project_id) throw new Error("project_id is required");
+    if (!task_id) throw new Error("task_id is required");
+    return must(
+      await api(
+        "GET",
+        `/tasks/${encodeURIComponent(task_id)}/attachments?projectId=${encodeURIComponent(project_id)}`,
+      ),
+      "list attachments",
+    );
+  },
   async pm_add_sprint({ project_id, name, start_date, end_date }) {
     if (!project_id) throw new Error("project_id is required");
     if (!name) throw new Error("name is required");
@@ -190,6 +338,12 @@ const PRIORITY = { type: "string", enum: ["low", "medium", "high", "urgent"] };
 // Shared optional task fields (dates are epoch ms numbers).
 const TASK_FIELD_PROPS = {
   description: { type: "string" },
+  type: { type: "string", enum: ["epic", "story", "task", "bug", "subtask"] },
+  parent_id: {
+    type: "string",
+    description:
+      "Parent task id (same project). Epic→Story/Task/Bug→Subtask hierarchy.",
+  },
   assignee: { type: "string" },
   priority: PRIORITY,
   labels: { type: "array", items: { type: "string" } },
@@ -215,6 +369,17 @@ const TOOLS = [
     name: "pm_get_project",
     description:
       "Get one project in full: columns (ordered taskIds), tasks, and sprints.",
+    inputSchema: {
+      type: "object",
+      properties: { project_id: { type: "string" } },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_get_tree",
+    description:
+      "Get a project's issue hierarchy as a forest: root tasks each with a nested `children` array (Epic→Story→Subtask).",
     inputSchema: {
       type: "object",
       properties: { project_id: { type: "string" } },
@@ -291,6 +456,176 @@ const TOOLS = [
         to_index: { type: "integer", minimum: 0 },
       },
       required: ["project_id", "task_id", "to_column_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_add_column",
+    description:
+      "Add a status column to a project. Optional: index, wip_limit, transitions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        name: { type: "string" },
+        index: {
+          type: "integer",
+          minimum: 0,
+          description: "Insertion index (default = end)",
+        },
+        wip_limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Max tasks in column, or null for unlimited",
+        },
+        transitions: {
+          type: "array",
+          items: { type: "string" },
+          description: "Allowed destination column ids, or null = any",
+        },
+      },
+      required: ["project_id", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_update_column",
+    description:
+      "Update a column's name, WIP limit, and/or transitions (last-writer-wins).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        column_id: { type: "string" },
+        name: { type: "string" },
+        wip_limit: { type: "integer", minimum: 1 },
+        transitions: { type: "array", items: { type: "string" } },
+      },
+      required: ["project_id", "column_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_delete_column",
+    description:
+      "Delete a column. Default mode='block' rejects non-empty columns; mode='relocate' with to_column_id appends tasks to the target.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        column_id: { type: "string" },
+        mode: { type: "string", enum: ["block", "relocate"] },
+        to_column_id: {
+          type: "string",
+          description: "Target column for relocated tasks",
+        },
+      },
+      required: ["project_id", "column_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_move_column",
+    description:
+      "Move a column to a new position (reorder). Handles rev/409 automatically.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        column_id: { type: "string" },
+        to_index: { type: "integer", minimum: 0 },
+      },
+      required: ["project_id", "column_id", "to_index"],
+      additionalProperties: false,
+    },
+  },
+  // --- PM Collaboration (Phase 3) -------------------------------------------
+  {
+    name: "pm_add_comment",
+    description: "Add a comment to a task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        task_id: { type: "string" },
+        body: { type: "string", description: "Comment text (max 8192 chars)" },
+      },
+      required: ["project_id", "task_id", "body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_list_comments",
+    description: "List all comments on a task (oldest first).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        task_id: { type: "string" },
+      },
+      required: ["project_id", "task_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_list_activity",
+    description:
+      "List the activity / audit trail for a project (newest first). Paginate with `before`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Max entries (default 50)",
+        },
+        before: {
+          type: "number",
+          description: "Only entries with ts < this (epoch ms)",
+        },
+      },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_watch_task",
+    description: "Start watching a task (receive notifications on changes).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        task_id: { type: "string" },
+      },
+      required: ["project_id", "task_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_unwatch_task",
+    description: "Stop watching a task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        task_id: { type: "string" },
+      },
+      required: ["project_id", "task_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "pm_list_attachments",
+    description:
+      "List attachment metadata for a task (no upload — that's human-only in the UI).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string" },
+        task_id: { type: "string" },
+      },
+      required: ["project_id", "task_id"],
       additionalProperties: false,
     },
   },

@@ -33,6 +33,8 @@ import type {
   CreateTaskRequest,
   UpdateTaskRequest,
   CreateSprintRequest,
+  CreateColumnRequest,
+  UpdateColumnRequest,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -347,6 +349,13 @@ class GatewayClient {
     );
   }
 
+  /** The project's issue hierarchy as a derived forest (read-only). */
+  async getPmTree(projectId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(`/api/pm/projects/${encodeURIComponent(projectId)}/tree`),
+    );
+  }
+
   async createPmProject(body: CreateProjectRequest): Promise<PmProject> {
     return this.json<PmProject>(
       await this.call("/api/pm/projects", {
@@ -438,6 +447,78 @@ class GatewayClient {
     return { stale: false, project: await this.json<PmProject>(res) };
   }
 
+  // --- PM Column CRUD -------------------------------------------------------
+
+  async createPmColumn(
+    projectId: string,
+    body: CreateColumnRequest,
+  ): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/columns`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async updatePmColumn(
+    projectId: string,
+    colId: string,
+    body: Omit<UpdateColumnRequest, "projectId">,
+  ): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(`/api/pm/columns/${encodeURIComponent(colId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      }),
+    );
+  }
+
+  /**
+   * Move (reorder) a column. Rev-guarded; mirrors movePmTask — a 409 stale
+   * echoes the current project so the tool executor can retry once.
+   */
+  async movePmColumn(
+    projectId: string,
+    colId: string,
+    body: { toIndex: number; rev: number },
+  ): Promise<{ stale: boolean; project: PmProject }> {
+    const res = await this.call(
+      `/api/pm/columns/${encodeURIComponent(colId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as { error?: string; project: PmProject };
+      return { stale: true, project: b.project };
+    }
+    return { stale: false, project: await this.json<PmProject>(res) };
+  }
+
+  /** Delete a column. 204 on success. */
+  async deletePmColumn(
+    projectId: string,
+    colId: string,
+    opts: { mode?: string; toColumnId?: string } = {},
+  ): Promise<void> {
+    const params = new URLSearchParams({ projectId });
+    if (opts.mode) params.set("mode", opts.mode);
+    if (opts.toColumnId) params.set("toColumnId", opts.toColumnId);
+    const res = await this.call(
+      `/api/pm/columns/${encodeURIComponent(colId)}?${params}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
   async addPmSprint(
     projectId: string,
     body: CreateSprintRequest,
@@ -450,6 +531,74 @@ class GatewayClient {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
         },
+      ),
+    );
+  }
+
+  // --- PM Collaboration (Phase 3) -------------------------------------------
+
+  async addPmComment(
+    projectId: string,
+    taskId: string,
+    body: { body: string },
+  ): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/comments?projectId=${encodeURIComponent(projectId)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async listPmComments(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/comments?projectId=${encodeURIComponent(projectId)}`,
+      ),
+    );
+  }
+
+  async listPmActivity(
+    projectId: string,
+    opts: { limit?: number; before?: number } = {},
+  ): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.before !== undefined) params.set("before", String(opts.before));
+    const qs = params.toString();
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/activity${qs ? `?${qs}` : ""}`,
+      ),
+    );
+  }
+
+  async watchPmTask(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/watch?projectId=${encodeURIComponent(projectId)}`,
+        { method: "POST" },
+      ),
+    );
+  }
+
+  async unwatchPmTask(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/unwatch?projectId=${encodeURIComponent(projectId)}`,
+        { method: "POST" },
+      ),
+    );
+  }
+
+  async listPmAttachments(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/attachments?projectId=${encodeURIComponent(projectId)}`,
       ),
     );
   }

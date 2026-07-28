@@ -826,13 +826,30 @@ export type MoveCardRequest = z.infer<typeof MoveCardRequestSchema>;
 export const PmPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
 export type PmPriority = z.infer<typeof PmPrioritySchema>;
 
+/** Issue type — drives the card glyph, hierarchy validation, and filtering.
+ *  Hierarchy (§5.6): Epic → Story/Task/Bug → Subtask (max depth 3). */
+export const PmIssueTypeSchema = z.enum([
+  "epic",
+  "story",
+  "task",
+  "bug",
+  "subtask",
+]);
+export type PmIssueType = z.infer<typeof PmIssueTypeSchema>;
+
 /** A task. Persisted shape carries no status/order — position/status come from
- *  the enclosing Column.taskIds[]. `columnId` is derived on GET. */
+ *  the enclosing Column.taskIds[]. `columnId` and `key` are derived on GET. */
 export const PmTaskSchema = z.object({
   id: z.string(),
+  /** Per-project issue number (with project.key ⇒ derived key "PAY-43"). */
+  number: z.number().int(),
   title: z.string().min(1).max(512),
   description: z.string().max(8192).default(""),
+  /** Issue type; hierarchy edges validated against §5.6. */
+  type: PmIssueTypeSchema.default("task"),
   assignee: z.string().max(128).nullable().default(null),
+  /** Creating actor (advisory, P2); auto-added to watchers. */
+  reporter: z.string().nullable().default(null),
   priority: PmPrioritySchema.nullable().default(null),
   labels: z.array(z.string().min(1).max(64)).default([]),
   /** Epoch ms (day-level), nullable — drives the Gantt view. */
@@ -840,12 +857,18 @@ export const PmTaskSchema = z.object({
   dueDate: z.number().nullable().default(null),
   /** Owning sprint, or null for the product backlog (orthogonal to columns). */
   sprintId: z.string().nullable().default(null),
+  /** Parent task id (containment edge, same project) — hierarchy, not scheduling. */
+  parentId: z.string().nullable().default(null),
+  /** Actors watching this task (reporter/assignee/commenters). */
+  watchers: z.array(z.string()).default([]),
   /** Ids of other tasks in THIS project this task depends on (a DAG). */
   dependsOn: z.array(z.string()).default([]),
   createdAt: z.number(),
   updatedAt: z.number(),
   /** Derived on GET (the column currently holding this task); never persisted. */
   columnId: z.string().nullable().optional(),
+  /** Derived on GET (project.key + "-" + number, e.g. "PAY-43"); never persisted. */
+  key: z.string().optional(),
 });
 export type PmTask = z.infer<typeof PmTaskSchema>;
 
@@ -854,6 +877,10 @@ export const PmColumnSchema = z.object({
   id: z.string(),
   name: z.string().min(1).max(128),
   taskIds: z.array(z.string()),
+  /** Per-column WIP limit (int ≥1) or null = unlimited (enforcement Phase 2). */
+  wipLimit: z.number().int().min(1).nullable().default(null),
+  /** Allowed destination column ids, or null = any (enforcement Phase 2). */
+  transitions: z.array(z.string()).nullable().default(null),
 });
 export type PmColumn = z.infer<typeof PmColumnSchema>;
 
@@ -870,6 +897,10 @@ export type PmSprint = z.infer<typeof PmSprintSchema>;
 export const PmProjectSchema = z.object({
   id: z.string(),
   name: z.string().min(1).max(200),
+  /** Unique project key (^[A-Z][A-Z0-9]{1,9}$) — the prefix of issue keys. */
+  key: z.string(),
+  /** Monotonic per-project issue-number counter. */
+  seq: z.number().int(),
   tags: z.array(z.string().min(1).max(64)),
   rev: z.number().int(),
   createdAt: z.number(),
@@ -903,6 +934,8 @@ export type PmListResponse = z.infer<typeof PmListResponseSchema>;
 /** Request body for POST /api/pm/projects. Omitting columns seeds the defaults. */
 export const CreateProjectRequestSchema = z.object({
   name: z.string().min(1).max(200),
+  /** Optional explicit project key; derived from name when omitted. */
+  key: z.string().min(2).max(10).optional(),
   tags: z.array(z.string().min(1).max(64)).default([]),
   columns: z.array(z.string().min(1).max(128)).optional(),
 });
@@ -912,23 +945,28 @@ export type CreateProjectRequest = z.infer<typeof CreateProjectRequestSchema>;
 export const UpdateProjectRequestSchema = z
   .object({
     name: z.string().min(1).max(200).optional(),
+    key: z.string().min(2).max(10).optional(),
     tags: z.array(z.string().min(1).max(64)).optional(),
   })
-  .refine((b) => b.name !== undefined || b.tags !== undefined, {
-    message: "at least one of name/tags is required",
-  });
+  .refine(
+    (b) => b.name !== undefined || b.tags !== undefined || b.key !== undefined,
+    { message: "at least one of name/key/tags is required" },
+  );
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequestSchema>;
 
 /** Request body for POST /api/pm/projects/:id/tasks. */
 export const CreateTaskRequestSchema = z.object({
   title: z.string().min(1).max(512),
   description: z.string().max(8192).default(""),
+  type: PmIssueTypeSchema.optional(),
   assignee: z.string().max(128).optional(),
+  reporter: z.string().optional(),
   priority: PmPrioritySchema.optional(),
   labels: z.array(z.string().min(1).max(64)).default([]),
   startDate: z.number().nullable().optional(),
   dueDate: z.number().nullable().optional(),
   sprintId: z.string().nullable().optional(),
+  parentId: z.string().nullable().optional(),
   columnId: z.string().optional(),
   dependsOn: z.array(z.string()).optional(),
 });
@@ -939,12 +977,15 @@ export const UpdateTaskRequestSchema = z.object({
   projectId: z.string(),
   title: z.string().min(1).max(512).optional(),
   description: z.string().max(8192).optional(),
+  type: PmIssueTypeSchema.optional(),
   assignee: z.string().max(128).nullable().optional(),
+  reporter: z.string().nullable().optional(),
   priority: PmPrioritySchema.nullable().optional(),
   labels: z.array(z.string().min(1).max(64)).optional(),
   startDate: z.number().nullable().optional(),
   dueDate: z.number().nullable().optional(),
   sprintId: z.string().nullable().optional(),
+  parentId: z.string().nullable().optional(),
   dependsOn: z.array(z.string()).optional(),
 });
 export type UpdateTaskRequest = z.infer<typeof UpdateTaskRequestSchema>;
@@ -957,6 +998,32 @@ export const MoveTaskRequestSchema = z.object({
   rev: z.number().int(),
 });
 export type MoveTaskRequest = z.infer<typeof MoveTaskRequestSchema>;
+
+/** Request body for POST /api/pm/projects/:id/columns. */
+export const CreateColumnRequestSchema = z.object({
+  name: z.string().min(1).max(128),
+  index: z.number().int().min(0).optional(),
+  wipLimit: z.number().int().min(1).nullable().optional(),
+  transitions: z.array(z.string()).nullable().optional(),
+});
+export type CreateColumnRequest = z.infer<typeof CreateColumnRequestSchema>;
+
+/** Request body for PATCH /api/pm/columns/:colId. */
+export const UpdateColumnRequestSchema = z.object({
+  projectId: z.string(),
+  name: z.string().min(1).max(128).optional(),
+  wipLimit: z.number().int().min(1).nullable().optional(),
+  transitions: z.array(z.string()).nullable().optional(),
+});
+export type UpdateColumnRequest = z.infer<typeof UpdateColumnRequestSchema>;
+
+/** Request body for POST /api/pm/columns/:colId/move (rev-guarded). */
+export const MoveColumnRequestSchema = z.object({
+  projectId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveColumnRequest = z.infer<typeof MoveColumnRequestSchema>;
 
 /** Request body for POST /api/pm/projects/:id/sprints. */
 export const CreateSprintRequestSchema = z.object({
@@ -974,3 +1041,83 @@ export const UpdateSprintRequestSchema = z.object({
   endDate: z.number().nullable().optional(),
 });
 export type UpdateSprintRequest = z.infer<typeof UpdateSprintRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: PM Collaboration /api/pm/* (Phase 3 — comments/activity/attachments/watchers/notifications)
+// ---------------------------------------------------------------------------
+
+/** A comment on a task. Stored in a JSONL sidecar, not pm.json. */
+export const PmCommentSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  author: z.string(),
+  body: z.string().max(8192),
+  createdAt: z.number(),
+  updatedAt: z.number().optional(),
+});
+export type PmComment = z.infer<typeof PmCommentSchema>;
+
+/** Request body for POST /api/pm/tasks/:id/comments. */
+export const AddCommentRequestSchema = z.object({
+  body: z.string().min(1).max(8192),
+});
+export type AddCommentRequest = z.infer<typeof AddCommentRequestSchema>;
+
+/** Request body for PATCH /api/pm/comments/:id. */
+export const EditCommentRequestSchema = z.object({
+  projectId: z.string(),
+  taskId: z.string().optional(),
+  body: z.string().min(1).max(8192),
+});
+export type EditCommentRequest = z.infer<typeof EditCommentRequestSchema>;
+
+/** An activity / audit record. Append-only, never edited or deleted. */
+export const PmActivitySchema = z.object({
+  id: z.string(),
+  ts: z.number(),
+  actor: z.string(),
+  verb: z.string(),
+  target: z.object({
+    type: z.string(),
+    id: z.string(),
+  }),
+  taskId: z.string().optional(),
+  summary: z.string(),
+  before: z.unknown().optional(),
+  after: z.unknown().optional(),
+});
+export type PmActivity = z.infer<typeof PmActivitySchema>;
+
+/** Attachment metadata (the blob is served separately via GET). */
+export const PmAttachmentMetaSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  filename: z.string(),
+  size: z.number(),
+  contentType: z.string(),
+  actor: z.string(),
+  createdAt: z.number(),
+});
+export type PmAttachmentMeta = z.infer<typeof PmAttachmentMetaSchema>;
+
+/** An in-app notification for watchers. */
+export const PmNotificationSchema = z.object({
+  id: z.string(),
+  recipient: z.string(),
+  event: z.string(),
+  taskId: z.string().nullable(),
+  projectId: z.string().nullable(),
+  summary: z.string(),
+  createdAt: z.number(),
+  readAt: z.number().nullable(),
+});
+export type PmNotification = z.infer<typeof PmNotificationSchema>;
+
+/** Request body for POST /api/pm/notifications/read. */
+export const MarkNotificationsReadRequestSchema = z.object({
+  ids: z.array(z.string()).optional(),
+  all: z.boolean().optional(),
+});
+export type MarkNotificationsReadRequest = z.infer<
+  typeof MarkNotificationsReadRequestSchema
+>;

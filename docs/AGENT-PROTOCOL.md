@@ -124,19 +124,43 @@ deleting individual cards stays a human action in the board UI.
 
 | `pm_list_projects` | read | `GET /api/pm/projects` |
 | `pm_get_project` | read | `GET /api/pm/projects/:id` |
+| `pm_get_tree` | read | `GET /api/pm/projects/:id/tree` — Epic→Story→Subtask forest |
 | `pm_create_project` | **write** | `POST /api/pm/projects` |
-| `pm_add_task` | **write** | `POST /api/pm/projects/:id/tasks` |
-| `pm_update_task` | **write** | `PATCH /api/pm/tasks/:id` (fields + `dependsOn`; cycle→error) |
-| `pm_move_task` | **write** | `POST /api/pm/tasks/:id/move` (auto-manages `rev`, retries 409) |
+| `pm_add_task` | **write** | `POST /api/pm/projects/:id/tasks` (+ `type`, `parent_id`) |
+| `pm_update_task` | **write** | `PATCH /api/pm/tasks/:id` (fields + `type`/`parent_id`/`dependsOn`; cycle/hierarchy→error) |
+| `pm_move_task` | **write** | `POST /api/pm/tasks/:id/move` (auto-manages `rev`, retries **409 only**) |
 | `pm_add_sprint` | **write** | `POST /api/pm/projects/:id/sprints` |
 | `pm_delete_project` | **write** | `DELETE /api/pm/projects/:id` — project delete (one-time approval) |
+| `pm_add_column` | **write** | `POST /api/pm/projects/:id/columns` |
+| `pm_update_column` | **write** | `PATCH /api/pm/columns/:colId` (name/`wip_limit`/`transitions`) |
+| `pm_move_column` | **write** | `POST /api/pm/columns/:colId/move` (auto-manages `rev`, retries 409) |
+| `pm_delete_column` | **write** | `DELETE /api/pm/columns/:colId` — can strand/relocate many tasks (one-time approval) |
+| `pm_add_comment` | **write** | `POST /api/pm/tasks/:id/comments` |
+| `pm_list_comments` | read | `GET /api/pm/tasks/:id/comments` |
+| `pm_list_activity` | read | `GET /api/pm/projects/:id/activity` |
+| `pm_watch_task` / `pm_unwatch_task` | **write** | `POST /api/pm/tasks/:id/watch`\|`unwatch` (idempotent) |
+| `pm_list_attachments` | read | `GET /api/pm/tasks/:id/attachments` |
 
 The PM tools drive the project-management artifact's `/api/pm/*` API (design:
-[`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md)) — a separate artifact from Kanban, same
-approval model: reads auto; routine writes allow-always; `pm_delete_project` in
-`ONE_TIME_TOOLS` (re-approved every call). `pm_update_task` sets task fields and
-dependencies (a cycle comes back as a gateway 400, surfaced as an error string).
-There is **no pm_delete_task** tool — task deletion stays human-only in the UI.
+[`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md), extended by
+[`PM-ARTIFACT-ENHANCEMENTS-PLAN.md`](./PM-ARTIFACT-ENHANCEMENTS-PLAN.md)) — a
+separate artifact from Kanban, same approval model: reads auto; routine writes
+allow-always; `pm_delete_project` and `pm_delete_column` are in `ONE_TIME_TOOLS`
+(re-approved every call — both can destroy or relocate many tasks at once).
+`pm_update_task` sets task fields, type/hierarchy, and dependencies (a
+dependency cycle or a hierarchy-matrix violation — e.g. a Subtask without a
+parent, an Epic with a parent — comes back as a gateway 400/422, surfaced as an
+error string, never silently applied). `pm_move_task` distinguishes its two
+failure modes: a **409** `stale` revision is retried automatically, exactly
+once; a **422** (`wip_exceeded` or `transition_forbidden` — the destination
+column is at its WIP limit, or isn't in the source column's allowed
+transitions) is a hard rejection the tool **never retries** — it surfaces
+immediately as an error string for the model to re-plan around. There is
+**no `pm_delete_task`** tool — task deletion stays human-only in the UI.
+Attachment **upload** and all notification management are deliberately
+**not** exposed as agent tools (binary upload and notification triage stay
+human actions in the artifact UI); `pm_list_attachments` (metadata only) is
+the one read exposed for attachments.
 
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.

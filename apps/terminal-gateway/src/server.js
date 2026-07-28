@@ -22,6 +22,7 @@ import registry from "./registry.js";
 import push from "./push.js";
 import kanban from "./kanban.js";
 import pm from "./pm.js";
+import pmCollab from "./pm-collab.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -200,6 +201,24 @@ function isArtifactBearerAuthorized(req) {
     provided.length === expected.length &&
     crypto.timingSafeEqual(provided, expected)
   );
+}
+
+// Derive an advisory actor string for "who did this" fields (PM reporter, etc.)
+// from the auth channel (PM plan §2). Cookie session → user:<GATEWAY_AUTH_USER>;
+// scoped bearer → client:<X-PM-Actor> (validated) or client:bearer. NOT a trust
+// boundary — auth is still the cookie/bearer itself; this only labels writes.
+function actorOf(req) {
+  const cookies = parseCookies(req);
+  if (validateAuthSession(cookies.gw_session))
+    return `user:${GATEWAY_AUTH_USER || "local"}`;
+  if (isArtifactBearerAuthorized(req)) {
+    const raw = String(req.headers["x-pm-actor"] || "").trim();
+    if (raw && raw.length <= 64 && /^[\w.@:-]+$/.test(raw))
+      return `client:${raw}`;
+    return "client:bearer";
+  }
+  // Open mode (loopback dev) or agent-over-cookie fallthrough.
+  return `user:${GATEWAY_AUTH_USER || "local"}`;
 }
 
 // ---- A1: Origin helpers ----
@@ -1189,10 +1208,31 @@ async function handleKanban(req, res, url) {
   }
 }
 
+// Map a coded pm.js store error to an HTTP status. New-rejection slugs use 422
+// (never blindly retried by the agent, unlike 409 stale — plan P5); state
+// conflicts use 409; not_found 404; everything else (cycle/bad_request/
+// validation) 400. The full table is wired now so Phase 2/3 need no change.
+function pmErrorStatus(code) {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "stale":
+    case "key_taken":
+    case "column_not_empty":
+      return 409;
+    case "hierarchy_invalid":
+    case "wip_exceeded":
+    case "transition_forbidden":
+      return 422;
+    default:
+      return 400; // cycle | bad_request | validation
+  }
+}
+
 // ---- Project-management tool (/api/pm/*) ----
 // A Kanban-first PM suite (docs/PM-TOOL-PLAN.md). Store: src/pm.js (synchronous
-// mutators => atomic). Maps coded store errors to HTTP: not_found -> 404,
-// stale -> 409, cycle/bad_request -> 400. `seg` = path after /api/pm.
+// mutators => atomic). Coded store errors map via pmErrorStatus(). `seg` = path
+// after /api/pm.
 async function handlePm(req, res, url) {
   const seg = url.pathname.split("/").filter(Boolean).slice(2);
   try {
@@ -1205,6 +1245,17 @@ async function handlePm(req, res, url) {
       const project = pm.getProject(seg[1]);
       if (!project) return sendJson(res, 404, { error: "project not found" });
       return sendJson(res, 200, project);
+    }
+    // GET /api/pm/projects/:id/tree — Epic→Story→Subtask forest (derived)
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "tree"
+    ) {
+      const tree = pm.getTree(seg[1]);
+      if (!tree) return sendJson(res, 404, { error: "project not found" });
+      return sendJson(res, 200, tree);
     }
     // POST /api/pm/projects — create
     if (req.method === "POST" && seg.length === 1 && seg[0] === "projects") {
@@ -1220,6 +1271,9 @@ async function handlePm(req, res, url) {
       if (columns !== undefined && !Array.isArray(columns)) {
         return sendJson(res, 400, { error: "columns must be an array" });
       }
+      if (r.body.key !== undefined && typeof r.body.key !== "string") {
+        return sendJson(res, 400, { error: "key must be a string" });
+      }
       return sendJson(
         res,
         201,
@@ -1227,6 +1281,9 @@ async function handlePm(req, res, url) {
           name: name.trim(),
           tags: Array.isArray(tags) ? tags : [],
           columns: Array.isArray(columns) ? columns : undefined,
+          ...(typeof r.body.key === "string" && r.body.key.trim()
+            ? { key: r.body.key.trim() }
+            : {}),
         }),
       );
     }
@@ -1249,7 +1306,19 @@ async function handlePm(req, res, url) {
         }
         patch.tags = r.body.tags;
       }
-      if (patch.name === undefined && patch.tags === undefined) {
+      if (r.body.key !== undefined) {
+        if (typeof r.body.key !== "string" || !r.body.key.trim()) {
+          return sendJson(res, 400, {
+            error: "key must be a non-empty string",
+          });
+        }
+        patch.key = r.body.key.trim();
+      }
+      if (
+        patch.name === undefined &&
+        patch.tags === undefined &&
+        patch.key === undefined
+      ) {
         return sendJson(res, 400, { error: "nothing to update" });
       }
       return sendJson(res, 200, pm.updateProject(seg[1], patch));
@@ -1258,6 +1327,12 @@ async function handlePm(req, res, url) {
     if (req.method === "DELETE" && seg.length === 2 && seg[0] === "projects") {
       if (!pm.deleteProject(seg[1])) {
         return sendJson(res, 404, { error: "project not found" });
+      }
+      // Cascade: purge all collab data for this project (best-effort).
+      try {
+        pmCollab.deleteAllForProject(seg[1]);
+      } catch {
+        /* swallow */
       }
       res.writeHead(204);
       res.end();
@@ -1275,11 +1350,217 @@ async function handlePm(req, res, url) {
       if (typeof r.body.title !== "string" || !r.body.title.trim()) {
         return sendJson(res, 400, { error: "title is required" });
       }
-      return sendJson(
-        res,
-        201,
-        pm.createTask(seg[1], { ...r.body, title: r.body.title.trim() }),
-      );
+      // Reporter defaults to the creating actor (§5.4); an explicit reporter in
+      // the body wins (editable). Auto-watcher handled in the store.
+      const actor = actorOf(req);
+      const reporter =
+        typeof r.body.reporter === "string" && r.body.reporter.trim()
+          ? r.body.reporter.trim()
+          : actor;
+      const created = pm.createTask(seg[1], {
+        ...r.body,
+        title: r.body.title.trim(),
+        reporter,
+      });
+      // Activity: created.
+      try {
+        pmCollab.appendActivity(seg[1], {
+          actor,
+          verb: "created",
+          target: { type: "task", id: created.id },
+          taskId: created.id,
+          summary: `created ${created.type || "task"} "${created.title}"`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 201, created);
+    }
+    // POST /api/pm/projects/:id/columns — add column
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "columns"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+        return sendJson(res, 400, { error: "column name is required" });
+      }
+      if (
+        r.body.index !== undefined &&
+        (!Number.isInteger(r.body.index) || r.body.index < 0)
+      ) {
+        return sendJson(res, 400, {
+          error: "index must be a non-negative integer",
+        });
+      }
+      const created = pm.createColumn(seg[1], {
+        name: r.body.name.trim(),
+        index: r.body.index,
+        wipLimit: r.body.wipLimit,
+        transitions: r.body.transitions,
+      });
+      // Activity: column_added.
+      try {
+        const newCol = created.columns.find(
+          (c) => c.name === r.body.name.trim(),
+        );
+        pmCollab.appendActivity(seg[1], {
+          actor: actorOf(req),
+          verb: "column_added",
+          target: { type: "column", id: newCol ? newCol.id : "unknown" },
+          summary: `created column "${r.body.name.trim()}"`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 201, created);
+    }
+    // PATCH /api/pm/columns/:colId — rename / set wipLimit / transitions
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "columns") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      const updated = pm.updateColumn(r.body.projectId, seg[1], {
+        name: r.body.name,
+        wipLimit: r.body.wipLimit,
+        transitions: r.body.transitions,
+      });
+      // Activity: one record per changed aspect (wip_set, transition_set, or generic updated).
+      try {
+        const actor = actorOf(req);
+        const colId = seg[1];
+        if (r.body.wipLimit !== undefined) {
+          pmCollab.appendActivity(r.body.projectId, {
+            actor,
+            verb: "wip_set",
+            target: { type: "column", id: colId },
+            summary: `set WIP limit on column ${colId} to ${r.body.wipLimit}`,
+          });
+        }
+        if (r.body.transitions !== undefined) {
+          pmCollab.appendActivity(r.body.projectId, {
+            actor,
+            verb: "transition_set",
+            target: { type: "column", id: colId },
+            summary: `set transitions on column ${colId}`,
+          });
+        }
+        if (
+          r.body.name !== undefined &&
+          r.body.wipLimit === undefined &&
+          r.body.transitions === undefined
+        ) {
+          pmCollab.appendActivity(r.body.projectId, {
+            actor,
+            verb: "updated",
+            target: { type: "column", id: colId },
+            summary: `renamed column ${colId} to "${r.body.name}"`,
+          });
+        }
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, updated);
+    }
+    // POST /api/pm/columns/:colId/move — reorder (rev-guarded)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "columns" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { projectId, toIndex, rev } = r.body;
+      if (typeof projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      try {
+        const moved = pm.moveColumn(projectId, seg[1], {
+          toIndex,
+          expectedRev: typeof rev === "number" ? rev : undefined,
+        });
+        // Activity: column moved (reuses "moved" verb for consistency with task move).
+        try {
+          pmCollab.appendActivity(projectId, {
+            actor: actorOf(req),
+            verb: "moved",
+            target: { type: "column", id: seg[1] },
+            summary: `moved column ${seg[1]} to index ${toIndex}`,
+          });
+        } catch {
+          /* swallow */
+        }
+        return sendJson(res, 200, moved);
+      } catch (e) {
+        if (e.code === "stale") {
+          return sendJson(res, 409, {
+            error: "stale",
+            project: pm.getProject(projectId) ?? null,
+          });
+        }
+        throw e;
+      }
+    }
+    // DELETE /api/pm/columns/:colId?projectId=&mode=&toColumnId= — delete column
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "columns") {
+      let projectId = url.searchParams.get("projectId") || "";
+      let mode = url.searchParams.get("mode") || "";
+      let toColumnId = url.searchParams.get("toColumnId") || "";
+      // Also accept from JSON body as a fallback.
+      if (!projectId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.projectId === "string")
+          projectId = r.body.projectId;
+        if (r.ok && typeof r.body.mode === "string") mode = r.body.mode;
+        if (r.ok && typeof r.body.toColumnId === "string")
+          toColumnId = r.body.toColumnId;
+      }
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (mode && mode !== "block" && mode !== "relocate")
+        return sendJson(res, 400, {
+          error: 'mode must be "block" or "relocate"',
+        });
+      // Capture column name before deletion (it will be gone after).
+      const preProject = pm.getProject(projectId);
+      const deletingCol = preProject
+        ? preProject.columns.find((c) => c.id === seg[1])
+        : null;
+      const deletingColName = deletingCol ? deletingCol.name : seg[1];
+      pm.deleteColumn(projectId, seg[1], {
+        mode: mode || "block",
+        toColumnId: toColumnId || undefined,
+      });
+      // Activity: column_deleted.
+      try {
+        const effectiveMode = mode || "block";
+        const summary =
+          effectiveMode === "relocate"
+            ? `deleted column "${deletingColName}" (tasks relocated to ${toColumnId})`
+            : `deleted column "${deletingColName}" (empty)`;
+        pmCollab.appendActivity(projectId, {
+          actor: actorOf(req),
+          verb: "column_deleted",
+          target: { type: "column", id: seg[1] },
+          summary,
+        });
+      } catch {
+        /* swallow */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
     }
     // POST /api/pm/projects/:id/sprints — add sprint
     if (
@@ -1306,11 +1587,33 @@ async function handlePm(req, res, url) {
       if (typeof r.body.projectId !== "string") {
         return sendJson(res, 400, { error: "projectId is required" });
       }
-      return sendJson(
-        res,
-        200,
-        pm.updateTask(r.body.projectId, seg[1], r.body),
-      );
+      const updated = pm.updateTask(r.body.projectId, seg[1], r.body);
+      // Activity: updated.
+      try {
+        const actor = actorOf(req);
+        pmCollab.appendActivity(r.body.projectId, {
+          actor,
+          verb: "updated",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `updated task ${updated.key || seg[1]}`,
+        });
+        // Notify watchers on assignee change.
+        if (r.body.assignee !== undefined && updated.watchers) {
+          for (const w of updated.watchers) {
+            if (w === actor) continue;
+            pmCollab.notify(w, {
+              event: "assigned",
+              taskId: seg[1],
+              projectId: r.body.projectId,
+              summary: `${actor} updated task ${updated.key || seg[1]}`,
+            });
+          }
+        }
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, updated);
     }
     // POST /api/pm/tasks/:id/move — board move (optimistic concurrency)
     if (
@@ -1333,15 +1636,24 @@ async function handlePm(req, res, url) {
         });
       }
       try {
-        return sendJson(
-          res,
-          200,
-          pm.moveTask(projectId, seg[1], {
-            toColumnId,
-            toIndex,
-            expectedRev: typeof rev === "number" ? rev : undefined,
-          }),
-        );
+        const moved = pm.moveTask(projectId, seg[1], {
+          toColumnId,
+          toIndex,
+          expectedRev: typeof rev === "number" ? rev : undefined,
+        });
+        // Activity: moved.
+        try {
+          pmCollab.appendActivity(projectId, {
+            actor: actorOf(req),
+            verb: "moved",
+            target: { type: "task", id: seg[1] },
+            taskId: seg[1],
+            summary: `moved task ${seg[1]} to column ${toColumnId}`,
+          });
+        } catch {
+          /* swallow */
+        }
+        return sendJson(res, 200, moved);
       } catch (e) {
         if (e.code === "stale") {
           return sendJson(res, 409, {
@@ -1364,6 +1676,29 @@ async function handlePm(req, res, url) {
         return sendJson(res, 400, { error: "projectId is required" });
       if (!pm.deleteTask(projectId, seg[1])) {
         return sendJson(res, 404, { error: "task not found" });
+      }
+      // Cascade: purge comments/attachments for this task (best-effort).
+      try {
+        pmCollab.deleteCommentsForTask(projectId, seg[1]);
+      } catch {
+        /* swallow */
+      }
+      try {
+        pmCollab.deleteAttachmentsForTask(projectId, seg[1]);
+      } catch {
+        /* swallow */
+      }
+      // Activity: deleted.
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor: actorOf(req),
+          verb: "deleted",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `deleted task ${seg[1]}`,
+        });
+      } catch {
+        /* swallow */
       }
       res.writeHead(204);
       res.end();
@@ -1399,12 +1734,421 @@ async function handlePm(req, res, url) {
       res.end();
       return true;
     }
+    // ---- Collaboration routes (Phase 3: comments/activity/attachments/watchers/notifications) ----
+
+    // POST /api/pm/tasks/:id/comments?projectId= — add comment
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "comments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.body !== "string" || !r.body.body.trim())
+        return sendJson(res, 400, { error: "body is required" });
+      // Verify the task exists.
+      const project = pm.getProject(projectId);
+      if (!project) return sendJson(res, 404, { error: "project not found" });
+      const task = project.tasks.find((t) => t.id === seg[1]);
+      if (!task) return sendJson(res, 404, { error: "task not found" });
+      const actor = actorOf(req);
+      const comment = pmCollab.addComment(
+        projectId,
+        seg[1],
+        actor,
+        r.body.body,
+      );
+      // Auto-watch the commenter (§4.6).
+      try {
+        pm.watchTask(projectId, seg[1], actor);
+      } catch {
+        /* swallow */
+      }
+      // Activity: commented.
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "commented",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `commented on task ${task.key || seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      // Notify watchers (minus the acting actor).
+      try {
+        const freshProject = pm.getProject(projectId);
+        const freshTask = freshProject
+          ? freshProject.tasks.find((t) => t.id === seg[1])
+          : null;
+        const watchers = (freshTask && freshTask.watchers) || [];
+        for (const w of watchers) {
+          if (w === actor) continue;
+          pmCollab.notify(w, {
+            event: "commented",
+            taskId: seg[1],
+            projectId,
+            summary: `${actor} commented on ${task.key || seg[1]}`,
+          });
+        }
+        // Optional push (best-effort, no comment body in payload — just ids + summary).
+        if (push.isConfigured()) {
+          push
+            .sendToAll({
+              projectId,
+              taskId: seg[1],
+              summary: `${actor} commented on ${task.key || seg[1]}`,
+            })
+            .catch(() => {});
+        }
+      } catch {
+        /* push/notification failure must NEVER rollback the comment */
+      }
+      return sendJson(res, 201, comment);
+    }
+
+    // GET /api/pm/tasks/:id/comments?projectId= — list comments
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "comments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      return sendJson(res, 200, {
+        comments: pmCollab.listComments(projectId, seg[1]),
+      });
+    }
+
+    // PATCH /api/pm/comments/:id — edit comment body
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "comments") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const projectId = r.body.projectId;
+      if (typeof projectId !== "string")
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (typeof r.body.body !== "string" || !r.body.body.trim())
+        return sendJson(res, 400, { error: "body is required" });
+      try {
+        const comment = pmCollab.editComment(projectId, seg[1], r.body.body);
+        return sendJson(res, 200, comment);
+      } catch (e) {
+        return sendJson(res, 404, { error: e.message });
+      }
+    }
+
+    // DELETE /api/pm/comments/:id?projectId=&taskId= — delete comment
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "comments") {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      try {
+        pmCollab.deleteComment(projectId, seg[1]);
+      } catch {
+        /* swallow — tombstone is idempotent */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // GET /api/pm/projects/:id/activity?limit=&before= — activity log
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "activity"
+    ) {
+      const limit = parseInt(url.searchParams.get("limit"), 10) || 50;
+      const beforeStr = url.searchParams.get("before");
+      const before = beforeStr ? Number(beforeStr) : undefined;
+      return sendJson(res, 200, {
+        activity: pmCollab.listActivity(seg[1], { limit, before }),
+      });
+    }
+
+    // GET /api/pm/tasks/:id/attachments?projectId= — list attachments
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "attachments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      return sendJson(res, 200, {
+        attachments: pmCollab.listAttachments(projectId, seg[1]),
+      });
+    }
+
+    // POST /api/pm/tasks/:id/attachments?projectId= — upload attachment (raw body)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "attachments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      // Verify the task exists.
+      const project = pm.getProject(projectId);
+      if (!project) return sendJson(res, 404, { error: "project not found" });
+      const task = project.tasks.find((t) => t.id === seg[1]);
+      if (!task) return sendJson(res, 404, { error: "task not found" });
+      const actor = actorOf(req);
+      const filename = String(req.headers["x-filename"] || "upload");
+      const contentType = String(
+        req.headers["content-type"] || "application/octet-stream",
+      );
+      // ROUTE-LOCAL BODY_LIMIT BYPASS: read raw body (mirroring fs/upload).
+      const PM_ATTACHMENT_CAP =
+        Number(process.env.PM_ATTACHMENT_CAP) || 8 * 1024 * 1024;
+      let buf;
+      try {
+        buf = await new Promise((resolve, reject) => {
+          const chunks = [];
+          let total = 0;
+          let over = false;
+          const tooLarge = () => {
+            const e = new Error("upload too large");
+            e.code = "UPLOAD_TOO_LARGE";
+            return e;
+          };
+          req.on("data", (c) => {
+            total += c.length;
+            if (total > PM_ATTACHMENT_CAP) {
+              if (!over) {
+                over = true;
+                chunks.length = 0;
+              }
+              if (total > PM_ATTACHMENT_CAP + 64 * 1024 * 1024) {
+                req.destroy();
+                reject(tooLarge());
+              }
+              return;
+            }
+            chunks.push(c);
+          });
+          req.on("end", () =>
+            over ? reject(tooLarge()) : resolve(Buffer.concat(chunks)),
+          );
+          req.on("error", reject);
+        });
+      } catch (err) {
+        if (err.code === "UPLOAD_TOO_LARGE") {
+          return sendJson(res, 413, {
+            error: `upload exceeds ${PM_ATTACHMENT_CAP} bytes`,
+          });
+        }
+        return sendJson(res, 400, { error: "failed to read upload body" });
+      }
+      try {
+        const meta = pmCollab.addAttachment(projectId, seg[1], {
+          filename,
+          contentType,
+          buffer: buf,
+          actor,
+        });
+        // Activity: attached.
+        try {
+          pmCollab.appendActivity(projectId, {
+            actor,
+            verb: "attached",
+            target: { type: "attachment", id: meta.id },
+            taskId: seg[1],
+            summary: `attached ${meta.filename} to task ${task.key || seg[1]}`,
+          });
+        } catch {
+          /* swallow */
+        }
+        // Notify watchers.
+        try {
+          const watchers = task.watchers || [];
+          for (const w of watchers) {
+            if (w === actor) continue;
+            pmCollab.notify(w, {
+              event: "attached",
+              taskId: seg[1],
+              projectId,
+              summary: `${actor} attached ${meta.filename} to ${task.key || seg[1]}`,
+            });
+          }
+        } catch {
+          /* swallow */
+        }
+        return sendJson(res, 201, meta);
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+    }
+
+    // GET /api/pm/attachments/:id?projectId= — download blob
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "attachments") {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      const meta = pmCollab.getAttachmentMeta(projectId, seg[1]);
+      if (!meta) return sendJson(res, 404, { error: "attachment not found" });
+      const blobPath = pmCollab.getAttachmentPath(projectId, seg[1]);
+      let stat;
+      try {
+        stat = fs.statSync(blobPath);
+      } catch {
+        return sendJson(res, 404, { error: "attachment blob not found" });
+      }
+      const name = meta.filename || "download";
+      const asciiName = name
+        .replace(/[^\x20-\x7e]/g, "_")
+        .replace(/["\\]/g, "_");
+      res.writeHead(200, {
+        "content-type": meta.contentType || "application/octet-stream",
+        "content-disposition": `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        "content-length": stat.size,
+        "x-content-type-options": "nosniff",
+      });
+      fs.createReadStream(blobPath).pipe(res);
+      return true;
+    }
+
+    // DELETE /api/pm/attachments/:id?projectId= — delete attachment
+    if (
+      req.method === "DELETE" &&
+      seg.length === 2 &&
+      seg[0] === "attachments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      const meta = pmCollab.getAttachmentMeta(projectId, seg[1]);
+      pmCollab.deleteAttachment(projectId, seg[1]);
+      // Activity: detached.
+      try {
+        const actor = actorOf(req);
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "detached",
+          target: { type: "attachment", id: seg[1] },
+          taskId: meta ? meta.taskId : undefined,
+          summary: `removed attachment ${meta ? meta.filename : seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // POST /api/pm/tasks/:id/watch?projectId= — watch task
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "watch"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      const actor = actorOf(req);
+      const task = pm.watchTask(projectId, seg[1], actor);
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "watched",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `${actor} started watching task ${task.key || seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, task);
+    }
+
+    // POST /api/pm/tasks/:id/unwatch?projectId= — unwatch task
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "unwatch"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      const actor = actorOf(req);
+      const task = pm.unwatchTask(projectId, seg[1], actor);
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "unwatched",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `${actor} stopped watching task ${task.key || seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, task);
+    }
+
+    // GET /api/pm/notifications?unread=1 — list notifications for the acting user
+    if (
+      req.method === "GET" &&
+      seg.length === 1 &&
+      seg[0] === "notifications"
+    ) {
+      const recipient = actorOf(req);
+      const unreadOnly = url.searchParams.get("unread") === "1";
+      return sendJson(res, 200, {
+        notifications: pmCollab.listNotifications(recipient, { unreadOnly }),
+      });
+    }
+
+    // POST /api/pm/notifications/read — mark notifications read
+    if (
+      req.method === "POST" &&
+      seg.length === 2 &&
+      seg[0] === "notifications" &&
+      seg[1] === "read"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const recipient = actorOf(req);
+      const updated = pmCollab.markRead(recipient, {
+        ids: Array.isArray(r.body.ids) ? r.body.ids : undefined,
+        all: r.body.all === true,
+      });
+      return sendJson(res, 200, { updated });
+    }
+
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
     if (e && e.code) {
-      const status =
-        e.code === "not_found" ? 404 : e.code === "stale" ? 409 : 400;
-      return sendJson(res, status, { error: e.message });
+      return sendJson(res, pmErrorStatus(e.code), {
+        error: e.message,
+        ...(e.details || {}),
+      });
     }
     throw e;
   }
