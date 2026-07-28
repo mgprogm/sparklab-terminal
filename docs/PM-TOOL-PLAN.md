@@ -1,14 +1,22 @@
 # Project Management tool (pluggable HTML artifact) — Design & Implementation Plan
 
-> Status: **designed, not yet implemented** (2026-07-27). Scope: a **Kanban-first
-> project-management suite** shipped as a **separate** pluggable HTML artifact
-> alongside the existing Kanban board (its own `/api/pm/*`, `data/pm.json`, modal,
-> agent tools, and MCP server — Kanban is untouched). One task model, **four
-> views**: Board (primary) · List/table · Timeline/**Gantt with dependencies** ·
-> Sprints. Reuses every pattern validated for Kanban (`docs/KANBAN-PLAN.md`):
-> gateway-owned sidecar, synchronous mutators (no mutex), per-project `rev`
-> optimistic concurrency, `Column.taskIds[]` as the sole ordering authority,
-> same-origin sandboxed-iframe host seam.
+> Status: **shipped / implemented** (v1 built and tested 2026-07-27, on branch
+> `feat/kanban-artifact-board`). Scope: a **Kanban-first project-management suite**
+> shipped as a **separate** pluggable HTML artifact alongside the existing Kanban
+> board (its own `/api/pm/*`, `data/pm.json`, modal, agent tools, and MCP server —
+> Kanban is untouched). One task model, **four views**: Board (primary) · List/table
+> · Timeline/**Gantt with dependencies** · Sprints. Reuses every pattern validated
+> for Kanban (`docs/KANBAN-PLAN.md`): gateway-owned sidecar, synchronous mutators
+> (no mutex), per-project `rev` optimistic concurrency, `Column.taskIds[]` as the
+> sole ordering authority, same-origin sandboxed-iframe host seam.
+>
+> This document is the design + decision record; all decisions D1–D12 below were
+> implemented as written. **What actually shipped** vs. what was consciously left
+> out is summarized in §6 (implemented checklist) and §8 (deferred post-v1). The
+> once-open questions in §9 were resolved before build and are recorded there.
+> Verified against source: `src/pm.js`, `handlePm` in `server.js`, the `Pm*` schema
+> block, `pm_*` agent tools in `tools.ts`, `tools/pm-mcp/server.mjs`,
+> `components/pm-dialog.tsx`, `public/pm/app.html`, and `test/pm-endpoints.js`.
 
 A "project" is a set of ordered status columns (Backlog/To Do/In Progress/Done)
 holding **tasks**. A task is richer than a Kanban card — assignee, priority,
@@ -126,8 +134,11 @@ artifact has forms + `window.confirm()` deletes — the exact gap that bit Kanba
 **D12 — Agent approval tiers (per Kanban D9).** Reads auto; routine writes
 (`pm_create_project`, `pm_add_task`, `pm_update_task`, `pm_move_task`,
 `pm_add_sprint`) approvable **allow-always**; **`pm_delete_project` coerced
-one-time** (in `ONE_TIME_TOOLS`). No task-delete agent tool wired if we want to keep
-destructive surface minimal — TBD in phase 2 (see §9).
+one-time** (in `ONE_TIME_TOOLS`). **Resolved as shipped:** no `pm_delete_task`
+agent tool — task deletion is human-only in the UI (the §9 open question, decided
+in favor of the minimal destructive surface). The backend `DELETE /api/pm/tasks/:id`
+route still exists (used by the artifact UI), it is simply not exposed as an agent
+tool.
 
 ---
 
@@ -235,9 +246,10 @@ Errors: 400 (validation / **dependency cycle**), 401, 403, 404, 409 `stale`, 413
 
 ### 4a. In-app agent (`tools.ts` + `gateway-client.ts`)
 
-Tools: `pm_list_projects`, `pm_get_project`, `pm_create_project`,
+Tools (as shipped): `pm_list_projects`, `pm_get_project`, `pm_create_project`,
 `pm_delete_project`, `pm_add_task`, `pm_update_task` (fields + `set dependencies`),
-`pm_move_task`, `pm_add_sprint` (+ `pm_delete_task` — see §9). Approval per **D12**.
+`pm_move_task`, `pm_add_sprint`. **No `pm_delete_task`** — task deletion stays
+human-only (D12/§9). Approval per **D12**.
 `pm_move_task` fetches the project `rev` itself and retries once on 409 (model
 never manages `rev`). `describeCall` + `executeTool` case per tool; `tools.test.ts`
 asserts presence, schemas, and approval tiers.
@@ -274,24 +286,28 @@ available for `curl`.
 
 ---
 
-## 6. Phased implementation checklist
+## 6. Implementation checklist (all shipped in v1)
 
-1. **Backend** — `pm.js` store, `Pm*` schemas, `handlePm` routes (projects, tasks,
-   move, dependencies+cycle, sprints), shared bearer helper (D10).
-2. **`test/pm-endpoints.js`** (`test:pm`) — gate before UI (see §7).
-3. **Agent tools** — `gateway-client.ts` methods, `tools.ts` (D12), `describeCall`,
-   `executeTool`, `tools.test.ts`.
-4. **MCP** — `tools/pm-mcp/server.mjs` + README; end-to-end test vs live gateway.
-5. **Frontend host + artifact** — store/button/modal + `app.html` with **Board +
-   List + Sprints + task fields/dependencies editing** (no Gantt yet). **Checkpoint.**
-6. **Gantt view** (D7) — SVG bars + dep connectors + Unscheduled tray. **Own
-   checkpoint** (highest UI risk).
-7. **Docs + deploy** — `TERMINAL-PROTOCOL.md`/`AGENT-PROTOCOL.md`/`CLAUDE.md`;
-   `build-prod.sh` + **restart prod-gateway** (new routes) + prod-agent.
+Every phase below is **done** (built and tested 2026-07-27):
+
+1. ✅ **Backend** — `pm.js` store, `Pm*` schemas, `handlePm` routes (projects, tasks,
+   move, dependencies+cycle, sprints), shared bearer helper `isArtifactBearerAuthorized`
+   (D10).
+2. ✅ **`test/pm-endpoints.js`** (`test:pm`) — 14 checks (see §7).
+3. ✅ **Agent tools** — `gateway-client.ts` methods, `tools.ts` (D12: eight `pm_*`
+   tools, no `pm_delete_task`), `describeCall`, `executeTool`, `tools.test.ts`.
+4. ✅ **MCP** — `tools/pm-mcp/server.mjs` + README (dep-free stdio JSON-RPC).
+5. ✅ **Frontend host + artifact** — store/button/modal + `public/pm/app.html` with
+   **Board + List + Sprints + task fields/dependencies editing**.
+6. ✅ **Gantt view** (D7) — SVG bars + straight dep connectors + Unscheduled tray.
+7. ✅ **Docs + deploy** — `TERMINAL-PROTOCOL.md`/`AGENT-PROTOCOL.md`/`CLAUDE.md`
+   updated; rebuild via `build-prod.sh` + **restart prod-gateway** (new routes) +
+   prod-agent per the standard artifact prod-deploy note.
 
 ## 7. Testing (`test/pm-endpoints.js`, `test:pm`)
 
-Standalone node script (real gateway, `throw` asserts, PASS/FAIL). Cases: project/
+Standalone node script (real gateway, `throw` asserts, PASS/FAIL) — **14 checks,
+shipped**. Cases: project/
 task CRUD; **move splice + rev/409**; **dependency cycle → 400** (A→B→A rejected);
 **task delete scrubs `dependsOn`** from other tasks; sprint CRUD + **orthogonality**
 (task keeps its column when sprint changes; sprint delete nulls `sprintId`); date-less
@@ -301,24 +317,27 @@ task accepted (Gantt-tray path); CSRF (foreign Origin → 403 write, GET exempt)
 tools. Live artifact smoke (phase 5/6) loads `app.html` **inside a sandboxed iframe**
 matching prod (not a bare page — the gap that hid Kanban's sandbox bug).
 
-## 8. Deliberately deferred (post-v1)
+## 8. Deliberately deferred (post-v1 — NOT in the shipped v1)
 
-Auto-scheduling / critical path / drag-resize Gantt; per-task `rev` (collision UX);
-multi-assignee; comments / activity log / attachments; column editing & custom
-statuses; cross-project dependencies; custom fields; recurring tasks; real-time push
-of project changes; WIP limits; saved List filters; a unified multi-artifact host
-registry (still one artifact per seam).
+None of these were built; they remain the known gaps: auto-scheduling / critical
+path / drag-resize Gantt; per-task `rev` (collision UX); multi-assignee; comments /
+activity log / attachments; column editing & custom statuses; cross-project
+dependencies; custom fields; recurring tasks; real-time push of project changes;
+WIP limits; saved List filters; a unified multi-artifact host registry (still one
+artifact per seam).
 
-## 9. Open decisions worth confirming before build
+## 9. Open decisions — resolved before build
 
-- **`pm_delete_task` agent tool** — include it (agent can delete tasks, one-time
-  approval) or keep task-deletion human-only in the UI like Kanban's cards? (Plan
-  leans human-only; easy to add.)
-- **Milestones** — the picked shape (A) didn't include milestones; a sprint's
-  `endDate` marker covers most of it. Add a first-class `milestone` flag on tasks in
-  v1, or defer? (Plan defers; Gantt shows sprint markers.)
-- **Date input granularity** — day-level dates (store as epoch ms at 00:00 UTC) vs
-  full timestamps. (Plan: day-level.)
+All three questions below were settled and the resolutions are what shipped:
+
+- **`pm_delete_task` agent tool** — **Resolved: not included.** Task deletion is
+  human-only in the artifact UI (like Kanban's cards). The backend `DELETE
+/api/pm/tasks/:id` route exists for the UI, but there is no agent/MCP delete-task
+  tool. Easy to add later if wanted.
+- **Milestones** — **Resolved: deferred.** No first-class `milestone` flag on tasks;
+  a sprint's `endDate` marker on the Gantt covers the common case.
+- **Date input granularity** — **Resolved: day-level.** Dates are stored as epoch ms
+  (nullable); `cleanDate` accepts a finite number or null.
 
 ## Critical files
 
