@@ -1,6 +1,6 @@
 # B1 — scheduled runs — DESIGN REVIEW
 
-> **Status: DESIGN SETTLED (3 Codex review rounds §7-§9) — approved to build; impl spec = docs/AGENTIC-SCHEDULE-IMPL-SPEC.md.** Arc II §B1 checkpoint (MEDIUM):
+> **Status: SHIPPED (commit 8ff3998, deployed). 3 Codex review rounds (§7-§9) → impl spec docs/AGENTIC-SCHEDULE-IMPL-SPEC.md → built + verified (test:agentic 437, live-FE smoke).** Arc II §B1 checkpoint (MEDIUM):
 > the reducer is untouched, but automated start reverses a v1 safety posture (D7:
 > start is human-only), so it needs sign-off before code. Grounded in current code
 > on `feat/agentic-ai-creator`; `test:agentic` at 417 (retry+router+eval+budget+A2).
