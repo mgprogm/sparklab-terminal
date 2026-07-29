@@ -500,6 +500,8 @@ function shapeNodeExecution(ne) {
     ...(ne.startedAt != null ? { startedAt: ne.startedAt } : {}),
     ...(ne.finishedAt != null ? { finishedAt: ne.finishedAt } : {}),
     ...(ne.chosenEdges != null ? { chosenEdges: [...ne.chosenEdges] } : {}),
+    // score is display-only metadata; decide() and routing/skip logic must never read it.
+    ...(Number.isFinite(ne.score) ? { score: Number(ne.score) } : {}),
     // pendingToolCall IS persisted (iter3) — the current/last MCP tool-call
     // approval record for this node, or absent if none has ever been posted.
     ...(ne.pendingToolCall != null
@@ -1018,7 +1020,7 @@ function gateApprovalNode(runId, nodeId) {
 function recordNodeResult(
   runId,
   nodeId,
-  { status, finishedAt, error, chosenEdges } = {},
+  { status, finishedAt, error, chosenEdges, score } = {},
 ) {
   if (!NODE_TERMINAL.has(status))
     throw err("bad_request", "node status must be done|failed|skipped");
@@ -1028,6 +1030,7 @@ function recordNodeResult(
   ne.finishedAt = finishedAt != null ? Number(finishedAt) : now();
   if (typeof error === "string") ne.error = error.slice(0, 500);
   if (chosenEdges !== undefined) ne.chosenEdges = [...chosenEdges];
+  if (Number.isFinite(score)) ne.score = Number(score);
   persist();
   return shapeRun(run);
 }

@@ -2963,7 +2963,7 @@ async function recordTerminalDone(run, cfg, nodeId) {
   const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
   if (node?.type === "router") {
     const logTail = await agenticNodeLogTail(run, nodeId);
-    const { branch } = agentRuntime.parseResult(logTail, 0);
+    const { branch, score } = agentRuntime.parseResult(logTail, 0);
     const outs = (cfg.workflow.edges || []).filter(
       (edge) => edge.from === nodeId,
     );
@@ -2974,6 +2974,7 @@ async function recordTerminalDone(run, cfg, nodeId) {
       status: "done",
       finishedAt: Date.now(),
       chosenEdges: [`${match.from}->${match.to}`],
+      ...(Number.isFinite(score) ? { score } : {}),
     });
   } else {
     agentic.recordNodeResult(run.id, nodeId, {

@@ -648,7 +648,7 @@ const PROVIDERS = {
  * branch labels are read from the last plain-text `BRANCH: <label>` line.
  * @param {string} logTail
  * @param {number|null} exitCode
- * @returns {{status:"done"|"failed", branch:string|null}}
+ * @returns {{status:"done"|"failed", branch:string|null, score:number|null}}
  */
 function parseResult(logTail, exitCode) {
   let branch = null;
@@ -657,7 +657,13 @@ function parseResult(logTail, exitCode) {
   )) {
     branch = match[1];
   }
-  return { status: Number(exitCode) === 0 ? "done" : "failed", branch };
+  let score = null;
+  for (const match of String(logTail || "").matchAll(
+    /^\s*SCORE:\s*(-?\d+(?:\.\d+)?)\s*$/gim,
+  )) {
+    score = Number(match[1]);
+  }
+  return { status: Number(exitCode) === 0 ? "done" : "failed", branch, score };
 }
 
 export default {

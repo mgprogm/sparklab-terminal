@@ -1226,6 +1226,14 @@
         <button id="workflow-add-node" class="btn" type="button" style="margin-top: 8px">
           Add node
         </button>
+        <button
+          id="workflow-add-evaluation"
+          class="btn"
+          type="button"
+          style="margin-top: 8px"
+        >
+          Add evaluation
+        </button>
         <div class="section-label" style="margin-top: 14px">Edges</div>
         <div id="workflow-edges" class="workflow-list"></div>
         <button id="workflow-add-edge" class="btn" type="button" style="margin-top: 8px">
@@ -1426,6 +1434,7 @@
     teamWorkflow: document.getElementById("team-workflow"),
     workflowNodes: document.getElementById("workflow-nodes"),
     workflowAddNode: document.getElementById("workflow-add-node"),
+    workflowAddEvaluation: document.getElementById("workflow-add-evaluation"),
     workflowEdges: document.getElementById("workflow-edges"),
     workflowAddEdge: document.getElementById("workflow-add-edge"),
     workflowEntry: document.getElementById("workflow-entry"),
@@ -3107,6 +3116,9 @@
         ),
       );
     }
+    if (Number.isFinite(ne.score)) {
+      card.appendChild(elem("div", "run-meta", "SCORE: " + ne.score));
+    }
 
     // Iter3: a node parked on an MCP tool-call approval carries a persisted
     // pendingToolCall. Gate on BOTH the node status AND the record's own status
@@ -3502,6 +3514,21 @@
       draft.nodes.push({ id: id, type: "human-approval" });
     } else {
       draft.nodes.push({ id: id, type: "agent-task", agentId: agentIds[0] });
+    }
+    renderWorkflowBuilder();
+  });
+  el.workflowAddEvaluation.addEventListener("click", function () {
+    var draft = state.teamWorkflowDraft;
+    var agentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(
+      Boolean,
+    );
+    if (!draft) return;
+    var targets = draft.nodes.slice();
+    var id = "n" + state.nextWorkflowNodeNumber++;
+    draft.nodes.push({ id: id, type: "router", agentId: agentIds[0] });
+    if (targets.length >= 2) {
+      draft.edges.push({ from: id, to: targets[0].id, when: "pass" });
+      draft.edges.push({ from: id, to: targets[1].id, when: "default" });
     }
     renderWorkflowBuilder();
   });

@@ -101,6 +101,10 @@ fi
 # when-edge. Label charset is restricted so the sed capture is safe.
 brlabel="$(printf '%s' "$prompt" | sed -n 's/.*BRANCH=\\([A-Za-z0-9_-][A-Za-z0-9_-]*\\).*/\\1/p' | head -n1)"
 if [ -n "$brlabel" ]; then echo "BRANCH: $brlabel"; fi
+# Eval score sentinel: SCORE=<n> makes the stub emit a "SCORE: <n>" line, which
+# parseResult reads as the display-only score (never a routing input).
+scoreval="$(printf '%s' "$prompt" | sed -n 's/.*SCORE=\\(-\\{0,1\\}[0-9.][0-9.]*\\).*/\\1/p' | head -n1)"
+if [ -n "$scoreval" ]; then echo "SCORE: $scoreval"; fi
 echo "STUB-DONE-OK"
 exit 0
 `;
@@ -2786,6 +2790,144 @@ async function main() {
       );
       console.log(
         `  ok: (iter11) LOAD-BEARING — restart after router decided: boot re-derives chosenEdges, correct branch resumes, default skipped`,
+      );
+    }
+  }
+
+  // ==================================================================
+  // ITERATION 11-A1 — EVALUATION NODE (richer workflows II §A1)
+  // ==================================================================
+  // An eval node IS a `router` that judges (no new node type). The ONLY new
+  // backend behavior is a DISPLAY-ONLY `score` parsed from a `SCORE:` line — it
+  // must NEVER influence routing/skip. Routing/skip itself is already proven by
+  // the iter11 router tests, so coverage concentrates on the score guarantees.
+  {
+    const uniq = () =>
+      Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+    const mkAgent = async (sandboxMode = "read-only") =>
+      (
+        await (
+          await req("POST", "/api/agentic/agents", {
+            body: {
+              name: `eval-agent-${uniq()}`,
+              runtimeProvider: "codex-cli",
+              sandboxMode,
+              systemPrompt: "",
+            },
+            origin: ALLOWED_ORIGIN,
+          })
+        ).json()
+      ).id;
+    const mkApp = (nodes, edges, entry, agentIds) =>
+      req("POST", "/api/agentic/apps", {
+        body: {
+          name: `eval-app-${uniq()}`,
+          orchestrationMode: "custom",
+          agentIds,
+          workflow: { nodes, edges, entryNodeId: entry },
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+    const startOn = (appId, objective) =>
+      req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: { sessionId: targetSessionId, objective },
+        origin: ALLOWED_ORIGIN,
+      });
+
+    // (1) An eval node routes on BRANCH — NOT on SCORE — and its SCORE is a
+    // display-only value persisted on the node; the untaken verdict subtree (a
+    // ≥2-node chain) is still transitively skipped.
+    {
+      const ag = await mkAgent();
+      const nodes = [
+        { id: "r0", type: "router", agentId: ag },
+        { id: "good0", type: "agent-task", agentId: ag },
+        { id: "bad1", type: "agent-task", agentId: ag },
+        { id: "bad2", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "r0", to: "good0", when: "pass" },
+        { from: "r0", to: "bad1", when: "default" },
+        { from: "bad1", to: "bad2" },
+      ];
+      const appRes = await mkApp(nodes, edges, "r0", [ag]);
+      assert(appRes.status === 201, `eval(1): create -> ${appRes.status}`);
+      // BRANCH=pass but SCORE=2 (a "low" score): routing MUST follow BRANCH.
+      const rres = await startOn(
+        (await appRes.json()).id,
+        "judge BRANCH=pass SCORE=2",
+      );
+      assert(rres.status === 202, `eval(1): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "eval-score" },
+      );
+      const nd = (id) => nodeOf(done, id);
+      assert(
+        done.status === "completed",
+        `eval(1): completed (${done.status})`,
+      );
+      assert(
+        nd("good0").status === "done" &&
+          nd("bad1").status === "skipped" &&
+          nd("bad2").status === "skipped",
+        "eval(1): pass branch runs, default verdict CHAIN transitively skipped",
+      );
+      const r0e = nd("r0").chosenEdges;
+      assert(
+        Array.isArray(r0e) && r0e.includes("r0->good0"),
+        `eval(1): routed on BRANCH=pass despite SCORE=2 (${JSON.stringify(r0e)})`,
+      );
+      assert(
+        nd("r0").score === 2,
+        `eval(1): display-only score persisted on the node (got ${nd("r0").score})`,
+      );
+      console.log(
+        `  ok: (iter11-A1) eval node — routes on BRANCH not SCORE, SCORE persisted display-only, skip closure intact`,
+      );
+    }
+
+    // (2) `score` is recorded ONLY for router nodes: a plain agent-task whose
+    // (shared) objective also carries SCORE= must NOT gain a score.
+    {
+      const ag = await mkAgent();
+      const nodes = [
+        { id: "r0", type: "router", agentId: ag },
+        { id: "t1", type: "agent-task", agentId: ag },
+        { id: "d0", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "r0", to: "t1", when: "go" },
+        { from: "r0", to: "d0", when: "default" },
+      ];
+      const appRes = await mkApp(nodes, edges, "r0", [ag]);
+      assert(appRes.status === 201, `eval(2): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        "go BRANCH=go SCORE=9",
+      );
+      assert(rres.status === 202, `eval(2): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "eval-router-only-score" },
+      );
+      const nd = (id) => nodeOf(done, id);
+      assert(
+        done.status === "completed",
+        `eval(2): completed (${done.status})`,
+      );
+      assert(
+        nd("r0").score === 9,
+        `eval(2): the router node records its score (got ${nd("r0").score})`,
+      );
+      assert(
+        nd("t1").status === "done" && nd("t1").score === undefined,
+        `eval(2): a plain agent-task NEVER records a score even with SCORE= in its objective (got ${nd("t1").score})`,
+      );
+      console.log(
+        `  ok: (iter11-A1) score is router-only — plain agent-tasks never record a score`,
       );
     }
   }

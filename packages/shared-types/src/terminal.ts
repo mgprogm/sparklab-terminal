@@ -1307,6 +1307,8 @@ export const NodeExecutionSchema = z.object({
   finishedAt: z.number().nullable().optional(),
   /** Router-selected edge keys (`from->to`), persisted for restart safety. */
   chosenEdges: z.array(z.string()).optional(),
+  /** Display-only evaluation score; never used for routing or skip logic. */
+  score: z.number().optional(),
   /** The node's current/last MCP tool-call approval record, if any (D5, iter3). */
   pendingToolCall: PendingToolCallSchema.nullable().optional(),
   /** Derived on GET (tailed step log); never persisted. */
