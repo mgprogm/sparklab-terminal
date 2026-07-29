@@ -16,6 +16,7 @@
     "test:codex": "node test/codex-endpoints.js",
     "test:kanban": "node test/kanban-endpoints.js",
     "test:pm": "node test/pm-endpoints.js",
+    "test:parse": "node test/parse-result.js",
     "test:agentic": "node test/agentic-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
     "generate-vapid": "node scripts/generate-vapid.js",

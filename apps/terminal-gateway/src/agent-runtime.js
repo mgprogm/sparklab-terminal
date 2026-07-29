@@ -643,22 +643,59 @@ const PROVIDERS = {
 };
 
 /**
- * Map a finished node's exit code → a terminal nodeExecution status. iter2 does
- * NOT parse stream-json semantically: exit 0 → done, non-zero → failed. Router
- * branch labels are read from the last plain-text `BRANCH: <label>` line.
+ * Map a finished node's exit code → a terminal nodeExecution status and parse
+ * router branch/score output from Claude stream-json or plaintext logs.
  * @param {string} logTail
  * @param {number|null} exitCode
  * @returns {{status:"done"|"failed", branch:string|null, score:number|null}}
  */
 function parseResult(logTail, exitCode) {
+  const rawText = String(logTail || "");
+  let finalResult = null;
+  let hasFinalResult = false;
+  const assistantText = [];
+
+  /*
+   * Claude emits stream-json envelopes, while Codex and the test stub emit
+   * plaintext. Prefer the last result text, then assistant text blocks, and
+   * fall back to the raw log so the plaintext path remains unchanged.
+   */
+  for (const line of rawText.split("\n")) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (!event || typeof event !== "object") {
+      continue;
+    }
+    if (event.type === "result" && typeof event.result === "string") {
+      finalResult = event.result;
+      hasFinalResult = true;
+      continue;
+    }
+    if (event.type === "assistant" && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          assistantText.push(block.text);
+        }
+      }
+    }
+  }
+
+  const joinedAssistantText = assistantText.join("\n");
+  const textToScan = hasFinalResult
+    ? finalResult
+    : joinedAssistantText || rawText;
+
   let branch = null;
-  for (const match of String(logTail || "").matchAll(
-    /^\s*BRANCH:\s*(\S+)\s*$/gim,
-  )) {
+  for (const match of textToScan.matchAll(/^\s*BRANCH:\s*(\S+)\s*$/gim)) {
     branch = match[1];
   }
   let score = null;
-  for (const match of String(logTail || "").matchAll(
+  for (const match of textToScan.matchAll(
     /^\s*SCORE:\s*(-?\d+(?:\.\d+)?)\s*$/gim,
   )) {
     score = Number(match[1]);
