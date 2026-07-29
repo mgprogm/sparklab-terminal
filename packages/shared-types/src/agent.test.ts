@@ -154,6 +154,16 @@ describe("browser agent frames", () => {
         revision: 4,
       }),
     ).toEqual({ type: "browser_closed", browserId: "browser-1", revision: 4 });
+    expect(
+      AgentWsServerMessageSchema.parse({
+        type: "browser_handoff_state",
+        browserId: "browser-1",
+        handoffId: "123e4567-e89b-12d3-a456-426614174000",
+        state: "human_active",
+        expiresAt: 1_800_000_120_000,
+        hardExpiresAt: 1_800_000_600_000,
+      }),
+    ).toMatchObject({ hardExpiresAt: 1_800_000_600_000 });
   });
 
   it("rejects unsafe URLs, invalid media, dimensions, revisions, and base64", () => {

@@ -128,6 +128,7 @@ export class BrowserHandoffBroker {
             ? "human_active"
             : "pending",
         expiresAt: record.expiresAt,
+        hardExpiresAt: record.hardExpiresAt,
       });
       return true;
     }
@@ -212,6 +213,7 @@ export class BrowserHandoffBroker {
       handoffId: record.handoffId,
       state: "human_active",
       expiresAt: record.expiresAt,
+      hardExpiresAt: record.hardExpiresAt,
     });
     return record.handoffId;
   }
@@ -402,6 +404,7 @@ export class BrowserHandoffBroker {
             ? "human_active"
             : "pending",
         expiresAt: record.expiresAt,
+        hardExpiresAt: record.hardExpiresAt,
       });
       return record.browser;
     }

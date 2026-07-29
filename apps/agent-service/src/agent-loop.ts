@@ -183,11 +183,6 @@ export class AgentLoop {
       this.history.push(userMsg);
       await appendMessages(this.chatId, [userMsg]);
 
-      const system: ChatCompletionMessageParam = {
-        role: "system",
-        content: systemPrompt(activeSessionId),
-      };
-
       let modelCalls = 0;
       let writeExecs = 0;
 
@@ -201,6 +196,11 @@ export class AgentLoop {
         }
         modelCalls++;
         this.send({ type: "status", state: "thinking" });
+
+        const system: ChatCompletionMessageParam = {
+          role: "system",
+          content: systemPrompt(activeSessionId, this.browser.leaseState),
+        };
 
         const { text: segmentText, toolCalls } = await this.streamOnce(
           [system, ...this.history],

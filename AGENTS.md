@@ -16,6 +16,22 @@ Within Next.js apps, keep `src/app/` limited to routing and composition. Put bus
 
 Use `pnpm --filter <workspace> <script>` for focused work. See `docs/GETTING-STARTED.md` for ports and environment setup.
 
+## Local Production Deployment
+
+The PM2 `prod-terminal` process serves `NEXT_DIST_DIR=.next-prod`. After any
+frontend change, run `./build-prod.sh`; never deploy it with a plain
+`pnpm build` or `pnpm --filter @sparklab/terminal build`, because those write
+`.next` and leave local production on the old bundle. Do not substitute a manual
+`NEXT_DIST_DIR=.next-prod` build: `build-prod.sh` also bakes
+`NEXT_PUBLIC_GATEWAY_URL` and `NEXT_PUBLIC_AGENT_URL` from `PUBLIC_ORIGIN`.
+Without them, remote clients try `localhost:3007/3009` and both WebSockets fail.
+Before restarting, confirm `.next-prod/static/chunks` contains the configured
+public origin and contains neither fallback. Then restart the affected PM2
+services. After restarting `prod-terminal`, verify that the page chunk served
+over both local HTTP and the public origin matches the chunk referenced by
+`apps/terminal/.next-prod/server/app/index.html`; PM2 being online alone does
+not prove that the new frontend bundle is active. See `docs/LOCAL-PROD.md`.
+
 ## Coding Style & Naming Conventions
 
 Use two-space indentation and Prettier with its Tailwind plugin. TypeScript is strict with `noUncheckedIndexedAccess`; do not weaken shared configs. Use kebab-case filenames, PascalCase components, camelCase identifiers, and `use...` hooks. Keep server data in TanStack Query and UI state in Zustand. The gateway remains JavaScript.

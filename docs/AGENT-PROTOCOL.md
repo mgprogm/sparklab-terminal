@@ -165,6 +165,10 @@ the one read exposed for attachments.
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.
 It does not create a second browser, token, socket, cookie jar, or timeout.
+Each model hop is grounded with the runtime's current control lease. That live
+lease overrides stale assistant prose in chat history: the agent must not ask
+for **Done** when the lease is agent-active or closed, and must reopen an
+existing pending/active Browser View before referring the user to its controls.
 
 The dedicated handoff data plane is bounded and latest-frame-wins: the broker
 paces binary frames to 10 FPS, retains at most one unsent frame under

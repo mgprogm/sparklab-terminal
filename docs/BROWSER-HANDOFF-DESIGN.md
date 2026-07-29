@@ -329,6 +329,7 @@ type BrowserHandoffState = {
   handoffId?: string;
   state: "pending" | "human_active" | "agent_active" | "closed";
   expiresAt?: number;
+  hardExpiresAt?: number;
 };
 ```
 
@@ -349,11 +350,17 @@ Extend the browser overlay with:
 - A connection/reconnecting indicator during the short grace period.
 - Reopen the hidden Browser View when the authenticated chat republishes a
   pending or active handoff state.
+- After a full reload loses memory-only snapshots and credentials, show a
+  recovery view from the authoritative handoff state. An active lease still
+  exposes **Done** and **Cancel**; a pending lease exposes **Cancel** so the
+  user is never instructed to select a control that is absent.
 - The isolated-browser warning before the first handoff.
 
 Keep xterm mounted beneath the overlay and move focus away from its hidden
 textarea. Interactive frames and tokens belong in a new non-persisted Zustand
 store; do not extend the persisted Agent Chat store with handoff data.
+Countdowns use the server's `expiresAt` and `hardExpiresAt`; reconnecting must
+not invent fresh client-side deadlines.
 
 ## Suggested Code Boundaries
 
