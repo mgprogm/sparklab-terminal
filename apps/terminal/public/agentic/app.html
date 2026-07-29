@@ -280,6 +280,7 @@
   .app-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 2px;
   }
@@ -499,6 +500,16 @@
     border: 1px solid rgba(218, 210, 193, 0.35);
     border-radius: var(--radius-sm);
     padding: 7px 9px;
+  }
+
+  .modal-error {
+    display: none;
+    font-size: 12px;
+    color: var(--danger);
+  }
+
+  .modal-error.show {
+    display: block;
   }
 
   /* ---- Modal ---- */
@@ -978,6 +989,9 @@
     </button>
   </div>
   <span class="grow"></span>
+  <button id="import-app-btn" class="btn btn-primary" type="button">
+    Import template
+  </button>
   <button id="new-app-btn" class="btn btn-primary" type="button">
     New Agentic AI
   </button>
@@ -1088,6 +1102,39 @@
         Cancel
       </button>
       <button type="submit" class="btn btn-primary">Create</button>
+    </div>
+  </form>
+</div>
+
+<!-- Import Agentic AI template modal -->
+<div id="import-app-overlay" class="overlay">
+  <form id="import-app-form" class="modal">
+    <h3>Import template</h3>
+    <div>
+      <label for="import-app-file">Template file</label>
+      <input
+        id="import-app-file"
+        class="field"
+        type="file"
+        accept="application/json,.json"
+      />
+    </div>
+    <div>
+      <label for="import-app-json">Template JSON</label>
+      <textarea
+        id="import-app-json"
+        class="field"
+        placeholder="Paste template JSON here"
+      ></textarea>
+    </div>
+    <div id="import-app-error" class="modal-error" role="alert"></div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="import-app-overlay">
+        Cancel
+      </button>
+      <button id="import-app-submit" type="submit" class="btn btn-primary">
+        Import
+      </button>
     </div>
   </form>
 </div>
@@ -1271,6 +1318,7 @@
   };
 
   var el = {
+    importAppBtn: document.getElementById("import-app-btn"),
     newAppBtn: document.getElementById("new-app-btn"),
     newAgentBtn: document.getElementById("new-agent-btn"),
     newConnectionBtn: document.getElementById("new-connection-btn"),
@@ -1283,6 +1331,12 @@
     naName: document.getElementById("na-name"),
     naDesc: document.getElementById("na-desc"),
     naMode: document.getElementById("na-mode"),
+    importAppOverlay: document.getElementById("import-app-overlay"),
+    importAppForm: document.getElementById("import-app-form"),
+    importAppFile: document.getElementById("import-app-file"),
+    importAppJson: document.getElementById("import-app-json"),
+    importAppError: document.getElementById("import-app-error"),
+    importAppSubmit: document.getElementById("import-app-submit"),
     // Tabs
     tabs: Array.prototype.slice.call(document.querySelectorAll("#tabs .tab")),
     // Team editor modal
@@ -1503,6 +1557,45 @@
     await loadApps();
   }
 
+  function templateFilename(name) {
+    var slug = String(name || "")
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80);
+    return (slug || "agentic-ai") + ".agentic.json";
+  }
+
+  async function exportApp(app) {
+    var data = await api(
+      "GET",
+      "/apps/" + encodeURIComponent(app.id) + "/export",
+    );
+    var blob = new Blob([JSON.stringify(data.template, null, 2)], {
+      type: "application/json",
+    });
+    var url = URL.createObjectURL(blob);
+    var link = elem("a");
+    link.href = url;
+    link.download = templateFilename(app.name);
+    document.body.appendChild(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function cloneApp(app) {
+    await api(
+      "POST",
+      "/apps/" + encodeURIComponent(app.id) + "/clone",
+    );
+    await loadApps();
+  }
+
   // ---------------------------------------------------------------------------
   // Rendering
   // ---------------------------------------------------------------------------
@@ -1579,6 +1672,20 @@
       openRunView(app);
     });
     actions.appendChild(runBtn);
+
+    var exportBtn = elem("button", "btn btn-ghost", "Export");
+    exportBtn.type = "button";
+    exportBtn.addEventListener("click", function () {
+      exportApp(app).catch(handleError);
+    });
+    actions.appendChild(exportBtn);
+
+    var cloneBtn = elem("button", "btn btn-ghost", "Clone");
+    cloneBtn.type = "button";
+    cloneBtn.addEventListener("click", function () {
+      cloneApp(app).catch(handleError);
+    });
+    actions.appendChild(cloneBtn);
 
     var pubBtn = elem(
       "button",
@@ -2233,6 +2340,7 @@
 
     // The tab bar + contextual "New …" button are hidden while inside a run.
     document.getElementById("tabs").style.display = isRun ? "none" : "";
+    el.importAppBtn.style.display = isCatalog ? "" : "none";
     el.newAppBtn.style.display = isCatalog ? "" : "none";
     el.newAgentBtn.style.display = isAgents ? "" : "none";
     el.newConnectionBtn.style.display = isConnections ? "" : "none";
@@ -2714,6 +2822,7 @@
   // PATCHes live on each change, so closing it never loses work.
   var ALL_OVERLAYS = [
     el.newAppOverlay,
+    el.importAppOverlay,
     el.teamOverlay,
     el.agentOverlay,
     el.connectionOverlay,
@@ -2740,6 +2849,60 @@
     el.naMode.value = "single";
     openOverlay(el.newAppOverlay);
     el.naName.focus();
+  });
+
+  function showImportError(message) {
+    el.importAppError.textContent = message || "";
+    el.importAppError.classList.toggle("show", Boolean(message));
+  }
+
+  el.importAppBtn.addEventListener("click", function () {
+    clearBanner();
+    el.importAppFile.value = "";
+    el.importAppJson.value = "";
+    showImportError("");
+    openOverlay(el.importAppOverlay);
+    el.importAppJson.focus();
+  });
+
+  el.importAppFile.addEventListener("change", function () {
+    var file = el.importAppFile.files && el.importAppFile.files[0];
+    if (!file) return;
+    showImportError("");
+    var reader = new FileReader();
+    reader.addEventListener("load", function () {
+      el.importAppJson.value = String(reader.result || "");
+    });
+    reader.addEventListener("error", function () {
+      showImportError("Could not read that template file.");
+    });
+    reader.readAsText(file);
+  });
+
+  el.importAppForm.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    showImportError("");
+    var template;
+    try {
+      template = JSON.parse(el.importAppJson.value);
+    } catch (parseError) {
+      showImportError("Invalid JSON. Check the template and try again.");
+      return;
+    }
+
+    el.importAppSubmit.disabled = true;
+    try {
+      await api("POST", "/apps/import", { template: template });
+      closeOverlay(el.importAppOverlay);
+      await loadApps();
+    } catch (requestError) {
+      handleError(requestError);
+      showImportError(
+        (requestError && requestError.message) || "Could not import template.",
+      );
+    } finally {
+      el.importAppSubmit.disabled = false;
+    }
   });
 
   el.newAppForm.addEventListener("submit", function (e) {

@@ -891,6 +891,134 @@ async function main() {
     console.log(`  ok: GET /mcp-servers returns pm + kanban`);
   }
 
+  // ---- (iter7) templates: export -> import (fresh ids + remapped refs) ---
+  {
+    const conn = await (
+      await req("POST", "/api/agentic/connections", {
+        body: { targetType: "pm", scope: "fixed" },
+        origin: ALLOWED_ORIGIN,
+      })
+    ).json();
+    const agent = await (
+      await req("POST", "/api/agentic/agents", {
+        body: {
+          name: `tmpl-agent-${Date.now()}`,
+          runtimeProvider: "claude-cli",
+          sandboxMode: "read-only",
+          systemPrompt: "SP",
+          toolPolicies: [
+            { connectionId: conn.id, tools: "all", policy: "approval" },
+          ],
+        },
+        origin: ALLOWED_ORIGIN,
+      })
+    ).json();
+    const src = await (
+      await req("POST", "/api/agentic/apps", {
+        body: {
+          name: "Tmpl Source",
+          orchestrationMode: "supervisor",
+          agentIds: [agent.id],
+          connectionIds: [conn.id],
+        },
+        origin: ALLOWED_ORIGIN,
+      })
+    ).json();
+
+    // export: instance-free, self-contained, refs preserved
+    const exp = await req("GET", `/api/agentic/apps/${enc(src.id)}/export`);
+    assert(exp.status === 200, `export -> ${exp.status}`);
+    const template = (await exp.json()).template;
+    assert(
+      template.kind === "agentic-ai-template" && template.version === 1,
+      "export: kind + version",
+    );
+    assert(
+      template.agents.length === 1 &&
+        template.agents[0].ref === agent.id &&
+        template.connections.length === 1 &&
+        template.connections[0].ref === conn.id,
+      "export: embeds agent + connection keyed by ref",
+    );
+    assert(
+      template.agents[0].toolPolicies[0].connectionId === conn.id,
+      "export: toolPolicy connection ref preserved",
+    );
+    assert(
+      template.app.id === undefined &&
+        template.app.rev === undefined &&
+        template.app.status === undefined,
+      "export: app instance fields stripped",
+    );
+
+    // import: fresh ids everywhere + toolPolicy remapped to the NEW connection
+    const imp = await req("POST", "/api/agentic/apps/import", {
+      body: { template },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(imp.status === 201, `import -> ${imp.status}`);
+    const impApp = (await imp.json()).app;
+    assert(impApp.id !== src.id, "import: new app id");
+    assert(
+      impApp.agentIds[0] !== agent.id && impApp.connectionIds[0] !== conn.id,
+      "import: fresh agent + connection ids",
+    );
+    const impAgent = await (
+      await req("GET", `/api/agentic/agents/${enc(impApp.agentIds[0])}`)
+    ).json();
+    assert(
+      impAgent.toolPolicies[0].connectionId === impApp.connectionIds[0],
+      "import: toolPolicy remapped to the NEW connection (not the old ref)",
+    );
+
+    // clone: '(copy)' name, fresh ids
+    const clo = await req("POST", `/api/agentic/apps/${enc(src.id)}/clone`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(clo.status === 201, `clone -> ${clo.status}`);
+    const cloApp = (await clo.json()).app;
+    assert(
+      cloApp.name === "Tmpl Source (copy)" &&
+        cloApp.id !== src.id &&
+        cloApp.agentIds[0] !== agent.id,
+      "clone: (copy) name + fresh ids",
+    );
+
+    // malformed / dangling-ref templates rejected 400 (validate-first)
+    const badKind = await req("POST", "/api/agentic/apps/import", {
+      body: { template: { kind: "nope", version: 1 } },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(badKind.status === 400, `import bad kind -> ${badKind.status}`);
+    const dangling = await req("POST", "/api/agentic/apps/import", {
+      body: {
+        template: {
+          kind: "agentic-ai-template",
+          version: 1,
+          app: {
+            name: "x",
+            description: "",
+            objectiveTemplate: "",
+            orchestrationMode: "single",
+            agentIds: ["ghost"],
+            connectionIds: [],
+            workflow: { nodes: [], edges: [], entryNodeId: null },
+          },
+          agents: [],
+          connections: [],
+        },
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(
+      dangling.status === 400,
+      `import dangling ref -> ${dangling.status}`,
+    );
+    console.log(
+      `  ok: (iter7) templates — export instance-free, import remaps to fresh ids, clone '(copy)', malformed->400`,
+    );
+  }
+
   // ---- Bearer-token auth (the external-CLI path) ------------------------
   {
     const g = await req("GET", "/api/agentic/agents", {

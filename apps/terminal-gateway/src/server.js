@@ -2470,6 +2470,243 @@ function agenticErr(code, message, extra) {
   return e;
 }
 
+function buildAgenticTemplate(app) {
+  const agents = app.agentIds.map((id) => {
+    const a = agentic.getAgent(id);
+    if (!a) throw agenticErr("not_found", `agent not found: ${id}`);
+    return {
+      ref: a.id,
+      name: a.name,
+      runtimeProvider: a.runtimeProvider,
+      role: a.role,
+      systemPrompt: a.systemPrompt,
+      sandboxMode: a.sandboxMode,
+      model: a.model,
+      toolPolicies: a.toolPolicies.map((p) => ({
+        connectionId: p.connectionId,
+        tools: p.tools === "all" ? "all" : [...p.tools],
+        policy: p.policy,
+      })),
+    };
+  });
+  const connections = app.connectionIds.map((id) => {
+    const c = agentic.getConnection(id);
+    if (!c) throw agenticErr("not_found", `connection not found: ${id}`);
+    return {
+      ref: c.id,
+      targetType: c.targetType,
+      scope: c.scope,
+      targetId: c.targetId,
+    };
+  });
+  return {
+    kind: "agentic-ai-template",
+    version: 1,
+    app: {
+      name: app.name,
+      description: app.description,
+      objectiveTemplate: app.objectiveTemplate,
+      orchestrationMode: app.orchestrationMode,
+      agentIds: [...app.agentIds],
+      connectionIds: [...app.connectionIds],
+      workflow: {
+        nodes: app.workflow.nodes.map((n) => ({
+          id: n.id,
+          type: n.type,
+          ...(n.agentId != null ? { agentId: n.agentId } : {}),
+        })),
+        edges: app.workflow.edges.map((e) => ({ from: e.from, to: e.to })),
+        entryNodeId: app.workflow.entryNodeId,
+      },
+    },
+    agents,
+    connections,
+  };
+}
+
+function validateAgenticTemplate(template) {
+  const invalid = (why) => {
+    throw agenticErr("bad_request", `invalid template: ${why}`);
+  };
+  const isObject = (value) =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const isNullableString = (value) =>
+    value === null || typeof value === "string";
+
+  if (!isObject(template) || template.kind !== "agentic-ai-template")
+    invalid("kind must be agentic-ai-template");
+  if (template.version !== 1) invalid("unsupported version");
+  if (!isObject(template.app)) invalid("app must be an object");
+  if (!Array.isArray(template.agents)) invalid("agents must be an array");
+  if (!Array.isArray(template.connections))
+    invalid("connections must be an array");
+
+  const app = template.app;
+  if (typeof app.name !== "string") invalid("app.name must be a string");
+  if (typeof app.description !== "string")
+    invalid("app.description must be a string");
+  if (typeof app.objectiveTemplate !== "string")
+    invalid("app.objectiveTemplate must be a string");
+  if (typeof app.orchestrationMode !== "string")
+    invalid("app.orchestrationMode must be a string");
+  if (!Array.isArray(app.agentIds)) invalid("app.agentIds must be an array");
+  if (!Array.isArray(app.connectionIds))
+    invalid("app.connectionIds must be an array");
+  if (!isObject(app.workflow)) invalid("app.workflow must be an object");
+  if (!Array.isArray(app.workflow.nodes))
+    invalid("app.workflow.nodes must be an array");
+  if (!Array.isArray(app.workflow.edges))
+    invalid("app.workflow.edges must be an array");
+  if (!isNullableString(app.workflow.entryNodeId))
+    invalid("app.workflow.entryNodeId must be a string or null");
+
+  const connectionRefs = new Set();
+  for (const connection of template.connections) {
+    if (!isObject(connection)) invalid("each connection must be an object");
+    if (typeof connection.ref !== "string" || !connection.ref)
+      invalid("connection.ref must be a non-empty string");
+    if (connectionRefs.has(connection.ref))
+      invalid(`duplicate connection ref: ${connection.ref}`);
+    connectionRefs.add(connection.ref);
+    if (typeof connection.targetType !== "string")
+      invalid(`connection ${connection.ref} targetType must be a string`);
+    if (typeof connection.scope !== "string")
+      invalid(`connection ${connection.ref} scope must be a string`);
+    if (!isNullableString(connection.targetId))
+      invalid(`connection ${connection.ref} targetId must be a string or null`);
+  }
+
+  const agentRefs = new Set();
+  for (const agent of template.agents) {
+    if (!isObject(agent)) invalid("each agent must be an object");
+    if (typeof agent.ref !== "string" || !agent.ref)
+      invalid("agent.ref must be a non-empty string");
+    if (agentRefs.has(agent.ref)) invalid(`duplicate agent ref: ${agent.ref}`);
+    agentRefs.add(agent.ref);
+    if (typeof agent.name !== "string")
+      invalid(`agent ${agent.ref} name must be a string`);
+    if (typeof agent.runtimeProvider !== "string")
+      invalid(`agent ${agent.ref} runtimeProvider must be a string`);
+    if (!isNullableString(agent.role))
+      invalid(`agent ${agent.ref} role must be a string or null`);
+    if (typeof agent.systemPrompt !== "string")
+      invalid(`agent ${agent.ref} systemPrompt must be a string`);
+    if (typeof agent.sandboxMode !== "string")
+      invalid(`agent ${agent.ref} sandboxMode must be a string`);
+    if (!isNullableString(agent.model))
+      invalid(`agent ${agent.ref} model must be a string or null`);
+    if (!Array.isArray(agent.toolPolicies))
+      invalid(`agent ${agent.ref} toolPolicies must be an array`);
+    for (const policy of agent.toolPolicies) {
+      if (!isObject(policy))
+        invalid(`agent ${agent.ref} toolPolicy must be an object`);
+      if (
+        typeof policy.connectionId !== "string" ||
+        !connectionRefs.has(policy.connectionId)
+      )
+        invalid(
+          `agent ${agent.ref} references unknown connection: ${policy.connectionId}`,
+        );
+      if (
+        policy.tools !== "all" &&
+        (!Array.isArray(policy.tools) ||
+          policy.tools.some((tool) => typeof tool !== "string"))
+      )
+        invalid(`agent ${agent.ref} toolPolicy.tools is invalid`);
+      if (typeof policy.policy !== "string")
+        invalid(`agent ${agent.ref} toolPolicy.policy must be a string`);
+    }
+  }
+
+  for (const ref of app.agentIds) {
+    if (typeof ref !== "string" || !agentRefs.has(ref))
+      invalid(`app.agentIds references unknown agent: ${ref}`);
+  }
+  for (const ref of app.connectionIds) {
+    if (typeof ref !== "string" || !connectionRefs.has(ref))
+      invalid(`app.connectionIds references unknown connection: ${ref}`);
+  }
+  for (const node of app.workflow.nodes) {
+    if (!isObject(node)) invalid("each workflow node must be an object");
+    if (typeof node.id !== "string" || typeof node.type !== "string")
+      invalid("workflow node id and type must be strings");
+    if (
+      node.agentId !== undefined &&
+      (typeof node.agentId !== "string" || !agentRefs.has(node.agentId))
+    )
+      invalid(`workflow node references unknown agent: ${node.agentId}`);
+  }
+  for (const edge of app.workflow.edges) {
+    if (
+      !isObject(edge) ||
+      typeof edge.from !== "string" ||
+      typeof edge.to !== "string"
+    )
+      invalid("workflow edge from and to must be strings");
+  }
+}
+
+function importAgenticTemplate(template, name) {
+  validateAgenticTemplate(template);
+  const connectionIds = new Map();
+  const agentIds = new Map();
+  const createdConnectionIds = [];
+  const createdAgentIds = [];
+  try {
+    for (const connection of template.connections) {
+      const created = agentic.createConnection({
+        targetType: connection.targetType,
+        scope: connection.scope,
+        targetId: connection.targetId,
+      });
+      connectionIds.set(connection.ref, created.id);
+      createdConnectionIds.push(created.id);
+    }
+    for (const agent of template.agents) {
+      const created = agentic.createAgent({
+        name: agent.name,
+        runtimeProvider: agent.runtimeProvider,
+        role: agent.role,
+        systemPrompt: agent.systemPrompt,
+        sandboxMode: agent.sandboxMode,
+        model: agent.model,
+        toolPolicies: agent.toolPolicies.map((p) => ({
+          connectionId: connectionIds.get(p.connectionId),
+          tools: p.tools === "all" ? "all" : [...p.tools],
+          policy: p.policy,
+        })),
+      });
+      agentIds.set(agent.ref, created.id);
+      createdAgentIds.push(created.id);
+    }
+    const app = template.app;
+    return agentic.createAgenticAi({
+      name: name || app.name,
+      description: app.description,
+      objectiveTemplate: app.objectiveTemplate,
+      orchestrationMode: app.orchestrationMode,
+      agentIds: app.agentIds.map((ref) => agentIds.get(ref)),
+      connectionIds: app.connectionIds.map((ref) => connectionIds.get(ref)),
+      workflow: {
+        nodes: app.workflow.nodes.map((node) => ({
+          id: node.id,
+          type: node.type,
+          ...(node.agentId !== undefined
+            ? { agentId: agentIds.get(node.agentId) }
+            : {}),
+        })),
+        edges: app.workflow.edges.map((edge) => ({ ...edge })),
+        entryNodeId: app.workflow.entryNodeId,
+      },
+    });
+  } catch (error) {
+    for (const id of createdAgentIds.reverse()) agentic.deleteAgent(id);
+    for (const id of createdConnectionIds.reverse())
+      agentic.deleteConnection(id);
+    throw error;
+  }
+}
+
 // Spawn ONE agent-task node. Ordering is load-bearing for restart-safety:
 //   1. recordSpawned() persists status:"running" BEFORE any tmux spawn;
 //   2. materialize wrapper.sh/prompt/system (0600) on the target server;
@@ -3348,6 +3585,17 @@ async function handleAgentic(req, res, url) {
     if (req.method === "GET" && seg.length === 1 && seg[0] === "apps") {
       return sendJson(res, 200, { apps: agentic.listAgenticAis() });
     }
+    // GET /api/agentic/apps/:id/export — portable, instance-free template
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "export"
+    ) {
+      const app = agentic.getAgenticAi(seg[1]);
+      if (!app) return sendJson(res, 404, { error: "agentic AI not found" });
+      return sendJson(res, 200, { template: buildAgenticTemplate(app) });
+    }
     // GET /api/agentic/apps/:id — get (full, incl. workflow)
     if (req.method === "GET" && seg.length === 2 && seg[0] === "apps") {
       const aa = agentic.getAgenticAi(seg[1]);
@@ -3359,6 +3607,36 @@ async function handleAgentic(req, res, url) {
       const r = await readJsonObject(req);
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
       return sendJson(res, 201, agentic.createAgenticAi(r.body));
+    }
+    // POST /api/agentic/apps/import — a very large v1 template may exceed the
+    // standard 64 KB readBody cap.
+    if (
+      req.method === "POST" &&
+      seg.length === 2 &&
+      seg[0] === "apps" &&
+      seg[1] === "import"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const template =
+        r.body.kind === "agentic-ai-template" ? r.body : r.body.template;
+      const app = importAgenticTemplate(template, r.body.name);
+      return sendJson(res, 201, { app });
+    }
+    // POST /api/agentic/apps/:id/clone — export and re-import with fresh ids
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "clone"
+    ) {
+      const source = agentic.getAgenticAi(seg[1]);
+      if (!source) return sendJson(res, 404, { error: "agentic AI not found" });
+      const app = importAgenticTemplate(
+        buildAgenticTemplate(source),
+        `${source.name} (copy)`,
+      );
+      return sendJson(res, 201, { app });
     }
     // PATCH /api/agentic/apps/:id/status — "publish" (D8): status-only, bumps rev
     if (
