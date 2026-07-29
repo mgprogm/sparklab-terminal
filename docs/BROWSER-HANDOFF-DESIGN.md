@@ -157,6 +157,8 @@ Send bounded WebP/JPEG frames over binary WebSocket messages:
 - Pace outbound frames to 10 FPS and use latest-frame-wins queues on both the
   broker and client. The client decodes at most one frame at a time while
   retaining one newer pending frame, outside React and persisted state.
+- Pace CDP screencast acknowledgements to the same 10 FPS ceiling. Chromium
+  therefore does not repeatedly encode frames that the broker would discard.
 - Bound frame and message sizes.
 - Do not persist or attach frames to chat history.
 
@@ -210,8 +212,10 @@ coordinates. Side buttons and browser navigation shortcuts remain excluded.
 The server serializes authentication and subsequent input so an early click
 cannot race Chromium activation, and the canvas remains visibly disabled until
 the dedicated handoff channel reports `connected`.
-The UI draws a local virtual cursor over the streamed frame with the exact
-bounded CDP coordinates. It shows a pressed state immediately and a short ✓
+The UI draws a local arrow cursor over the streamed frame with its tip at the
+exact bounded CDP coordinates. Cursor DOM work is coalesced once per animation
+frame, and the canvas backing size changes only when decoded dimensions change.
+It shows a pressed state immediately and a short ✓
 only after the server completes the corresponding pointer/wheel input; the
 acknowledgement contains the input kind only and never echoes typed content.
 

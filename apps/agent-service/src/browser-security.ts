@@ -17,6 +17,13 @@ export function sanitizePublicUrl(value: string, base?: string): string {
 }
 import { lookup } from "node:dns/promises";
 
+export type BrowserHostResolver = (hostname: string) => Promise<string[]>;
+
+export interface ValidatedBrowserDestination {
+  url: URL;
+  addresses: string[];
+}
+
 const BLOCKED_HOSTS = new Set([
   "localhost",
   "localhost.localdomain",
@@ -26,6 +33,14 @@ const BLOCKED_HOSTS = new Set([
 
 /** Validate a public HTTP(S) destination, including every resolved address. */
 export async function validateBrowserUrl(raw: string): Promise<URL> {
+  return (await validateBrowserDestination(raw)).url;
+}
+
+/** Validate and retain the exact public addresses that a caller may connect to. */
+export async function validateBrowserDestination(
+  raw: string,
+  resolveHost: BrowserHostResolver = resolvePublicBrowserHost,
+): Promise<ValidatedBrowserDestination> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -47,8 +62,11 @@ export async function validateBrowserUrl(raw: string): Promise<URL> {
     throw new Error("browser destination is not public");
   }
 
-  await resolvePublicBrowserHost(hostname);
-  return url;
+  const addresses = await resolveHost(hostname);
+  if (addresses.length === 0) {
+    throw new Error("browser destination has no public address");
+  }
+  return { url, addresses };
 }
 
 /** Resolve once and return only addresses already proven public (DNS-rebinding safe for callers that connect by IP). */

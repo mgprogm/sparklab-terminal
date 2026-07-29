@@ -5,6 +5,7 @@ import type {
   BrowserHandoffTransport,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
+import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
 
 export type BrowserHandoffTransportState =
   | "awaiting_capabilities"
@@ -159,6 +160,12 @@ class BrowserHandoffMetrics {
   }
   frameDropped(): void {
     this.droppedFrames++;
+  }
+  frameBytesDropped(bytes: number): void {
+    browserPerformanceMetrics.handoffFrameDropped(bytes);
+  }
+  frameSent(bytes: number): void {
+    browserPerformanceMetrics.handoffFrameSent(bytes);
   }
   peerStarted(): void {
     this.activePeers++;

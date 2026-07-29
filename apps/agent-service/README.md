@@ -61,6 +61,11 @@ credentials, loopback, link-local, private/reserved networks, metadata services,
 unsafe redirects, and DNS rebinding. Browser processes and their Chromium
 process groups are terminated on Stop or disconnect; temporary state is then
 removed. Do not weaken this isolation or expose the MCP process directly.
+Browser Use's blanket `block_ip_addresses` option is deliberately off so public
+literal-IP URLs work; the enforcing proxy remains mandatory and connects only
+to the exact public address it validated. Model-facing state is compacted to a
+valid 48,000-character payload, and privacy-safe aggregate performance metrics
+are published by `/health` under `browserPerformance`.
 The initial `about:blank` observation intentionally has no view frame; the
 first bounded view is emitted once navigation reaches a public HTTP(S) page.
 
@@ -88,7 +93,9 @@ real Azure call, so it needs a valid `.env` and takes ~1min (the model is slow).
 | `src/tools.ts`                                            | Terminal/browser function schemas and terminal dispatcher                |
 | `src/gateway-client.ts`                                   | Gateway REST client (login, sessions, screen, keys)                      |
 | `src/approvals.ts`                                        | Write-approval gate (browser actions are always one-time)                |
-| `src/browser-runtime.ts` / `src/browser-proxy.ts`         | Isolated Browser Use MCP lifecycle and network enforcement               |
+| `src/browser-runtime.ts` / `src/browser-state.ts`         | Isolated Browser Use MCP lifecycle and bounded model-facing page state   |
+| `src/browser-proxy.ts` / `src/browser-security.ts`        | Single-resolution address pinning and public-network-only enforcement    |
+| `src/browser-performance-metrics.ts`                      | Privacy-safe aggregate browser performance health data                   |
 | `src/history.ts`                                          | JSONL history + terminal ownership metadata; latest-chat resolution      |
 | `src/azure.ts` / `src/config.ts` / `src/system-prompt.ts` | Azure client, env validation, operator persona                           |
 

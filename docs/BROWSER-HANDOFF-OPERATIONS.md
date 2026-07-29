@@ -53,8 +53,10 @@ must never be added to the public handoff protocol.
 
 ## Virtual Mouse Semantics
 
-The virtual cursor is intentionally local and contains no page or secret data.
-Its coordinates are the bounded browser coordinates sent by the frontend.
+The virtual cursor is an arrow rendered locally and contains no page or secret
+data. Its tip is the exact bounded browser coordinate sent by the frontend.
+Its color reflects connection/pressed/ACK state; the label remains the
+authoritative coordinate display.
 
 | Signal                     | Proven                                                                 | Not proven                                                                                                                       |
 | -------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -112,8 +114,14 @@ Run the checks in order. Do not jump from “the image did not visibly change”
 The interactive canvas should contain all of these markers:
 
 ```html
-aria-label="Interactive isolated browser" aria-disabled="false" class="...
-cursor-none ..." data-testid="virtual-mouse"
+<canvas
+  aria-label="Interactive isolated browser"
+  aria-disabled="false"
+  class="cursor-none ..."
+></canvas>
+<div data-testid="virtual-mouse">
+  <svg data-testid="virtual-mouse-arrow"></svg>
+</div>
 ```
 
 If `cursor-none`, `aria-disabled`, or the virtual-mouse sibling is absent, the

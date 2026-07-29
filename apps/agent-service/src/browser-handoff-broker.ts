@@ -617,7 +617,10 @@ export class BrowserHandoffBroker {
   private enqueueFrame(record: HandoffRecord, frame: Buffer): void {
     // CDP can outpace a slow client. Retain only the newest unsent frame so
     // latency and memory stay bounded while preserving the latest view.
-    if (record.pendingFrame) browserHandoffMetrics.frameDropped();
+    if (record.pendingFrame) {
+      browserHandoffMetrics.frameDropped();
+      browserHandoffMetrics.frameBytesDropped(record.pendingFrame.byteLength);
+    }
     record.pendingFrame = frame;
     this.flushFrame(record);
   }
@@ -659,6 +662,7 @@ export class BrowserHandoffBroker {
     record.pendingFrame = undefined;
     record.sendingFrameSocket = socket;
     record.lastFrameSentAt = Date.now();
+    browserHandoffMetrics.frameSent(frame.byteLength);
     socket.send(frame, { binary: true }, () => {
       if (record.sendingFrameSocket !== socket) return;
       record.sendingFrameSocket = undefined;

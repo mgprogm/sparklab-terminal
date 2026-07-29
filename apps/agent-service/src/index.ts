@@ -22,6 +22,7 @@ import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { deleteChat, listChats, openChat } from "./history.js";
 import { browserResources } from "./browser-resource-limiter.js";
 import { browserHandoffMetrics } from "./browser-handoff-transport.js";
+import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
 import { isAllowedWebSocketOrigin } from "./agent-security.js";
 
 const server = createServer((req, res) => {
@@ -33,6 +34,7 @@ const server = createServer((req, res) => {
         ready: true,
         service: "agent-service",
         browserResources: browserResources.snapshot(),
+        browserPerformance: browserPerformanceMetrics.snapshot(),
         browserHandoff: {
           configuredTransport: config.handoff.transport,
           mediaProviderAvailable: false,

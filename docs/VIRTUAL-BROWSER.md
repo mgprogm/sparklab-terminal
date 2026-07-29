@@ -50,6 +50,12 @@ pnpm dev
 Open `http://localhost:3002`, open Agent Chat, and ask it to visit a public HTTP(S) URL. Navigation and other state-changing browser actions require one-time approval. A successful action publishes a revisioned PNG or WebP snapshot; use **Back to terminal** to hide it and the globe control to reopen the latest view.
 
 The initial `about:blank` observation intentionally displays no screenshot. Private, loopback, link-local, reserved, credential-bearing, and non-HTTP(S) destinations are rejected.
+Public literal-IP URLs are supported (for example, a public service on a
+non-standard port). Browser Use's blanket IP-address block is intentionally
+disabled because `SafeBrowserProxy` is the authoritative boundary: it validates
+and pins the exact public address once for each HTTP request or CONNECT tunnel.
+Never disable or bypass that proxy when attaching Browser Use to the hosted
+Chromium instance.
 
 > **Validation status (2026-07-27):** Direct Browser Session Host diagnostics
 > passed public navigation, bounded screencast, mouse delivery, target focus,
@@ -61,7 +67,13 @@ The initial `about:blank` observation intentionally displays no screenshot. Priv
 ## Code Map and Invariants
 
 - `apps/agent-service/src/browser-runtime.ts` owns one lazy Browser Use MCP subprocess per agent loop, bounded MCP messages, snapshots, and cleanup.
+- `browser-state.ts` keeps model-facing page state valid and bounded to 48,000
+  characters while retaining as many indexed elements as fit.
 - `browser-proxy.ts` and `browser-security.ts` enforce public-network-only egress and DNS-rebinding protection.
+- `browser-performance-metrics.ts` records aggregate launch/readiness/call
+  timing, state/snapshot sizes, and handoff frame counts/bytes without labels,
+  URLs, input, tokens, coordinates, or image bodies. `/health` publishes these
+  values under `browserPerformance`.
 - `agent-loop.ts`, `tools.ts`, and `approvals.ts` expose the restricted tool surface, redact typed text, and prevent persistent browser approvals.
 - `packages/shared-types/src/agent.ts` defines bounded `browser_view` and `browser_closed` WebSocket frames.
 - `apps/terminal/src/features/browser-view/` owns ephemeral view state and the read-only overlay. Revision tombstones prevent stale frames from reopening a closed view.
@@ -94,3 +106,8 @@ proof that input was blocked. Check bundle version, connected state, virtual
 coordinates, per-kind ACK, known-target focus, and frame freshness in that
 order. Follow the complete decision table in
 [`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md).
+
+For a public literal-IP failure, test the hops separately: direct HTTP, the
+safe proxy, then BrowserRuntime. An approved action proves permission only. A
+post-action state that remains `about:blank` means navigation did not complete;
+it is not evidence that the public port is closed.

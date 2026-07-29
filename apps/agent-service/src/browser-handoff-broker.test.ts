@@ -12,6 +12,7 @@ const {
   ignoreScreencastAckFailure,
   interactiveViewportOverrideParams,
   mouseEventParams,
+  screencastAckDelay,
 } = await import("./browser-session-host.js");
 
 class FakeBrowser {
@@ -414,4 +415,11 @@ test("interactive capture viewport keeps JPEG pixels aligned with CDP input", ()
       mobile: false,
     },
   );
+});
+
+test("screencast acknowledgements pace capture at the transport frame rate", () => {
+  assert.equal(screencastAckDelay(1_000, 0), 0);
+  assert.equal(screencastAckDelay(1_050, 1_000), 50);
+  assert.equal(screencastAckDelay(1_100, 1_000), 0);
+  assert.equal(screencastAckDelay(1_150, 1_000), 0);
 });
