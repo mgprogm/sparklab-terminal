@@ -1,6 +1,6 @@
 # Bounded iteration ("revise-until-good") — A2 DESIGN REVIEW
 
-> **Status: FOR REVIEW — not approved to build.** This is the HEAVY checkpoint the
+> **Status: DESIGN SETTLED (4 Codex review rounds, §7-§10) — build R8 parser first, then A2.** This was the HEAVY checkpoint the
 > Arc II plan (`docs/AGENTIC-RICHER-WORKFLOWS-II-PLAN.md` §A2) mandates _before_
 > writing code. It asks for sign-off on the decisions in §2. Nothing is
 > implemented; `test:agentic` is at 381 (retry + router + eval + budget shipped).
@@ -423,3 +423,45 @@ over a same-tick `completed`; (3) extend the R8 parser to return `sessionId` (fr
 final result message, captured on success AND failure), stored on the node's
 `iterationInvocation`. **Net: the design is sound across 3 rounds; R8 lands first; then
 these three state-machine points are settled and A2 becomes an implementation spec.**
+
+---
+
+## 10. Codex review — round 4 (FINAL: design settled) — 2026-07-29
+
+**Final judgment: YES — after the R8 parser slice lands, the three questions are
+settled enough to write the A2 implementation spec.** All six original decisions +
+the eight resolutions are now GO / GO-with-conditions. Per item this round:
+
+- **F-R4 — GO.** The two persisted fields (`neverRanRecoveryCount` +
+  `neverRanPending`) replace the fragile `spawnAttempts - retryCount` arithmetic and
+  are restart-idempotent; retry/loop respawns never enter the never-ran branch so they
+  can't interfere.
+- **F-R7 — GO-WITH-CONDITION.** The `budgetHalt`-before-`completed` ordering beats the
+  single-node completed race and preserves B2 when `budgetHalt` is unset. **CONDITION:
+  the node's `done+loopExhausted` result AND `run.budgetHalt=true` must be ONE atomic
+  persisted mutation** (a single mutator) — else a crash between them can still yield
+  `completed`. Active-run polling finalizes after siblings drain, no kill/orphan.
+- **F-R5 — GO-WITH-CONDITION.** Session UUID is engine-controlled, so no stream-json
+  extraction. **CONDITION: an `exit.marker` proves the wrapper ended, NOT that claude
+  created a resumable session — so set `sessionEstablished=true` only after claude
+  exits 0; NEVER `--resume` after a nonzero-only attempt; a fresh retry rotates to and
+  persists a NEW UUID** (avoids both resume-of-nonexistent-session and
+  reuse-of-possibly-created-session ambiguity).
+
+**Both conditions are written here so they carry into the implementation spec.**
+
+### Build sequence (approved direction)
+
+1. **R8 — claude stream-json parser slice FIRST** (mandatory prerequisite; also
+   retroactively hardens shipped router + eval; needs a real stream-json fixture; parses
+   BRANCH/SCORE only — session id stays engine-controlled).
+2. **A2 implementation spec** folding in: D-Loop-1/2 (policy, while-only), F-R1
+   (display-only `loopExhausted`), F-R2 (`loopPending`), F-R3 (parse loop in
+   `recordTerminalDone`), F-R4 (two-part crash-recovery state), F-R5 (engine-controlled
+   session + exit-0 establishment + UUID rotation), F-R6 (codex fail-closed at
+   startRun), F-R7 (atomic `budgetHalt` intent + gate ordering).
+3. Build A2 with the same Codex-writes / Opus-controls loop + the load-bearing
+   restart/phase-crash tests §7 named.
+
+> **STATUS UPDATE:** design SETTLED after four review rounds. No longer "for review" —
+> awaiting the user's go to build R8 (then A2).
