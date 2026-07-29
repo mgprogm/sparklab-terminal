@@ -176,6 +176,7 @@ const SERVER_INFO = { name: "agentic-proxy", version: "1.0.0" };
 const POLL_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 170000;
 const RANK = { allow: 1, approval: 2, deny: 3 }; // higher = more restrictive
+const VALID_POLICIES = new Set(["allow", "approval", "deny"]);
 
 // ---- manifest ---------------------------------------------------------
 function loadManifest() {
@@ -217,16 +218,36 @@ class McpChildClient {
     this.buf = "";
     this.nextId = 1;
     this.pending = new Map();
+    // FIX 6: spawn with a MINIMAL env — only PATH/HOME (so `node` resolves) plus
+    // the explicit per-child overrides (KANBAN_API_TOKEN/PM_BASE_URL/…). Do NOT
+    // spread the proxy's full process.env: it carries the CLI's ANTHROPIC_API_KEY
+    // (and any other CLI secret), which kanban-mcp/pm-mcp have no need for and
+    // must not receive.
     this.proc = spawn(cmd, args, {
-      env: { ...process.env, ...env },
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // FIX 2: a child (kanban-mcp/pm-mcp) can die AFTER init. Without these, the
+    // next stdin write throws EPIPE as an UNCAUGHT exception and crashes the
+    // whole proxy — leaving the CLI blocked forever. Swallow stdin errors, and
+    // track `dead` so request() fails cleanly (isError tool result) instead of
+    // writing to a dead pipe.
+    this.dead = false;
+    this.proc.stdin.on("error", () => {}); // EPIPE etc. must never be uncaught
     this.proc.stdout.setEncoding("utf8");
     this.proc.stdout.on("data", (chunk) => this._onData(chunk));
     this.proc.stderr.on("data", (d) =>
       process.stderr.write(`[agentic-proxy:${label}] ${d}`),
     );
+    this.proc.on("error", (e) => {
+      // spawn failure or later process-level error — treat as dead.
+      this.dead = true;
+      const err = new Error(`${label} MCP child error: ${e.message}`);
+      for (const { reject } of this.pending.values()) reject(err);
+      this.pending.clear();
+    });
     this.proc.on("exit", (code) => {
+      this.dead = true;
       const err = new Error(`${label} MCP child exited (code ${code})`);
       for (const { reject } of this.pending.values()) reject(err);
       this.pending.clear();
@@ -256,6 +277,14 @@ class McpChildClient {
   }
 
   request(method, params) {
+    // FIX 2: if the child already died, fail fast with a clear rejection rather
+    // than writing to a closed pipe. forwardToChild's caller (callTool) wraps
+    // this in try/catch -> isError tool result, so the CLI gets a clean error
+    // and the proxy stays up.
+    if (this.dead)
+      return Promise.reject(
+        new Error(`${this.label} MCP child is not running`),
+      );
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -430,7 +459,12 @@ function buildToolsList() {
   const out = [];
   for (const [name, schema] of Object.entries(toolSchema)) {
     const resolved = toolPolicy[name];
-    if (!resolved || resolved.policy === "deny") continue; // never listed (layer 1)
+    // FIX 3 (fail-CLOSED): treat any policy not in {allow,approval,deny} as
+    // deny. CRUD validates the store, so an unknown value is only reachable via
+    // a corrupt/hand-edited manifest — it must never leak the tool into
+    // tools/list (fail-open). Only a genuine allow/approval tool is listed.
+    if (!resolved || !VALID_POLICIES.has(resolved.policy)) continue;
+    if (resolved.policy === "deny") continue; // never listed (layer 1)
     out.push({
       ...schema,
       annotations: {
@@ -455,7 +489,15 @@ async function callTool(name, args) {
   const targetType = toolTargetType[name] ?? resolved?.targetType ?? null;
   const preview = previewArgs(args);
 
-  if (!resolved || resolved.policy === "deny") {
+  // FIX 3 (fail-CLOSED): a policy that is not exactly one of
+  // allow/approval/deny (only reachable via a corrupt/hand-edited manifest) is
+  // treated as deny — never forwarded, logged as deny. Combined with the deny
+  // tier and the missing-policy default, this is the single fail-closed gate.
+  if (
+    !resolved ||
+    !VALID_POLICIES.has(resolved.policy) ||
+    resolved.policy === "deny"
+  ) {
     // Defense in depth (HARD CONSTRAINT #2): rejected even if called by name
     // directly, never forwarded, regardless of whether it was ever listed.
     logFireAndForget({

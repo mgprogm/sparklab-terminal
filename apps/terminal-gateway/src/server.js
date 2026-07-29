@@ -188,6 +188,21 @@ function isAuthenticated(req) {
   return validateAuthSession(cookies.gw_session);
 }
 
+// True only when the request is backed by a real HUMAN cookie session — NOT
+// when it was authorized solely by the scoped bearer token. This is the gate
+// behind the agentic approve/reject routes (self-approval defense): a claude
+// agent can read GATEWAY_API_TOKEN out of its own --mcp-config (its path is on
+// the CLI argv) and POST .../approve with that bearer to self-approve its own
+// approval-gated tool call — defeating the human gate. Approval is a
+// human-judgment-only action (AGENTIC-AI-CREATOR-PLAN D7), so the bearer must
+// never satisfy it. Open mode (loopback dev) has no auth boundary at all, so it
+// passes through — there is no bearer to distinguish there.
+function isHumanCookieSession(req) {
+  if (OPEN_MODE) return true;
+  const cookies = parseCookies(req);
+  return validateAuthSession(cookies.gw_session);
+}
+
 // Bearer-token auth scoped to the artifact APIs (/api/kanban/*, /api/pm/*).
 // Constant-time compare; only active when a token is configured. Requests from a
 // CLI carry no Origin header, so the CSRF guard is a no-op for them and the token
@@ -2446,6 +2461,29 @@ async function spawnNode(run, cfg, nodeId) {
     return; // running with no session/markers -> reap respawns (or fails at cap)
   }
 
+  // FIX 4 (kill/cancel race): the materialize steps above involve async I/O
+  // (slow over SSH); a concurrent killRun can flip the run terminal in that
+  // window. Re-read the run immediately BEFORE creating the tmux session and
+  // ABORT if it is no longer active — otherwise we'd spawn a live agent job for
+  // an already-cancelled run (an orphan a workspace-write agent could still use
+  // to mutate the workspace). Mark the already-recordSpawned node "skipped" so a
+  // terminal run's ledger stays consistent (its advanceRun breaks before reap,
+  // so a node left "running" would never respawn or fail). recordNodeResult is
+  // idempotent-safe against killRunningJobs also marking it.
+  const liveRun = agentic.getRun(run.id);
+  if (
+    liveRun &&
+    liveRun.status !== "running" &&
+    liveRun.status !== "queued" &&
+    liveRun.status !== "waiting-approval"
+  ) {
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "skipped",
+      finishedAt: Date.now(),
+    });
+    return;
+  }
+
   // (3)+(4) idempotent spawn: has-session guard, then detached new-session.
   try {
     if (await tmuxHasSession(server, sessionName)) return; // already alive
@@ -2473,6 +2511,18 @@ async function killRunningJobs(run) {
   const server = runServer(run);
   for (const ne of run.nodeExecutions || []) {
     if (ne.status !== "running" && ne.status !== "waiting-approval") continue;
+    // FIX 5: a node parked on an MCP tool-call approval carries a still-pending
+    // pendingToolCall. Marking the node "skipped" WITHOUT resolving it leaves an
+    // impossible shape (skipped node w/ pending ptc) and lets a post-cancel
+    // approve appear to succeed against a live pending record. Resolve it first
+    // — the store has no "cancelled" disposition, so "timed_out" is the correct
+    // terminal disposition for a cancel (it means "no human decision arrived").
+    // resolvePendingToolCall is idempotent and won't resurrect a terminal run
+    // (it only un-parks a node/run that is still waiting-approval).
+    const ptc = ne.pendingToolCall;
+    if (ne.status === "waiting-approval" && ptc && ptc.status === "pending") {
+      agentic.resolvePendingToolCall(run.id, ne.nodeId, ptc.id, "timed_out");
+    }
     if (server) await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
     agentic.recordNodeResult(run.id, ne.nodeId, {
       status: "skipped",
@@ -2827,8 +2877,24 @@ async function advanceRun(runId) {
         }
         // 4) spawn ready nodes (fan-out already capped by decide).
         if (decision.toSpawn.length) {
-          for (const nodeId of decision.toSpawn)
+          for (const nodeId of decision.toSpawn) {
+            // FIX 4 (kill/cancel race): a concurrent killRun can flip the run
+            // terminal BETWEEN fan-out iterations (spawnNode awaits slow ssh
+            // I/O). Re-read the live status each iteration and stop spawning if
+            // the run is no longer active, so we never materialize an orphan job
+            // for a cancelled run. spawnNode itself re-checks again just before
+            // the tmux new-session (belt-and-suspenders for the slow-materialize
+            // window inside a single iteration).
+            const cur = agentic.getRun(runId);
+            if (
+              !cur ||
+              (cur.status !== "running" &&
+                cur.status !== "queued" &&
+                cur.status !== "waiting-approval")
+            )
+              break;
             await spawnNode(run, cfg, nodeId);
+          }
           changed = true;
           continue;
         }
@@ -3274,6 +3340,14 @@ async function handleAgentic(req, res, url) {
       seg[2] === "nodes" &&
       seg[4] === "approve"
     ) {
+      // FIX 1 (self-approval defense): approval is human-only (D7). Reject a
+      // bearer-only caller BEFORE reading the body or touching the store — the
+      // agent must never approve its own gated tool call with the token it can
+      // read out of its own --mcp-config. The proxy never calls approve/reject
+      // (it only uses pending-tool-call), so this cannot break the proxy; the FE
+      // artifact carries the gw_session cookie through the Next proxy.
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "approval_requires_human" });
       const r = await readJsonObject(req);
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
       agentic.approveAction(seg[1], seg[3], { pendingId: r.body.pendingId });
@@ -3290,6 +3364,10 @@ async function handleAgentic(req, res, url) {
       seg[2] === "nodes" &&
       seg[4] === "reject"
     ) {
+      // FIX 1 (self-approval defense): reject is human-only too (D7). Same gate
+      // as approve — a bearer-only caller is rejected before touching the store.
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "approval_requires_human" });
       const r = await readJsonObject(req);
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
       agentic.rejectAction(seg[1], seg[3], {

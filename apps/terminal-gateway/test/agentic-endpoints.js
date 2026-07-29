@@ -1389,6 +1389,10 @@ async function main() {
               { tools: ["kanban_get_board"], policy: "allow" },
               { tools: ["kanban_delete_board"], policy: "deny" },
               { tools: ["kanban_add_card"], policy: "approval" },
+              // FIX 3: an INVALID policy string — only reachable via a corrupt /
+              // hand-edited manifest (CRUD validates), must fail CLOSED (deny),
+              // not fall through to approval/listed (fail-open).
+              { tools: ["kanban_update_card"], policy: "bogus" },
             ],
           },
         ],
@@ -1481,8 +1485,28 @@ async function main() {
       stillThere.status === 200,
       "deny-tier call was NOT forwarded — board still exists (defense in depth)",
     );
+    // FIX 3 (fail-CLOSED on unknown policy): the kanban_update_card tool has an
+    // invalid policy ("bogus") in the manifest. It must NOT appear in
+    // tools/list, and a direct call must be rejected (isError, never forwarded)
+    // — proving unknown resolves to deny, not the approval/allow fall-through.
+    assert(
+      !listed.includes("kanban_update_card"),
+      "FIX3: unknown-policy tool EXCLUDED from tools/list (fail-closed)",
+    );
+    const bogusR = await proxyA.call("tools/call", {
+      name: "kanban_update_card",
+      arguments: { board_id: boardId, card_id: "nope", title: "x" },
+    });
+    assert(
+      bogusR.isError === true,
+      "FIX3: unknown-policy tool call -> isError (treated as deny)",
+    );
+    assert(
+      /not permitted/i.test(textOf(bogusR)),
+      "FIX3: unknown-policy call rejected with the deny message",
+    );
     console.log(
-      `  ok: (iter3) proxy initialize + tools/list (deny excluded, allow/approval annotated) + allow forwards real board + DENY-BY-NAME rejected, board intact`,
+      `  ok: (iter3) proxy initialize + tools/list (deny excluded, allow/approval annotated) + allow forwards real board + DENY-BY-NAME rejected, board intact + FIX3 unknown-policy fails closed`,
     );
 
     // approval-tier: APPROVE path — the call blocks until the gateway approves.
@@ -1529,6 +1553,47 @@ async function main() {
     console.log(
       `  ok: (iter3) approval mediation — APPROVE completes the real forwarded call, REJECT -> isError`,
     );
+
+    // FIX 1 (self-approval defense): approve/reject are HUMAN-COOKIE-ONLY. A
+    // bearer-only caller (the token the agent can read out of its own
+    // --mcp-config) must be rejected 403 — even against any run/node path,
+    // needing no parked node. The human path (cookie, exercised above) still
+    // works. Proves the agent cannot self-approve its own gated tool call.
+    {
+      const ba = await req(
+        "POST",
+        `/api/agentic/runs/${enc(runId)}/nodes/n0/approve`,
+        {
+          body: {},
+          cookie: false,
+          headers: { authorization: `Bearer ${API_TOKEN}` },
+        },
+      );
+      assert(
+        ba.status === 403,
+        `FIX1: bearer-only approve -> ${ba.status} (exp 403)`,
+      );
+      assert(
+        /approval_requires_human/.test((await ba.json()).error || ""),
+        "FIX1: bearer approve 403 names approval_requires_human",
+      );
+      const br = await req(
+        "POST",
+        `/api/agentic/runs/${enc(runId)}/nodes/n0/reject`,
+        {
+          body: { reason: "x" },
+          cookie: false,
+          headers: { authorization: `Bearer ${API_TOKEN}` },
+        },
+      );
+      assert(
+        br.status === 403,
+        `FIX1: bearer-only reject -> ${br.status} (exp 403)`,
+      );
+      console.log(
+        `  ok: (iter3/FIX1) bearer-only approve/reject rejected 403 (self-approval defense); human cookie path works`,
+      );
+    }
 
     await proxyA.close();
     assert(
@@ -1598,6 +1663,41 @@ async function main() {
       `  ok: (iter3) run.toolCallLog recorded allow/deny/approved/rejected/timed_out (${finalRun.toolCallLog.length} entries)`,
     );
 
+    // FIX 5 (cancel resolves a pending approval): park n0 on a FRESH pending
+    // tool-call (via the proxy's bearer pending-tool-call route — no live proxy
+    // needed), then cancel the run. killRun -> killRunningJobs must resolve that
+    // pending ptc (disposition timed_out — the store has no "cancelled") BEFORE
+    // marking the node skipped, so the cancelled run never leaves the impossible
+    // shape (skipped node w/ status:"pending" ptc) and a post-cancel approve
+    // can't appear to succeed against a live pending record.
+    {
+      const park = await req(
+        "POST",
+        `/api/agentic/runs/${enc(runId)}/nodes/n0/pending-tool-call`,
+        {
+          body: {
+            toolName: "kanban_add_card",
+            connectionId: "conn-k",
+            argsPreview: "{}",
+          },
+          cookie: false,
+          headers: { authorization: `Bearer ${API_TOKEN}` },
+        },
+      );
+      assert(
+        park.status === 201,
+        `FIX5: park pending-tool-call -> ${park.status} (exp 201)`,
+      );
+      const parked = await (
+        await req("GET", `/api/agentic/runs/${enc(runId)}`)
+      ).json();
+      assert(
+        nodeOf(parked, "n0").status === "waiting-approval" &&
+          nodeOf(parked, "n0").pendingToolCall.status === "pending",
+        "FIX5: n0 parked (waiting-approval, ptc pending) before cancel",
+      );
+    }
+
     // Tear down the borrow-run — it MUST reach a terminal state, else block (d)'s
     // boot-rediscovery sees an active run against AGENT_MAX_CONCURRENT_RUNS=1 and
     // run A trips 429 instead of 202 (killRun treats waiting-approval as active).
@@ -1613,6 +1713,19 @@ async function main() {
       gone.status === "cancelled",
       `iter3 borrow-run cancelled (got ${gone.status})`,
     );
+    // FIX 5: the previously-parked n0 is now a CONSISTENT terminal shape —
+    // skipped, and its pending ptc resolved to timed_out (NOT left "pending").
+    {
+      const n0 = nodeOf(gone, "n0");
+      assert(
+        n0.status === "skipped",
+        `FIX5: cancelled-run n0 skipped (got ${n0.status})`,
+      );
+      assert(
+        n0.pendingToolCall && n0.pendingToolCall.status === "timed_out",
+        `FIX5: cancelled-run n0 ptc resolved timed_out (got ${n0.pendingToolCall && n0.pendingToolCall.status})`,
+      );
+    }
     const dsess = await req("DELETE", `/api/sessions/${enc(iter3Session)}`, {
       origin: ALLOWED_ORIGIN,
     });
