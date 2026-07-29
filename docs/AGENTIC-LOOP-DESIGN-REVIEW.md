@@ -330,3 +330,56 @@ invocation context + fail-closed codex. The budget-gate bypass and the claude
 stream-json parsing question must be resolved before build. Opus will fold these into
 the implementation spec once you confirm the D-Loop-3 direction (display-only vs. real
 edge semantics) — the one remaining true fork.
+
+---
+
+## 8. Codex review — round 2 (Opus's resolutions re-reviewed, 2026-07-29)
+
+Opus put the §7 resolutions (R1–R8) back to Codex. **Verdict: still NO-GO — direction
+sound, but three resolutions have restart-safety errors that must be corrected first,
+and R8 is a delivery dependency.** Per-resolution: R1 GO-w/-conditions · R2
+GO-w/-conditions · **R3 GO** · **R4 NO-GO** · **R5 NO-GO** · **R6 GO** · **R7 NO-GO** ·
+R8 GO-w/-conditions (but a ship blocker). Opus concurs with every point.
+
+### The three corrections A2 must adopt before it can become a spec
+
+- **R4 — `neverRanCount` alone is NOT restart-idempotent.** If reap persists
+  `neverRanCount=1` then the gateway dies BEFORE the recovery respawn, reboot observes
+  the same no-session+no-markers state, increments to 2, and fails — **consuming the
+  one allowed recovery purely because of a restart** (the exact window the cap exists to
+  survive). **Fix: pair it with a durable `neverRanPending` phase flag (cleared by
+  `recordSpawned`)** so a reboot mid-recovery resumes the respawn without re-counting —
+  same phase-flag discipline as `retryPending`/`loopPending`. This is the single most
+  important defect. (So: EVERY respawn reason — crash-recovery, retry, loop — needs a
+  `*Pending` phase flag; the counter alone is never enough.)
+- **R5 — the per-iteration invocation record contradicts itself.** Iteration 1 is
+  `mode:"fresh"` (no session yet); a retry of it must therefore stay `fresh`, but the
+  resolution said retries "resume." **Fix: specify that `mode` flips `fresh→resume` only
+  once a `providerSessionId` has actually been captured from a completed claude run;
+  define retry behavior for a failure BEFORE the session exists; and `spawnNode` must
+  stop minting a fresh UUID unconditionally and instead reconstruct the same iteration's
+  prompt/session.**
+- **R7 — "let the budget gate halt it next cycle" does NOT work.** After reap records the
+  loop node `done(+loopExhausted)`, `advanceRun` runs `decide()` and hits
+  `terminal:"completed"` **before** `budgetExhausted()` (the gate sits after
+  completed/failed). A terminal/leaf loop would therefore **complete instead of
+  budget_exhausted**. **Fix: the loop-stops-on-budget path must EXPLICITLY set the run
+  `budget_exhausted` itself** (not rely on the next-cycle gate).
+
+### Delivery dependency
+
+- **R8 — the claude stream-json parser is a ship/acceptance BLOCKER, not just parallel
+  work.** Real claude runs `--output-format stream-json`; `parseResult()` only matches
+  standalone plaintext `BRANCH:` lines (proven only against the plaintext test stub).
+  Without a real parser, **production loops never see `done` and always exhaust** — and
+  the same gap already undermines shipped router + eval with real claude. Must be fixed
+  as part of (or before) A2, with a real stream-json fixture test.
+
+### Where this leaves A2
+
+Design direction confirmed sound across two review rounds; the reducer stays untouched.
+Remaining before an implementation spec: fold in R4 (`neverRanPending`), R5 (fresh→resume
+state machine), R7 (explicit budget transition), and treat R8 (stream-json parse) as a
+gating dependency. Recommended sequencing: **do R8 first** — it de-risks A2 AND
+retroactively fixes router/eval against real claude — then build A2 with the three
+corrections.
