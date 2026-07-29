@@ -70,3 +70,19 @@ Design/review trail: `AGENTIC-AI-CREATOR-PLAN.md`, `AGENTIC-RICHER-WORKFLOWS-PLA
 During the B1 build, a SEPARATE workstream was modifying `apps/agent-service/browser-*`
 and `apps/terminal/src/features/browser-handoff/*` (an interactive-browser / handoff
 feature). Those are NOT part of the agentic-creator work and were left untouched/uncommitted.
+
+## UI coverage audit (2026-07-29)
+
+Audited `public/agentic/app.html` against every shipped backend feature. **Coverage is
+complete** after one fix:
+
+- Catalog/app: name, description, orchestrationMode, **objectiveTemplate** (added
+  `6bf55b4` — was the only gap), budget, export/import/clone, schedules.
+- Agents: runtimeProvider, sandboxMode, systemPrompt, role, model, toolPolicies.
+- Connections: targetType/scope/targetId.
+- Workflow builder: node types agent-task / human-approval / router / "Add evaluation"
+  preset; edges plain / `on:success|failure` / `when:label`+default; retry sub-form;
+  loop sub-form.
+- Run view: status (incl. `budget_exhausted`), turns, error, `chosenEdges` (Branch),
+  `score` (SCORE), `iterationCount`, `lastVerdict`, `loopExhausted`, logTail,
+  pendingToolCall approval banner, spawns N/M, guidance, kill, human-approval gate.
