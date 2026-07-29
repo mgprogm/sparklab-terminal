@@ -458,6 +458,11 @@
     flex: 0 0 auto;
   }
 
+  .workflow-edge-label {
+    flex: 0 1 120px;
+    min-width: 90px;
+  }
+
   .check-row {
     display: flex;
     align-items: flex-start;
@@ -735,6 +740,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .node-card-skipped {
+    background: var(--canvas);
+    color: var(--mute);
+    opacity: 0.7;
   }
 
   .node-head {
@@ -2110,15 +2121,20 @@
     var sourceEdges = workflow && Array.isArray(workflow.edges) ? workflow.edges : [];
     state.teamWorkflowDraft = {
       nodes: sourceNodes.map(function (node) {
-        var type = node.type === "human-approval" ? "human-approval" : "agent-task";
+        var type =
+          node.type === "human-approval"
+            ? "human-approval"
+            : node.type === "router"
+              ? "router"
+              : "agent-task";
         var draftNode = {
           id: String(node.id || ""),
           type: type,
         };
-        if (type === "agent-task") {
+        if (type === "agent-task" || type === "router") {
           draftNode.agentId = String(node.agentId || "");
-          // Retry policy is per-agent-task. Seed from stored values; absent =>
-          // maxAttempts 1 (no retry), backoff 0 — matches the backend default.
+          // Retry policy is per agent-running node. Seed from stored values;
+          // absent => maxAttempts 1 (no retry), backoff 0 — the backend default.
           var rp = node.retryPolicy || {};
           draftNode.retryMaxAttempts =
             rp.maxAttempts != null ? Number(rp.maxAttempts) : 1;
@@ -2128,7 +2144,13 @@
         return draftNode;
       }),
       edges: sourceEdges.map(function (edge) {
-        return { from: String(edge.from || ""), to: String(edge.to || "") };
+        var draftEdge = {
+          from: String(edge.from || ""),
+          to: String(edge.to || ""),
+        };
+        if (edge.on) draftEdge.on = String(edge.on);
+        if (edge.when) draftEdge.when = String(edge.when);
+        return draftEdge;
       }),
       entryNodeId:
         workflow && workflow.entryNodeId != null
@@ -2179,10 +2201,23 @@
       var humanApprovalOption = elem("option", null, "Human approval");
       humanApprovalOption.value = "human-approval";
       typeSelect.appendChild(humanApprovalOption);
+      var routerOption = elem("option", null, "Router");
+      routerOption.value = "router";
+      typeSelect.appendChild(routerOption);
       typeSelect.value = node.type;
       typeSelect.addEventListener("change", function () {
         node.type = typeSelect.value;
         if (node.type === "human-approval") delete node.agentId;
+        var outgoing = draft.edges.filter(function (edge) {
+          return edge.from === node.id;
+        });
+        outgoing.forEach(function (edge) {
+          delete edge.on;
+          delete edge.when;
+        });
+        if (node.type === "router" && outgoing.length > 0) {
+          outgoing[0].when = "default";
+        }
         renderWorkflowBuilder();
       });
       row.appendChild(typeSelect);
@@ -2215,9 +2250,9 @@
       });
       row.appendChild(agentSelect);
 
-      // Retry sub-form (agent-task only). maxAttempts is the TOTAL attempts incl.
-      // the first (1 = no retry); backoff is the fixed wait between attempts (ms).
-      if (node.type === "agent-task") {
+      // Retry sub-form (agent-running nodes only). maxAttempts is the TOTAL
+      // attempts incl. the first (1 = no retry); backoff is the fixed wait (ms).
+      if (node.type === "agent-task" || node.type === "router") {
         if (node.retryMaxAttempts == null) node.retryMaxAttempts = 1;
         if (node.retryBackoffMs == null) node.retryBackoffMs = 0;
 
@@ -2294,6 +2329,25 @@
       toSelect.value = edge.to;
       fromSelect.addEventListener("change", function () {
         edge.from = fromSelect.value;
+        delete edge.on;
+        delete edge.when;
+        var source = draft.nodes.filter(function (node) {
+          return node.id === edge.from;
+        })[0];
+        if (
+          source &&
+          source.type === "router" &&
+          !draft.edges.some(function (other) {
+            return (
+              other !== edge &&
+              other.from === edge.from &&
+              other.when === "default"
+            );
+          })
+        ) {
+          edge.when = "default";
+        }
+        renderWorkflowBuilder();
       });
       toSelect.addEventListener("change", function () {
         edge.to = toSelect.value;
@@ -2301,6 +2355,52 @@
       row.appendChild(fromSelect);
       row.appendChild(elem("span", "workflow-arrow", "→"));
       row.appendChild(toSelect);
+
+      var sourceNode = draft.nodes.filter(function (node) {
+        return node.id === edge.from;
+      })[0];
+      if (sourceNode && sourceNode.type === "router") {
+        var whenInput = elem("input", "field workflow-edge-label");
+        whenInput.type = "text";
+        whenInput.placeholder = "when label";
+        whenInput.value = edge.when || "";
+        whenInput.title =
+          'Router edges require unique labels, including exactly one "default".';
+        whenInput.setAttribute(
+          "aria-label",
+          "When label for edge " + edge.from + " to " + edge.to,
+        );
+        whenInput.addEventListener("input", function () {
+          edge.when = whenInput.value;
+          delete edge.on;
+        });
+        row.appendChild(whenInput);
+        row.appendChild(elem("span", "lib-sub", 'one must be "default"'));
+      } else if (sourceNode && sourceNode.type === "agent-task") {
+        var onSelect = elem("select", "field workflow-edge-label");
+        onSelect.setAttribute(
+          "aria-label",
+          "Outcome for edge " + edge.from + " to " + edge.to,
+        );
+        var plainOption = elem("option", null, "Any success");
+        plainOption.value = "";
+        onSelect.appendChild(plainOption);
+        var successOption = elem("option", null, "success");
+        successOption.value = "success";
+        onSelect.appendChild(successOption);
+        var failureOption = elem("option", null, "failure");
+        failureOption.value = "failure";
+        onSelect.appendChild(failureOption);
+        onSelect.value = edge.on || "";
+        onSelect.title =
+          "Keep all outgoing edges either unlabeled or outcome-labeled.";
+        onSelect.addEventListener("change", function () {
+          edge.on = onSelect.value;
+          delete edge.when;
+        });
+        row.appendChild(onSelect);
+        row.appendChild(elem("span", "lib-sub", "all outcomes or all blank"));
+      }
 
       var remove = elem("button", "icon-btn", "Remove");
       remove.type = "button";
@@ -2327,9 +2427,14 @@
     var draft = state.teamWorkflowDraft;
     if (!draft) return;
     var nodes = draft.nodes.map(function (node) {
-      var type = node.type === "human-approval" ? "human-approval" : "agent-task";
+      var type =
+        node.type === "human-approval"
+          ? "human-approval"
+          : node.type === "router"
+            ? "router"
+            : "agent-task";
       var savedNode = { id: node.id, type: type };
-      if (type === "agent-task") {
+      if (type === "agent-task" || type === "router") {
         savedNode.agentId = node.agentId;
         // Only emit a retryPolicy when it departs from the default (1 attempt,
         // no backoff) — an absent policy is the backend's "single attempt".
@@ -2347,16 +2452,21 @@
     });
     if (
       nodes.some(function (node) {
-        return node.type === "agent-task" && !node.agentId;
+        return (
+          (node.type === "agent-task" || node.type === "router") &&
+          !node.agentId
+        );
       })
     ) {
-      showBanner("Every agent-task workflow node needs a team agent.");
+      showBanner(
+        "Every agent-task and router workflow node needs a team agent.",
+      );
       return;
     }
     var agentIds = [];
     nodes.forEach(function (node) {
       if (
-        node.type === "agent-task" &&
+        (node.type === "agent-task" || node.type === "router") &&
         agentIds.indexOf(node.agentId) === -1
       ) {
         agentIds.push(node.agentId);
@@ -2367,7 +2477,22 @@
       workflow: {
         nodes: nodes,
         edges: draft.edges.map(function (edge) {
-          return { from: edge.from, to: edge.to };
+          var savedEdge = { from: edge.from, to: edge.to };
+          var sourceNode = nodes.filter(function (node) {
+            return node.id === edge.from;
+          })[0];
+          if (sourceNode && sourceNode.type === "agent-task" && edge.on) {
+            savedEdge.on = edge.on;
+          }
+          if (
+            sourceNode &&
+            sourceNode.type === "router" &&
+            edge.when &&
+            edge.when.trim()
+          ) {
+            savedEdge.when = edge.when.trim();
+          }
+          return savedEdge;
         }),
         entryNodeId: draft.entryNodeId || null,
       },
@@ -2947,7 +3072,11 @@
   }
 
   function renderNode(ne) {
-    var card = elem("div", "node-card");
+    var st = ne.status || "pending";
+    var card = elem(
+      "div",
+      "node-card" + (st === "skipped" ? " node-card-skipped" : ""),
+    );
 
     var head = elem("div", "node-head");
     var label = ne.nodeId || "step";
@@ -2961,12 +3090,23 @@
       head.appendChild(elem("span", "node-turn", "Turn " + ne.turns));
     }
 
-    var st = ne.status || "pending";
     if (st === "failed" && ne.error) {
       head.appendChild(elem("span", "node-error", ne.error));
     }
     head.appendChild(elem("span", "badge badge-" + st, st));
     card.appendChild(head);
+
+    if (Array.isArray(ne.chosenEdges)) {
+      card.appendChild(
+        elem(
+          "div",
+          "run-meta",
+          ne.chosenEdges.length > 0
+            ? "Branch: " + ne.chosenEdges.join(", ")
+            : "Branch: none",
+        ),
+      );
+    }
 
     // Iter3: a node parked on an MCP tool-call approval carries a persisted
     // pendingToolCall. Gate on BOTH the node status AND the record's own status
@@ -3368,7 +3508,16 @@
   el.workflowAddEdge.addEventListener("click", function () {
     var draft = state.teamWorkflowDraft;
     if (!draft || draft.nodes.length < 2) return;
-    draft.edges.push({ from: draft.nodes[0].id, to: draft.nodes[1].id });
+    var edge = { from: draft.nodes[0].id, to: draft.nodes[1].id };
+    if (
+      draft.nodes[0].type === "router" &&
+      !draft.edges.some(function (other) {
+        return other.from === edge.from && other.when === "default";
+      })
+    ) {
+      edge.when = "default";
+    }
+    draft.edges.push(edge);
     renderWorkflowBuilder();
   });
   el.workflowEntry.addEventListener("change", function () {

@@ -230,16 +230,14 @@ function resolveWorkflow(raw) {
     if (nodeIds.has(id))
       throw err("invalid_workflow", `duplicate node id: ${id}`, { node: id });
     nodeIds.add(id);
-    // WorkflowNode.type is closed to the executable task and human gate types.
-    // Reject any other type at the store boundary so a "router"/etc node can
-    // never reach the run engine.
+    // WorkflowNode.type is closed to executable tasks, routers, and human gates.
     const type = n.type ? String(n.type) : "agent-task";
-    if (type !== "agent-task" && type !== "human-approval")
+    if (type !== "agent-task" && type !== "human-approval" && type !== "router")
       throw err("invalid_workflow", `unsupported node type: ${type}`, {
         node: id,
       });
     let retryPolicy;
-    if (type === "agent-task" && n.retryPolicy != null) {
+    if ((type === "agent-task" || type === "router") && n.retryPolicy != null) {
       if (
         !n.retryPolicy ||
         typeof n.retryPolicy !== "object" ||
@@ -279,7 +277,7 @@ function resolveWorkflow(raw) {
     cleanNodes.push({
       id,
       type,
-      ...(type === "agent-task" && n.agentId != null
+      ...((type === "agent-task" || type === "router") && n.agentId != null
         ? { agentId: String(n.agentId) }
         : {}),
       ...(retryPolicy ? { retryPolicy } : {}),
@@ -288,7 +286,9 @@ function resolveWorkflow(raw) {
 
   const cleanEdges = [];
   const adj = new Map();
+  const outEdges = new Map();
   for (const id of nodeIds) adj.set(id, []);
+  for (const id of nodeIds) outEdges.set(id, []);
   for (const e of edges) {
     if (!e || typeof e !== "object")
       throw err("invalid_workflow", "each edge must be an object");
@@ -298,8 +298,86 @@ function resolveWorkflow(raw) {
       throw err("invalid_workflow", `edge references unknown node`, {
         edge: { from, to },
       });
-    cleanEdges.push({ from, to });
+    const on = e.on == null || e.on === "" ? null : String(e.on);
+    const when = e.when == null || e.when === "" ? null : String(e.when);
+    if (on != null && when != null)
+      throw err("invalid_workflow", "edge may set only one of on or when", {
+        edge: { from, to },
+      });
+    if (on != null && on !== "success" && on !== "failure")
+      throw err("invalid_workflow", "edge.on must be success|failure", {
+        edge: { from, to },
+      });
+    if (when != null && !when.length)
+      throw err("invalid_workflow", "edge.when must be non-empty", {
+        edge: { from, to },
+      });
+    const cleanEdge = {
+      from,
+      to,
+      ...(on != null ? { on } : {}),
+      ...(when != null ? { when } : {}),
+    };
+    cleanEdges.push(cleanEdge);
+    outEdges.get(from).push(cleanEdge);
     adj.get(from).push(to);
+  }
+
+  const nodesById = new Map(cleanNodes.map((n) => [n.id, n]));
+  for (const [nodeId, outs] of outEdges) {
+    const node = nodesById.get(nodeId);
+    if (node.type === "router" && outs.length === 0)
+      throw err("invalid_workflow", "router must have outgoing branches", {
+        node: nodeId,
+      });
+    if (outs.length === 0) continue;
+
+    const kinds = new Set(
+      outs.map((e) =>
+        e.on != null ? "on" : e.when != null ? "when" : "plain",
+      ),
+    );
+    if (kinds.size !== 1)
+      throw err("invalid_workflow", "node out-edges must use one label kind", {
+        node: nodeId,
+      });
+    const kind = kinds.values().next().value;
+    if (node.type === "router" && kind !== "when")
+      throw err("invalid_workflow", "router out-edges must use when labels", {
+        node: nodeId,
+      });
+    if (node.type !== "router" && kind === "when")
+      throw err("invalid_workflow", "when edges require a router", {
+        node: nodeId,
+      });
+    if (kind === "on") {
+      if (node.type !== "agent-task")
+        throw err("invalid_workflow", "on edges require an agent-task", {
+          node: nodeId,
+        });
+      const labels = new Set();
+      for (const edge of outs) {
+        if (labels.has(edge.on))
+          throw err("invalid_workflow", `duplicate on label: ${edge.on}`, {
+            edge: { from: edge.from, to: edge.to },
+          });
+        labels.add(edge.on);
+      }
+    }
+    if (kind === "when") {
+      const labels = new Set();
+      for (const edge of outs) {
+        if (labels.has(edge.when))
+          throw err("invalid_workflow", `duplicate when label: ${edge.when}`, {
+            edge: { from: edge.from, to: edge.to },
+          });
+        labels.add(edge.when);
+      }
+      if (!labels.has("default"))
+        throw err("invalid_workflow", "router requires a default branch", {
+          node: nodeId,
+        });
+    }
   }
 
   if (entryNodeId != null && !nodeIds.has(entryNodeId))
@@ -370,7 +448,12 @@ function shapeWorkflow(wf) {
       ...(n.agentId != null ? { agentId: n.agentId } : {}),
       ...(n.retryPolicy != null ? { retryPolicy: { ...n.retryPolicy } } : {}),
     })),
-    edges: (w.edges || []).map((e) => ({ from: e.from, to: e.to })),
+    edges: (w.edges || []).map((e) => ({
+      from: e.from,
+      to: e.to,
+      ...(e.on != null ? { on: e.on } : {}),
+      ...(e.when != null ? { when: e.when } : {}),
+    })),
     entryNodeId: w.entryNodeId ?? null,
   };
 }
@@ -416,6 +499,7 @@ function shapeNodeExecution(ne) {
     ...(ne.parentNodeId != null ? { parentNodeId: ne.parentNodeId } : {}),
     ...(ne.startedAt != null ? { startedAt: ne.startedAt } : {}),
     ...(ne.finishedAt != null ? { finishedAt: ne.finishedAt } : {}),
+    ...(ne.chosenEdges != null ? { chosenEdges: [...ne.chosenEdges] } : {}),
     // pendingToolCall IS persisted (iter3) — the current/last MCP tool-call
     // approval record for this node, or absent if none has ever been posted.
     ...(ne.pendingToolCall != null
@@ -931,7 +1015,11 @@ function gateApprovalNode(runId, nodeId) {
 }
 
 // Record a node's TERMINAL result (done|failed|skipped) + finishedAt. Persists.
-function recordNodeResult(runId, nodeId, { status, finishedAt, error } = {}) {
+function recordNodeResult(
+  runId,
+  nodeId,
+  { status, finishedAt, error, chosenEdges } = {},
+) {
   if (!NODE_TERMINAL.has(status))
     throw err("bad_request", "node status must be done|failed|skipped");
   const run = findRun(runId);
@@ -939,6 +1027,7 @@ function recordNodeResult(runId, nodeId, { status, finishedAt, error } = {}) {
   ne.status = status;
   ne.finishedAt = finishedAt != null ? Number(finishedAt) : now();
   if (typeof error === "string") ne.error = error.slice(0, 500);
+  if (chosenEdges !== undefined) ne.chosenEdges = [...chosenEdges];
   persist();
   return shapeRun(run);
 }
@@ -967,58 +1056,85 @@ function setRunStatus(runId, status, { finishedAt } = {}) {
   return shapeRun(run);
 }
 
-// PURE reducer (no I/O). Given the current ledger + frozen config, returns:
-//   { toSpawn: [nodeId,…]  pending nodes whose EVERY in-edge predecessor is done,
-//     running: [nodeId,…]  nodes currently running (caller reaps via tmux/markers),
-//     terminal: null | "completed" | "failed" }
-// Rules (walk the frozen resolvedConfig.workflow DAG):
-//   - ready  ⇔ status:"pending" AND every predecessor (in-edge `from`) is done.
-//              Entry / no-predecessor nodes are ready immediately — this uniformly
-//              covers single, sequential, supervisor, and parallel.
-//   - terminal:"failed"    ⇔ ANY node is failed (fail-fast).
-//   - terminal:"completed" ⇔ every node is done|skipped.
-//   - fan-out cap: at most AGENT_MAX_PARALLEL_FANOUT toSpawn ids MINUS the count
-//     already running, so a wide parallel group spawns in waves.
-// Recomputed fresh on every call — the ledger is the ONLY source of truth, so a
-// gateway crash mid-advance is harmless (the next call re-derives from disk).
+// PURE reducer (no I/O). Recomputed from the persisted ledger + frozen workflow
+// on every call, including router chosenEdges, so restart recovery is complete.
 function decide(run, resolvedConfig) {
   const nodeExecs = (run && run.nodeExecutions) || [];
   const byId = new Map(nodeExecs.map((ne) => [ne.nodeId, ne]));
   const workflow = (resolvedConfig && resolvedConfig.workflow) || {};
+  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
   const edges = Array.isArray(workflow.edges) ? workflow.edges : [];
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
 
-  const preds = new Map();
-  for (const ne of nodeExecs) preds.set(ne.nodeId, []);
+  const ins = new Map();
+  const outs = new Map();
+  for (const ne of nodeExecs) ins.set(ne.nodeId, []);
+  for (const node of nodes) outs.set(node.id, []);
   for (const e of edges) {
-    if (preds.has(e.to)) preds.get(e.to).push(e.from);
+    if (ins.has(e.to)) ins.get(e.to).push(e);
+    if (outs.has(e.from)) outs.get(e.from).push(e);
   }
 
   const running = nodeExecs
     .filter((ne) => ne.status === "running")
     .map((ne) => ne.nodeId);
 
-  // Fail-fast: any failed node terminates the whole run (the driver kills any
-  // still-running siblings before flipping the run to failed).
-  if (nodeExecs.some((ne) => ne.status === "failed"))
-    return { toSpawn: [], running, terminal: "failed" };
+  // A failure branch handles its source's final failure; all other failures
+  // remain fail-fast, including failed routers and failed plain nodes.
+  const unhandledFailure = nodeExecs.some(
+    (ne) =>
+      ne.status === "failed" &&
+      !(outs.get(ne.nodeId) || []).some((edge) => edge.on === "failure"),
+  );
+  if (unhandledFailure)
+    return { toSpawn: [], toSkip: [], running, terminal: "failed" };
 
-  // Completed: every node terminal-and-not-failed (done|skipped). Empty ledger
-  // is trivially complete.
-  if (nodeExecs.every((ne) => ne.status === "done" || ne.status === "skipped"))
-    return { toSpawn: [], running, terminal: "completed" };
+  if (nodeExecs.every((ne) => NODE_TERMINAL.has(ne.status)))
+    return { toSpawn: [], toSkip: [], running, terminal: "completed" };
+
+  const takenEdges = new Set();
+  for (const edge of edges) {
+    const source = byId.get(edge.from);
+    if (!source || !NODE_TERMINAL.has(source.status)) continue;
+    const sourceNode = nodesById.get(edge.from);
+    let taken;
+    if (sourceNode && sourceNode.type === "router") {
+      taken = (source.chosenEdges || []).includes(`${edge.from}->${edge.to}`);
+    } else if (edge.on === "success") {
+      taken = source.status === "done";
+    } else if (edge.on === "failure") {
+      taken = source.status === "failed";
+    } else {
+      taken = edge.when == null && source.status === "done";
+    }
+    if (taken) takenEdges.add(`${edge.from}->${edge.to}`);
+  }
 
   const ready = [];
+  const toSkip = [];
   for (const ne of nodeExecs) {
     if (ne.status !== "pending") continue;
-    const ps = preds.get(ne.nodeId) || [];
-    const ok = ps.every((pid) => {
-      const p = byId.get(pid);
-      return p && p.status === "done";
+    const incoming = ins.get(ne.nodeId) || [];
+    if (incoming.length === 0) {
+      ready.push(ne.nodeId);
+      continue;
+    }
+    const sourcesTerminal = incoming.every((edge) => {
+      const source = byId.get(edge.from);
+      return source && NODE_TERMINAL.has(source.status);
     });
-    if (ok) ready.push(ne.nodeId);
+    if (!sourcesTerminal) continue;
+    if (incoming.some((edge) => takenEdges.has(`${edge.from}->${edge.to}`)))
+      ready.push(ne.nodeId);
+    else toSkip.push(ne.nodeId);
   }
   const budget = Math.max(0, AGENT_MAX_PARALLEL_FANOUT - running.length);
-  return { toSpawn: ready.slice(0, budget), running, terminal: null };
+  return {
+    toSpawn: ready.slice(0, budget),
+    toSkip,
+    running,
+    terminal: null,
+  };
 }
 
 // ---------------------------------------------------------------------------

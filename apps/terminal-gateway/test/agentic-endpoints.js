@@ -96,6 +96,11 @@ if [ -n "$failfile" ]; then
     echo "stub-fail-attempt-$n" >&2; exit 7
   fi
 fi
+# Router branch sentinel: BRANCH=<label> in the objective makes the stub emit a
+# "BRANCH: <label>" line that provider.parseResult() reads to pick the router's
+# when-edge. Label charset is restricted so the sed capture is safe.
+brlabel="$(printf '%s' "$prompt" | sed -n 's/.*BRANCH=\\([A-Za-z0-9_-][A-Za-z0-9_-]*\\).*/\\1/p' | head -n1)"
+if [ -n "$brlabel" ]; then echo "BRANCH: $brlabel"; fi
 echo "STUB-DONE-OK"
 exit 0
 `;
@@ -872,25 +877,29 @@ async function main() {
     );
   }
 
-  // ---- Closed WorkflowNode.type — non "agent-task" rejected (422) -------
+  // ---- Closed WorkflowNode.type — allowlist is agent-task|human-approval|router;
+  // anything else rejected (422). (router/human-approval are now valid; a
+  // genuinely-unknown type still fails closed.) -------
   {
     const bad = await req("POST", "/api/agentic/apps", {
       body: {
-        name: "RouterNode",
+        name: "EvaluatorNode",
         workflow: {
-          nodes: [{ id: "n1", type: "router", agentId: agent.id }],
+          nodes: [{ id: "n1", type: "evaluator", agentId: agent.id }],
           edges: [],
           entryNodeId: "n1",
         },
       },
       origin: ALLOWED_ORIGIN,
     });
-    assert(bad.status === 422, `router node type -> ${bad.status} (exp 422)`);
+    assert(bad.status === 422, `unknown node type -> ${bad.status} (exp 422)`);
     assert(
       /unsupported node type/i.test((await bad.json()).error),
       "422 names the unsupported node type",
     );
-    console.log(`  ok: WorkflowNode.type closed to agent-task (router -> 422)`);
+    console.log(
+      `  ok: WorkflowNode.type allowlist (agent-task|human-approval|router); unknown -> 422`,
+    );
   }
 
   // ---- GET /mcp-servers -> pm + kanban ----------------------------------
@@ -2333,6 +2342,450 @@ async function main() {
       tmuxKill(sess);
       console.log(
         `  ok: (iter10) retry — LOAD-BEARING crash in retry-spawn window recovers (crash cap excludes retry respawns)`,
+      );
+    }
+  }
+
+  // ====================================================================
+  // ITERATION 11 — ROUTER / CONDITION (richer workflows §2, D-Route-1..3)
+  // ====================================================================
+  // decide()'s edge semantics gain labeled branches: an agent-task's terminal
+  // status routes on:success/on:failure edges, and a `router` node routes to a
+  // when:"<label>" edge picked from its structured output (a `BRANCH:` line).
+  // Untaken branches are transitively skipped. All against the STUB CLI (which
+  // emits `BRANCH: <label>` for a `BRANCH=<label>` objective sentinel).
+  {
+    const readCtr = (f) => {
+      try {
+        return Number(fs.readFileSync(f, "utf8").trim()) || 0;
+      } catch {
+        return 0;
+      }
+    };
+    let rseq = 0;
+    const rAgent = async (sandboxMode) => {
+      const res = await req("POST", "/api/agentic/agents", {
+        body: {
+          name: `router-agent-${Date.now()}-${rseq++}`,
+          runtimeProvider: "codex-cli",
+          sandboxMode,
+          systemPrompt: "",
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(res.status === 201, `router agent create -> ${res.status}`);
+      return (await res.json()).id;
+    };
+    // Returns the raw response so validation tests can assert 422.
+    const rApp = (nodes, edges, entryNodeId, agentIds) =>
+      req("POST", "/api/agentic/apps", {
+        body: {
+          name: `router-app-${Date.now()}-${rseq++}`,
+          orchestrationMode: "custom",
+          agentIds,
+          workflow: { nodes, edges, entryNodeId },
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+    const startRunOn = async (appId, objective) => {
+      const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: { sessionId: targetSessionId, objective },
+        origin: ALLOWED_ORIGIN,
+      });
+      return rres;
+    };
+
+    // (1) Router by structured output → matched branch runs; the OTHER branch is
+    // a CHAIN (dead1→dead2) so the TRANSITIVE skip closure is exercised; the join
+    // stays live on its one taken in-edge.
+    {
+      const ag = await rAgent("read-only");
+      const nodes = [
+        { id: "r0", type: "router", agentId: ag },
+        { id: "live0", type: "agent-task", agentId: ag },
+        { id: "dead1", type: "agent-task", agentId: ag },
+        { id: "dead2", type: "agent-task", agentId: ag },
+        { id: "j", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "r0", to: "live0", when: "go" },
+        { from: "r0", to: "dead1", when: "default" },
+        { from: "live0", to: "j" },
+        { from: "dead1", to: "dead2" },
+        { from: "dead2", to: "j" },
+      ];
+      const appRes = await rApp(nodes, edges, "r0", [ag]);
+      assert(appRes.status === 201, `router(1): create -> ${appRes.status}`);
+      const rres = await startRunOn((await appRes.json()).id, "pick BRANCH=go");
+      assert(rres.status === 202, `router(1): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "router-structured" },
+      );
+      const st = (id) => nodeOf(done, id).status;
+      assert(
+        done.status === "completed",
+        `router(1): completed (${done.status})`,
+      );
+      assert(
+        st("r0") === "done" && st("live0") === "done" && st("j") === "done",
+        "router(1): router + live branch + join all done",
+      );
+      assert(
+        st("dead1") === "skipped" && st("dead2") === "skipped",
+        "router(1): dead branch CHAIN transitively skipped (closure)",
+      );
+      const r0e = nodeOf(done, "r0").chosenEdges;
+      assert(
+        Array.isArray(r0e) && r0e.includes("r0->live0"),
+        `router(1): chosenEdges r0->live0 (got ${JSON.stringify(r0e)})`,
+      );
+      console.log(
+        `  ok: (iter11) router by structured output — matched branch runs, dead CHAIN transitively skipped, join lives`,
+      );
+    }
+
+    // (2a) on:failure edge → the failed node routes to the fixer WITHOUT
+    // fail-fast; the success branch is skipped. (FAILUNTIL=1: only the first
+    // invocation — n0 — fails; the fixer, running second, succeeds.)
+    {
+      const ag = await rAgent("read-only");
+      const counter = path.join(tmpDir, `route-fail-${Date.now()}`);
+      const nodes = [
+        { id: "n0", type: "agent-task", agentId: ag },
+        { id: "fixer", type: "agent-task", agentId: ag },
+        { id: "reviewer", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "n0", to: "fixer", on: "failure" },
+        { from: "n0", to: "reviewer", on: "success" },
+      ];
+      const appRes = await rApp(nodes, edges, "n0", [ag]);
+      assert(appRes.status === 201, `router(2a): create -> ${appRes.status}`);
+      const rres = await startRunOn(
+        (await appRes.json()).id,
+        `try FAILUNTIL=1 FAILFILE=${counter}`,
+      );
+      assert(rres.status === 202, `router(2a): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "route-failure" },
+      );
+      const st = (id) => nodeOf(done, id).status;
+      assert(
+        done.status === "completed",
+        `router(2a): handled failure does NOT fail-fast (got ${done.status})`,
+      );
+      assert(
+        st("n0") === "failed" &&
+          st("fixer") === "done" &&
+          st("reviewer") === "skipped",
+        "router(2a): failure→fixer, success branch skipped",
+      );
+      console.log(
+        `  ok: (iter11) on:failure — failed node routes to fixer w/o fail-fast, success branch skipped`,
+      );
+    }
+
+    // (2b) on:success edge → success routes to reviewer; failure branch skipped.
+    {
+      const ag = await rAgent("read-only");
+      const nodes = [
+        { id: "n0", type: "agent-task", agentId: ag },
+        { id: "fixer", type: "agent-task", agentId: ag },
+        { id: "reviewer", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "n0", to: "fixer", on: "failure" },
+        { from: "n0", to: "reviewer", on: "success" },
+      ];
+      const appRes = await rApp(nodes, edges, "n0", [ag]);
+      assert(appRes.status === 201, `router(2b): create -> ${appRes.status}`);
+      const rres = await startRunOn((await appRes.json()).id, "all good");
+      assert(rres.status === 202, `router(2b): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "route-success" },
+      );
+      const st = (id) => nodeOf(done, id).status;
+      assert(
+        done.status === "completed" &&
+          st("n0") === "done" &&
+          st("reviewer") === "done" &&
+          st("fixer") === "skipped",
+        `router(2b): success→reviewer, failure branch skipped (${done.status})`,
+      );
+      console.log(
+        `  ok: (iter11) on:success — success routes to reviewer, failure branch skipped`,
+      );
+    }
+
+    // (3) Validation at save (422): router without default; mixed labeled+plain
+    // on one node; `on` off a router.
+    {
+      const ag = await rAgent("read-only");
+      const noDefault = await rApp(
+        [
+          { id: "r0", type: "router", agentId: ag },
+          { id: "x", type: "agent-task", agentId: ag },
+          { id: "y", type: "agent-task", agentId: ag },
+        ],
+        [
+          { from: "r0", to: "x", when: "a" },
+          { from: "r0", to: "y", when: "b" },
+        ],
+        "r0",
+        [ag],
+      );
+      assert(
+        noDefault.status === 422,
+        `router(3): router w/o default -> ${noDefault.status} (exp 422)`,
+      );
+      const mixed = await rApp(
+        [
+          { id: "n0", type: "agent-task", agentId: ag },
+          { id: "a", type: "agent-task", agentId: ag },
+          { id: "b", type: "agent-task", agentId: ag },
+        ],
+        [
+          { from: "n0", to: "a", on: "success" },
+          { from: "n0", to: "b" },
+        ],
+        "n0",
+        [ag],
+      );
+      assert(
+        mixed.status === 422,
+        `router(3): mixed labeled+plain -> ${mixed.status} (exp 422)`,
+      );
+      const onRouter = await rApp(
+        [
+          { id: "r0", type: "router", agentId: ag },
+          { id: "a", type: "agent-task", agentId: ag },
+          { id: "b", type: "agent-task", agentId: ag },
+        ],
+        [
+          { from: "r0", to: "a", on: "success" },
+          { from: "r0", to: "b", on: "failure" },
+        ],
+        "r0",
+        [ag],
+      );
+      assert(
+        onRouter.status === 422,
+        `router(3): on off a router -> ${onRouter.status} (exp 422)`,
+      );
+      console.log(
+        `  ok: (iter11) validation — no-default / mixed-labels / on-off-router all 422`,
+      );
+    }
+
+    // (4) D-Route-3 — workspace-write is ALLOWED behind a router (mutually
+    // exclusive), still 422 behind a PLAIN fan-out (concurrent writers).
+    {
+      const wag = await rAgent("workspace-write");
+      const rApp1 = await rApp(
+        [
+          { id: "r0", type: "router", agentId: wag },
+          { id: "a", type: "agent-task", agentId: wag },
+          { id: "b", type: "agent-task", agentId: wag },
+        ],
+        [
+          { from: "r0", to: "a", when: "go" },
+          { from: "r0", to: "b", when: "default" },
+        ],
+        "r0",
+        [wag],
+      );
+      assert(
+        rApp1.status === 201,
+        `router(4): ws router app -> ${rApp1.status}`,
+      );
+      const run1 = await startRunOn((await rApp1.json()).id, "go BRANCH=go");
+      assert(
+        run1.status === 202,
+        `router(4): workspace-write behind ROUTER allowed -> ${run1.status} (exp 202)`,
+      );
+      await req("DELETE", `/api/agentic/runs/${enc((await run1.json()).id)}`, {
+        origin: ALLOWED_ORIGIN,
+      });
+      const rApp2 = await rApp(
+        [
+          { id: "n0", type: "agent-task", agentId: wag },
+          { id: "a", type: "agent-task", agentId: wag },
+          { id: "b", type: "agent-task", agentId: wag },
+        ],
+        [
+          { from: "n0", to: "a" },
+          { from: "n0", to: "b" },
+        ],
+        "n0",
+        [wag],
+      );
+      assert(
+        rApp2.status === 201,
+        `router(4): ws fanout app -> ${rApp2.status}`,
+      );
+      const run2 = await startRunOn((await rApp2.json()).id, "x");
+      assert(
+        run2.status === 422,
+        `router(4): workspace-write behind PLAIN fan-out still 422 -> ${run2.status}`,
+      );
+      console.log(
+        `  ok: (iter11) D-Route-3 — workspace-write allowed behind router, still 422 behind plain fan-out`,
+      );
+    }
+
+    // (6a) retry × routing — an on:failure node with a retryPolicy retries to
+    // EXHAUSTION, then routes to the fixer (FAILUNTIL=2: n0's 2 attempts fail,
+    // the fixer — the 3rd invocation — succeeds).
+    {
+      const ag = await rAgent("read-only");
+      const counter = path.join(tmpDir, `route-retry-${Date.now()}`);
+      const nodes = [
+        {
+          id: "n0",
+          type: "agent-task",
+          agentId: ag,
+          retryPolicy: { maxAttempts: 2, backoffMs: 0 },
+        },
+        { id: "fixer", type: "agent-task", agentId: ag },
+        { id: "reviewer", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "n0", to: "fixer", on: "failure" },
+        { from: "n0", to: "reviewer", on: "success" },
+      ];
+      const appRes = await rApp(nodes, edges, "n0", [ag]);
+      assert(appRes.status === 201, `router(6a): create -> ${appRes.status}`);
+      const rres = await startRunOn(
+        (await appRes.json()).id,
+        `retry-then-route FAILUNTIL=2 FAILFILE=${counter}`,
+      );
+      assert(rres.status === 202, `router(6a): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "retry-route" },
+      );
+      const st = (id) => nodeOf(done, id).status;
+      assert(
+        done.status === "completed" &&
+          st("n0") === "failed" &&
+          st("fixer") === "done" &&
+          st("reviewer") === "skipped",
+        `router(6a): retry exhausts THEN routes to fixer (${done.status})`,
+      );
+      assert(
+        readCtr(counter) === 3,
+        `router(6a): 2 n0 attempts + 1 fixer = 3 invocations (got ${readCtr(counter)})`,
+      );
+      console.log(
+        `  ok: (iter11) retry×routing — on:failure node retries to exhaustion THEN routes to fixer`,
+      );
+    }
+
+    // (6b) retry × routing — a failing ROUTER retries, then fail-fasts (its
+    // `default` is a label-mismatch fallback, NOT a process-failure fallback).
+    {
+      const ag = await rAgent("read-only");
+      const counter = path.join(tmpDir, `route-rfail-${Date.now()}`);
+      const nodes = [
+        {
+          id: "r0",
+          type: "router",
+          agentId: ag,
+          retryPolicy: { maxAttempts: 2, backoffMs: 0 },
+        },
+        { id: "a", type: "agent-task", agentId: ag },
+        { id: "b", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "r0", to: "a", when: "go" },
+        { from: "r0", to: "b", when: "default" },
+      ];
+      const appRes = await rApp(nodes, edges, "r0", [ag]);
+      assert(appRes.status === 201, `router(6b): create -> ${appRes.status}`);
+      const rres = await startRunOn(
+        (await appRes.json()).id,
+        `router-fail FAILUNTIL=99 FAILFILE=${counter}`,
+      );
+      assert(rres.status === 202, `router(6b): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "router-failfast" },
+      );
+      assert(
+        done.status === "failed",
+        `router(6b): failing router fail-fasts after retries (${done.status})`,
+      );
+      assert(
+        readCtr(counter) === 2,
+        `router(6b): 2 attempts, default NOT taken (got ${readCtr(counter)})`,
+      );
+      console.log(
+        `  ok: (iter11) retry×routing — a failing router retries then fail-fasts (default is not a failure fallback)`,
+      );
+    }
+
+    // (5) LOAD-BEARING (D3-layer-2): restart AFTER the router decided but around
+    // the successor spawn — boot must re-derive the branch from the PERSISTED
+    // chosenEdges (no in-memory routing state). SLEEP=3 opens the window to
+    // SIGKILL just after the router finishes. Placed LAST so it leaves a live,
+    // logged-in gateway for the load-bearing test that follows.
+    {
+      const ag = await rAgent("read-only");
+      const nodes = [
+        { id: "r0", type: "router", agentId: ag },
+        { id: "a", type: "agent-task", agentId: ag },
+        { id: "b", type: "agent-task", agentId: ag },
+      ];
+      const edges = [
+        { from: "r0", to: "a", when: "go" },
+        { from: "r0", to: "b", when: "default" },
+      ];
+      const appRes = await rApp(nodes, edges, "r0", [ag]);
+      assert(appRes.status === 201, `router(5): create -> ${appRes.status}`);
+      const rres = await startRunOn(
+        (await appRes.json()).id,
+        "decide BRANCH=go SLEEP=3",
+      );
+      assert(rres.status === 202, `router(5): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      // Wait for the router to DECIDE (done + chosenEdges persisted).
+      await pollRun(
+        runId,
+        (r) => nodeOf(r, "r0") && nodeOf(r, "r0").status === "done",
+        { deadlineMs: 20000, label: "router-decided" },
+      );
+      await stopServer("SIGKILL");
+      await startServer();
+      await login();
+      const done = await pollRun(
+        runId,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 40000, label: "router-restart" },
+      );
+      const st = (id) => nodeOf(done, id).status;
+      assert(
+        done.status === "completed",
+        `router(5): completed after restart (${done.status})`,
+      );
+      const r0e = nodeOf(done, "r0").chosenEdges;
+      assert(
+        Array.isArray(r0e) && r0e.includes("r0->a"),
+        `router(5): chosenEdges survived restart (got ${JSON.stringify(r0e)})`,
+      );
+      assert(
+        st("r0") === "done" && st("a") === "done" && st("b") === "skipped",
+        "router(5): correct branch resumed post-restart, default skipped",
+      );
+      console.log(
+        `  ok: (iter11) LOAD-BEARING — restart after router decided: boot re-derives chosenEdges, correct branch resumes, default skipped`,
       );
     }
   }

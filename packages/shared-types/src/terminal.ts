@@ -1199,8 +1199,8 @@ export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
 /** One workflow node. DAG-shaped from day one so future node types are additive. */
 export const WorkflowNodeSchema = z.object({
   id: z.string().min(1).max(128),
-  type: z.enum(["agent-task", "human-approval"]),
-  /** The Agent that executes this node (for type = "agent-task"). */
+  type: z.enum(["agent-task", "human-approval", "router"]),
+  /** The Agent that executes this node (for type = "agent-task" or "router"). */
   agentId: z.string().optional(),
   /** Ignored for human-approval nodes. */
   retryPolicy: RetryPolicySchema.optional(),
@@ -1211,6 +1211,8 @@ export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
 export const WorkflowEdgeSchema = z.object({
   from: z.string(),
   to: z.string(),
+  on: z.enum(["success", "failure"]).optional(),
+  when: z.string().min(1).optional(),
 });
 export type WorkflowEdge = z.infer<typeof WorkflowEdgeSchema>;
 
@@ -1303,6 +1305,8 @@ export const NodeExecutionSchema = z.object({
   parentNodeId: z.string().nullable().optional(),
   startedAt: z.number().nullable().optional(),
   finishedAt: z.number().nullable().optional(),
+  /** Router-selected edge keys (`from->to`), persisted for restart safety. */
+  chosenEdges: z.array(z.string()).optional(),
   /** The node's current/last MCP tool-call approval record, if any (D5, iter3). */
   pendingToolCall: PendingToolCallSchema.nullable().optional(),
   /** Derived on GET (tailed step log); never persisted. */

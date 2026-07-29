@@ -2902,7 +2902,9 @@ async function killAllRunSessions(run) {
 
 function retryPolicyForNode(cfg, nodeId) {
   const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
-  return node?.type === "agent-task"
+  // agent-task AND router may carry a retryPolicy (resolveWorkflow allows both);
+  // a router that keeps exiting nonzero retries, then fail-fasts on exhaustion.
+  return node?.type === "agent-task" || node?.type === "router"
     ? node.retryPolicy || {
         maxAttempts: 1,
         backoffMs: 0,
@@ -2957,6 +2959,30 @@ async function retryOrFailNode(run, cfg, nodeId) {
   await spawnNode(liveRun, cfg, nodeId);
 }
 
+async function recordTerminalDone(run, cfg, nodeId) {
+  const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
+  if (node?.type === "router") {
+    const logTail = await agenticNodeLogTail(run, nodeId);
+    const { branch } = agentRuntime.parseResult(logTail, 0);
+    const outs = (cfg.workflow.edges || []).filter(
+      (edge) => edge.from === nodeId,
+    );
+    const match =
+      outs.find((edge) => edge.when === branch) ||
+      outs.find((edge) => edge.when === "default");
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "done",
+      finishedAt: Date.now(),
+      chosenEdges: [`${match.from}->${match.to}`],
+    });
+  } else {
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "done",
+      finishedAt: Date.now(),
+    });
+  }
+}
+
 // Reap the reap table (§D) for every currently-running node. Reads
 // {hasSession, exit.marker, start.marker} on the run's server. Returns true if
 // any node changed (so advanceRun re-reads the ledger). This is where
@@ -3001,11 +3027,7 @@ async function reapRunningNodes(run, cfg) {
       // Session lingering but exit.marker already written (rare) — treat as done.
       await tmuxKill(server, sessionName);
       const code = parseInt(String(exitVal).trim(), 10);
-      if (code === 0)
-        agentic.recordNodeResult(run.id, nodeId, {
-          status: "done",
-          finishedAt: Date.now(),
-        });
+      if (code === 0) await recordTerminalDone(run, cfg, nodeId);
       else await retryOrFailNode(run, cfg, nodeId);
       changed = true;
       continue;
@@ -3015,11 +3037,7 @@ async function reapRunningNodes(run, cfg) {
     if (exitVal != null) {
       // Finished (possibly during downtime): exit.marker is the verdict.
       const code = parseInt(String(exitVal).trim(), 10);
-      if (code === 0)
-        agentic.recordNodeResult(run.id, nodeId, {
-          status: "done",
-          finishedAt: Date.now(),
-        });
+      if (code === 0) await recordTerminalDone(run, cfg, nodeId);
       else await retryOrFailNode(run, cfg, nodeId);
       changed = true;
       continue;
@@ -3196,14 +3214,18 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
   }
   if (app.orchestrationMode === "custom") {
     const inDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
-    const outDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+    const plainInDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+    const plainOutDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
     for (const edge of workflow.edges) {
-      outDegree.set(edge.from, (outDegree.get(edge.from) || 0) + 1);
       inDegree.set(edge.to, (inDegree.get(edge.to) || 0) + 1);
+      if (!edge.on && !edge.when) {
+        plainOutDegree.set(edge.from, (plainOutDegree.get(edge.from) || 0) + 1);
+        plainInDegree.set(edge.to, (plainInDegree.get(edge.to) || 0) + 1);
+      }
     }
     const isBranching =
-      [...outDegree.values()].some((degree) => degree > 1) ||
-      [...inDegree.values()].some((degree) => degree > 1) ||
+      [...plainOutDegree.values()].some((degree) => degree > 1) ||
+      [...plainInDegree.values()].some((degree) => degree > 1) ||
       [...inDegree.values()].filter((degree) => degree === 0).length > 1;
     if (isBranching) {
       for (const n of workflow.nodes) {
@@ -3326,6 +3348,16 @@ async function advanceRun(runId) {
         maybeNotifyMaxAge(run);
         // 3) decide from the fresh ledger.
         const decision = agentic.decide(run, cfg);
+        if (decision.toSkip.length) {
+          for (const nodeId of decision.toSkip) {
+            agentic.recordNodeResult(runId, nodeId, {
+              status: "skipped",
+              finishedAt: Date.now(),
+            });
+          }
+          changed = true;
+          continue;
+        }
         if (decision.terminal === "failed") {
           await killRunningJobs(run); // fail-fast: no orphan jobs
           agentic.setRunStatus(runId, "failed", { finishedAt: Date.now() });

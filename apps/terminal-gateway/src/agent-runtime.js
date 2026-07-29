@@ -644,14 +644,20 @@ const PROVIDERS = {
 
 /**
  * Map a finished node's exit code → a terminal nodeExecution status. iter2 does
- * NOT parse stream-json semantically: exit 0 → done, non-zero → failed. logTail
- * is display-only (accepted for the D6 interface; unused for the verdict).
- * @param {string} _logTail
+ * NOT parse stream-json semantically: exit 0 → done, non-zero → failed. Router
+ * branch labels are read from the last plain-text `BRANCH: <label>` line.
+ * @param {string} logTail
  * @param {number|null} exitCode
- * @returns {{status:"done"|"failed"}}
+ * @returns {{status:"done"|"failed", branch:string|null}}
  */
-function parseResult(_logTail, exitCode) {
-  return { status: Number(exitCode) === 0 ? "done" : "failed" };
+function parseResult(logTail, exitCode) {
+  let branch = null;
+  for (const match of String(logTail || "").matchAll(
+    /^\s*BRANCH:\s*(\S+)\s*$/gim,
+  )) {
+    branch = match[1];
+  }
+  return { status: Number(exitCode) === 0 ? "done" : "failed", branch };
 }
 
 export default {
