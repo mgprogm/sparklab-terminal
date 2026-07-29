@@ -1257,6 +1257,24 @@
         </div>
       </div>
       <div>
+        <div class="section-label">Objective template</div>
+        <textarea
+          id="team-objective-template"
+          class="field"
+          rows="3"
+          placeholder="Optional. Prepended to every run's objective for this Agentic AI."
+        ></textarea>
+        <div class="hint">
+          A reusable preamble prepended to each run's objective. Changing it alters
+          the scheduled-run fingerprint (a schedule must be re-saved).
+        </div>
+        <div class="row-end" style="margin-top: 8px">
+          <button id="team-objective-save" class="btn" type="button">
+            Save template
+          </button>
+        </div>
+      </div>
+      <div>
         <div class="section-label">Budget</div>
         <div class="picker-row">
           <div style="flex: 1 1 0; min-width: 0">
@@ -1595,6 +1613,8 @@
       "team-budget-max-wall-clock",
     ),
     teamBudgetSave: document.getElementById("team-budget-save"),
+    teamObjectiveTemplate: document.getElementById("team-objective-template"),
+    teamObjectiveSave: document.getElementById("team-objective-save"),
     scheduleEvery: document.getElementById("schedule-every"),
     scheduleTarget: document.getElementById("schedule-target"),
     scheduleInterval: document.getElementById("schedule-interval"),
@@ -3036,6 +3056,7 @@
       budget.maxSpawns != null ? String(budget.maxSpawns) : "";
     el.teamBudgetMaxWallClock.value =
       budget.maxWallClockMs != null ? String(budget.maxWallClockMs) : "";
+    el.teamObjectiveTemplate.value = app.objectiveTemplate || "";
     renderTeamSchedules();
 
     // parallel + a workspace-write agent is rejected at run start (server §9).
@@ -3196,6 +3217,10 @@
     }
 
     patchTeam({ budget: Object.keys(budget).length > 0 ? budget : null });
+  }
+
+  function saveTeamObjectiveTemplate() {
+    patchTeam({ objectiveTemplate: el.teamObjectiveTemplate.value });
   }
 
   // PATCH the app definition (last-writer-wins, no expectedRev — mirrors
@@ -4041,6 +4066,7 @@
     patchTeam({ orchestrationMode: el.teamMode.value });
   });
   el.teamBudgetSave.addEventListener("click", saveTeamBudget);
+  el.teamObjectiveSave.addEventListener("click", saveTeamObjectiveTemplate);
   el.scheduleEvery.addEventListener("change", renderScheduleFields);
   el.scheduleCreate.addEventListener("click", createSchedule);
   el.teamAddBtn.addEventListener("click", function () {
