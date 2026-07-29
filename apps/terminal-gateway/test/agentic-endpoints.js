@@ -82,6 +82,20 @@ if [ -n "$secs" ]; then sleep "$secs"; fi
 case "$prompt" in
   *__FAIL__*) echo "stub-failure-boom" >&2; exit 7 ;;
 esac
+# Persistent fail-counter for retry tests. FAILFILE=<abs-path> names an on-disk
+# counter incremented on EVERY invocation (so it survives retries and gateway
+# restarts); while the post-increment count is <= FAILUNTIL=<n>, the attempt
+# fails (exit 7), else it succeeds. The final counter value == the number of
+# real provider invocations, which the test asserts (retryCount is off-wire).
+failfile="$(printf '%s' "$prompt" | sed -n 's/.*FAILFILE=\\([^ ]*\\).*/\\1/p' | head -n1)"
+failuntil="$(printf '%s' "$prompt" | sed -n 's/.*FAILUNTIL=\\([0-9][0-9]*\\).*/\\1/p' | head -n1)"
+if [ -n "$failfile" ]; then
+  n=0; [ -f "$failfile" ] && n="$(cat "$failfile" 2>/dev/null || echo 0)"
+  n=$((n+1)); printf '%s' "$n" > "$failfile"
+  if [ -n "$failuntil" ] && [ "$n" -le "$failuntil" ]; then
+    echo "stub-fail-attempt-$n" >&2; exit 7
+  fi
+fi
 echo "STUB-DONE-OK"
 exit 0
 `;
@@ -2054,6 +2068,214 @@ async function main() {
     console.log(`  ok: (iter9) human-approval gate — reject fails the run`);
   }
 
+  // ---- (iter10) per-node retry policy --------------------------------
+  // A ran-and-failed agent-task is respawned up to retryPolicy.maxAttempts
+  // times (total, incl. the first); the on-disk FAILFILE counter is the ground
+  // truth for how many provider invocations actually happened, since retryCount
+  // is deliberately off-wire. Uses custom single-node workflows so the node can
+  // carry a retryPolicy.
+  {
+    const readCounter = (f) => {
+      try {
+        return Number(fs.readFileSync(f, "utf8").trim()) || 0;
+      } catch {
+        return 0;
+      }
+    };
+    const retryAgent = (
+      await (
+        await req("POST", "/api/agentic/agents", {
+          body: {
+            name: `retry-agent-${Date.now()}`,
+            runtimeProvider: "codex-cli",
+            sandboxMode: "read-only",
+            systemPrompt: "",
+          },
+          origin: ALLOWED_ORIGIN,
+        })
+      ).json()
+    ).id;
+    // Create a custom single-node app whose n0 carries `retryPolicy` (or none).
+    const mkRetryApp = async (retryPolicy) => {
+      const node = { id: "n0", type: "agent-task", agentId: retryAgent };
+      if (retryPolicy) node.retryPolicy = retryPolicy;
+      const res = await req("POST", "/api/agentic/apps", {
+        body: {
+          name: `retry-app-${Date.now()}`,
+          orchestrationMode: "custom",
+          agentIds: [retryAgent],
+          workflow: { nodes: [node], edges: [], entryNodeId: "n0" },
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(res.status === 201, `retry: create app -> ${res.status}`);
+      const id = (await res.json()).id;
+      if (retryPolicy) {
+        // The wire shape MUST carry retryPolicy back (the FE repopulates its
+        // retry sub-form from GET; the run engine reads it off the shaped app).
+        const got = await (
+          await req("GET", `/api/agentic/apps/${enc(id)}`)
+        ).json();
+        const rp = (got.workflow.nodes[0] || {}).retryPolicy;
+        assert(
+          rp &&
+            rp.maxAttempts === retryPolicy.maxAttempts &&
+            rp.backoffMs === retryPolicy.backoffMs &&
+            rp.retryOn === "failure",
+          `retry: GET app carries retryPolicy on node (got ${JSON.stringify(rp)})`,
+        );
+      }
+      return id;
+    };
+
+    // (1) Fail the first 2 attempts, succeed on the 3rd (maxAttempts=3).
+    {
+      const counter = path.join(tmpDir, `retry-succeed-${Date.now()}`);
+      const appId = await mkRetryApp({ maxAttempts: 3, backoffMs: 0 });
+      const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: {
+          sessionId: targetSessionId,
+          objective: `retry me FAILUNTIL=2 FAILFILE=${counter}`,
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(rres.status === 202, `retry(1): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "retry-succeed-on-3rd" },
+      );
+      assert(
+        done.status === "completed" && nodeOf(done, "n0").status === "done",
+        `retry(1): run completed after retries (got ${done.status})`,
+      );
+      assert(
+        readCounter(counter) === 3,
+        `retry(1): exactly 3 provider invocations (got ${readCounter(counter)})`,
+      );
+      console.log(
+        `  ok: (iter10) retry — fail 2, succeed on 3rd attempt (maxAttempts=3)`,
+      );
+    }
+
+    // (2) Always fail; run fails after EXACTLY maxAttempts attempts (no more).
+    {
+      const counter = path.join(tmpDir, `retry-exhaust-${Date.now()}`);
+      const appId = await mkRetryApp({ maxAttempts: 2, backoffMs: 0 });
+      const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: {
+          sessionId: targetSessionId,
+          objective: `always FAILUNTIL=99 FAILFILE=${counter}`,
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(rres.status === 202, `retry(2): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "retry-exhaust" },
+      );
+      assert(
+        done.status === "failed" && nodeOf(done, "n0").status === "failed",
+        `retry(2): run failed after exhausting retries (got ${done.status})`,
+      );
+      // Settle briefly, then assert the counter never exceeds maxAttempts (no
+      // spurious extra attempt after the run is already failed).
+      await sleep(1000);
+      assert(
+        readCounter(counter) === 2,
+        `retry(2): exactly maxAttempts (2) attempts, no more (got ${readCounter(counter)})`,
+      );
+      console.log(
+        `  ok: (iter10) retry — always-fail exhausts after exactly maxAttempts=2`,
+      );
+    }
+
+    // (3) retryPolicy ABSENT => a single attempt (regression guard).
+    {
+      const counter = path.join(tmpDir, `retry-none-${Date.now()}`);
+      const appId = await mkRetryApp(null);
+      const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: {
+          sessionId: targetSessionId,
+          objective: `no policy FAILUNTIL=99 FAILFILE=${counter}`,
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(rres.status === 202, `retry(3): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 20000, label: "retry-absent" },
+      );
+      await sleep(800);
+      assert(
+        done.status === "failed" && readCounter(counter) === 1,
+        `retry(3): absent policy => single attempt (status ${done.status}, count ${readCounter(counter)})`,
+      );
+      console.log(
+        `  ok: (iter10) retry — absent policy is exactly one attempt`,
+      );
+    }
+
+    // (4) LOAD-BEARING: crash mid-retry, boot rediscovery finishes it. A large
+    // backoff opens a window: attempt 1 fails, the driver commits the retry and
+    // sleeps the backoff; we SIGKILL before attempt 2 spawns. On reboot the reap
+    // path (never-ran w/ retryPending, or the exit.marker verdict) respawns it,
+    // attempt 2 succeeds. Either way the fresh gateway must reach completion
+    // WITHOUT double-counting the retry (final counter == 2).
+    {
+      const counter = path.join(tmpDir, `retry-restart-${Date.now()}`);
+      const appId = await mkRetryApp({ maxAttempts: 2, backoffMs: 3000 });
+      const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: {
+          sessionId: targetSessionId,
+          objective: `crash mid retry FAILUNTIL=1 FAILFILE=${counter}`,
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(rres.status === 202, `retry(4): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      // Wait for attempt 1 to have run and failed (counter hits 1); the node is
+      // now either in-backoff (retryPending) or about to be reaped. Attempt 2
+      // cannot have started (3s backoff not elapsed).
+      const t0 = Date.now();
+      while (readCounter(counter) < 1 && Date.now() - t0 < 15000)
+        await sleep(100);
+      assert(
+        readCounter(counter) === 1,
+        `retry(4): attempt 1 ran+failed before crash (count ${readCounter(counter)})`,
+      );
+      // CRASH before the backoff elapses / attempt 2 spawns.
+      await stopServer("SIGKILL");
+      assert(
+        readCounter(counter) === 1,
+        `retry(4): attempt 2 did NOT spawn before crash (count ${readCounter(counter)})`,
+      );
+      await startServer();
+      await login();
+      const done = await pollRun(
+        runId,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 40000, label: "retry-restart" },
+      );
+      assert(
+        done.status === "completed" && nodeOf(done, "n0").status === "done",
+        `retry(4): fresh gateway finished the retry (got ${done.status})`,
+      );
+      assert(
+        readCounter(counter) === 2,
+        `retry(4): exactly 2 attempts across the restart, no double-count (got ${readCounter(counter)})`,
+      );
+      console.log(
+        `  ok: (iter10) retry — LOAD-BEARING crash mid-retry, fresh gateway completes attempt 2 (no double-count)`,
+      );
+    }
+  }
+
+  // Server was restarted inside retry(4); the load-bearing test below assumes a
+  // live, logged-in gateway (already re-established by retry(4)'s startServer +
+  // login).
   // ---- (a) THE LOAD-BEARING TEST: crash mid-run, boot rediscovery -------
   {
     const { appId } = await createRunnerApp({

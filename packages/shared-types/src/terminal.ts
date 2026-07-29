@@ -1188,12 +1188,22 @@ export const ArtifactConnectionSchema = z.object({
 });
 export type ArtifactConnection = z.infer<typeof ArtifactConnectionSchema>;
 
+/** Per-agent-task retry policy. maxAttempts includes the initial attempt. */
+export const RetryPolicySchema = z.object({
+  maxAttempts: z.number().int().min(1).default(1),
+  backoffMs: z.number().int().min(0).default(0),
+  retryOn: z.literal("failure").default("failure"),
+});
+export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
+
 /** One workflow node. DAG-shaped from day one so future node types are additive. */
 export const WorkflowNodeSchema = z.object({
   id: z.string().min(1).max(128),
   type: z.enum(["agent-task", "human-approval"]),
   /** The Agent that executes this node (for type = "agent-task"). */
   agentId: z.string().optional(),
+  /** Ignored for human-approval nodes. */
+  retryPolicy: RetryPolicySchema.optional(),
 });
 export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
 

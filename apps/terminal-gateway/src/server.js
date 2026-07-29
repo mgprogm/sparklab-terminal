@@ -2531,6 +2531,7 @@ function buildAgenticTemplate(app) {
           id: n.id,
           type: n.type,
           ...(n.agentId != null ? { agentId: n.agentId } : {}),
+          ...(n.retryPolicy ? { retryPolicy: { ...n.retryPolicy } } : {}),
         })),
         edges: app.workflow.edges.map((e) => ({ from: e.from, to: e.to })),
         entryNodeId: app.workflow.entryNodeId,
@@ -2711,6 +2712,7 @@ function importAgenticTemplate(template, name) {
           ...(node.agentId !== undefined
             ? { agentId: agentIds.get(node.agentId) }
             : {}),
+          ...(node.retryPolicy ? { retryPolicy: { ...node.retryPolicy } } : {}),
         })),
         edges: app.workflow.edges.map((edge) => ({ ...edge })),
         entryNodeId: app.workflow.entryNodeId,
@@ -2898,6 +2900,63 @@ async function killAllRunSessions(run) {
     await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
 }
 
+function retryPolicyForNode(cfg, nodeId) {
+  const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
+  return node?.type === "agent-task"
+    ? node.retryPolicy || {
+        maxAttempts: 1,
+        backoffMs: 0,
+        retryOn: "failure",
+      }
+    : { maxAttempts: 1, backoffMs: 0, retryOn: "failure" };
+}
+
+// A ran-and-failed attempt stays RUNNING while the driver commits its retry,
+// clears stale attempt artifacts, waits the fixed backoff, and respawns. The
+// reducer therefore never observes a transient failed node.
+async function retryOrFailNode(run, cfg, nodeId) {
+  const policy = retryPolicyForNode(cfg, nodeId);
+  const retryState = agentic.getRetryState(run.id, nodeId);
+  if (!retryState.retryPending) {
+    const attemptsSoFar = retryState.retryCount + 1;
+    if (attemptsSoFar >= policy.maxAttempts) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "failed",
+        finishedAt: Date.now(),
+      });
+      return;
+    }
+    agentic.recordRetryAttempt(run.id, nodeId);
+  }
+
+  const server = runServer(run);
+  const base = await scratchBaseFor(server);
+  const scratchDir = path.posix.join(base, run.id, nodeId);
+  await serverCmd(server, [
+    "rm",
+    "-f",
+    "--",
+    path.posix.join(scratchDir, "start.marker"),
+    path.posix.join(scratchDir, "exit.marker"),
+    path.posix.join(scratchDir, "out.log"),
+  ]);
+  if (policy.backoffMs > 0)
+    await new Promise((resolve) => setTimeout(resolve, policy.backoffMs));
+
+  // A cancellation can land during backoff. Do not resurrect its skipped node.
+  const liveRun = agentic.getRun(run.id);
+  const liveNode = liveRun?.nodeExecutions?.find((n) => n.nodeId === nodeId);
+  if (
+    !liveRun ||
+    (liveRun.status !== "running" &&
+      liveRun.status !== "queued" &&
+      liveRun.status !== "waiting-approval") ||
+    liveNode?.status !== "running"
+  )
+    return;
+  await spawnNode(liveRun, cfg, nodeId);
+}
+
 // Reap the reap table (§D) for every currently-running node. Reads
 // {hasSession, exit.marker, start.marker} on the run's server. Returns true if
 // any node changed (so advanceRun re-reads the ledger). This is where
@@ -2934,10 +2993,7 @@ async function reapRunningNodes(run, cfg) {
         // Alive, not yet finished. Timeout -> kill + fail; else leave running.
         if (elapsed > AGENT_RUN_TIMEOUT_MS) {
           await tmuxKill(server, sessionName);
-          agentic.recordNodeResult(run.id, nodeId, {
-            status: "failed",
-            finishedAt: Date.now(),
-          });
+          await retryOrFailNode(run, cfg, nodeId);
           changed = true;
         }
         continue;
@@ -2945,10 +3001,12 @@ async function reapRunningNodes(run, cfg) {
       // Session lingering but exit.marker already written (rare) — treat as done.
       await tmuxKill(server, sessionName);
       const code = parseInt(String(exitVal).trim(), 10);
-      agentic.recordNodeResult(run.id, nodeId, {
-        status: code === 0 ? "done" : "failed",
-        finishedAt: Date.now(),
-      });
+      if (code === 0)
+        agentic.recordNodeResult(run.id, nodeId, {
+          status: "done",
+          finishedAt: Date.now(),
+        });
+      else await retryOrFailNode(run, cfg, nodeId);
       changed = true;
       continue;
     }
@@ -2957,10 +3015,12 @@ async function reapRunningNodes(run, cfg) {
     if (exitVal != null) {
       // Finished (possibly during downtime): exit.marker is the verdict.
       const code = parseInt(String(exitVal).trim(), 10);
-      agentic.recordNodeResult(run.id, nodeId, {
-        status: code === 0 ? "done" : "failed",
-        finishedAt: Date.now(),
-      });
+      if (code === 0)
+        agentic.recordNodeResult(run.id, nodeId, {
+          status: "done",
+          finishedAt: Date.now(),
+        });
+      else await retryOrFailNode(run, cfg, nodeId);
       changed = true;
       continue;
     }
@@ -2977,6 +3037,12 @@ async function reapRunningNodes(run, cfg) {
     // No session, no markers => the node NEVER actually ran (crash between
     // persist-running and spawn). Re-spawn idempotently, unless we've already
     // tried twice (cap) -> fail.
+    const retryState = agentic.getRetryState(run.id, nodeId);
+    if (retryState.retryPending) {
+      await retryOrFailNode(run, cfg, nodeId);
+      changed = true;
+      continue;
+    }
     if (agentic.getSpawnAttempts(run.id, nodeId) >= 2) {
       agentic.recordNodeResult(run.id, nodeId, {
         status: "failed",

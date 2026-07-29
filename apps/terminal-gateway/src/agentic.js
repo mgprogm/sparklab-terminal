@@ -74,6 +74,19 @@ const RUN_TERMINAL = new Set(["completed", "failed", "cancelled"]);
 // env name server.js reads for its own cap; the two share the value.
 const AGENT_MAX_PARALLEL_FANOUT =
   Number(process.env.AGENT_MAX_PARALLEL_FANOUT) || 4;
+const configuredRetryAttemptsCap = Number(process.env.AGENT_RETRY_MAX_ATTEMPTS);
+const RETRY_MAX_ATTEMPTS_CAP =
+  Number.isInteger(configuredRetryAttemptsCap) &&
+  configuredRetryAttemptsCap >= 1
+    ? configuredRetryAttemptsCap
+    : 5;
+const configuredRetryBackoffCap = Number(
+  process.env.AGENT_RETRY_BACKOFF_MAX_MS,
+);
+const AGENT_RETRY_BACKOFF_MAX_MS =
+  Number.isFinite(configuredRetryBackoffCap) && configuredRetryBackoffCap >= 0
+    ? configuredRetryBackoffCap
+    : 60_000;
 // Bound on Run.toolCallLog[] (iter3) — oldest entries trimmed on append, same
 // "bounded" idiom as the push-notification history elsewhere in this repo.
 const TOOL_CALL_LOG_CAP = 200;
@@ -225,12 +238,51 @@ function resolveWorkflow(raw) {
       throw err("invalid_workflow", `unsupported node type: ${type}`, {
         node: id,
       });
+    let retryPolicy;
+    if (type === "agent-task" && n.retryPolicy != null) {
+      if (
+        !n.retryPolicy ||
+        typeof n.retryPolicy !== "object" ||
+        Array.isArray(n.retryPolicy)
+      )
+        throw err("invalid_workflow", "retryPolicy must be an object", {
+          node: id,
+        });
+      const maxAttempts =
+        n.retryPolicy.maxAttempts == null ? 1 : n.retryPolicy.maxAttempts;
+      const backoffMs =
+        n.retryPolicy.backoffMs == null ? 0 : n.retryPolicy.backoffMs;
+      const retryOn =
+        n.retryPolicy.retryOn == null ? "failure" : n.retryPolicy.retryOn;
+      if (!Number.isInteger(maxAttempts) || maxAttempts < 1)
+        throw err(
+          "invalid_workflow",
+          "retryPolicy.maxAttempts must be a positive integer",
+          { node: id },
+        );
+      if (!Number.isInteger(backoffMs) || backoffMs < 0)
+        throw err(
+          "invalid_workflow",
+          "retryPolicy.backoffMs must be a non-negative integer",
+          { node: id },
+        );
+      if (retryOn !== "failure")
+        throw err("invalid_workflow", 'retryPolicy.retryOn must be "failure"', {
+          node: id,
+        });
+      retryPolicy = {
+        maxAttempts: Math.min(maxAttempts, RETRY_MAX_ATTEMPTS_CAP),
+        backoffMs: Math.min(backoffMs, AGENT_RETRY_BACKOFF_MAX_MS),
+        retryOn,
+      };
+    }
     cleanNodes.push({
       id,
       type,
       ...(type === "agent-task" && n.agentId != null
         ? { agentId: String(n.agentId) }
         : {}),
+      ...(retryPolicy ? { retryPolicy } : {}),
     });
   }
 
@@ -316,6 +368,7 @@ function shapeWorkflow(wf) {
       id: n.id,
       type: n.type,
       ...(n.agentId != null ? { agentId: n.agentId } : {}),
+      ...(n.retryPolicy != null ? { retryPolicy: { ...n.retryPolicy } } : {}),
     })),
     edges: (w.edges || []).map((e) => ({ from: e.from, to: e.to })),
     entryNodeId: w.entryNodeId ?? null,
@@ -814,6 +867,7 @@ function recordSpawned(
   ne.startedAt = startedAt != null ? Number(startedAt) : now();
   ne.finishedAt = null;
   ne.spawnAttempts = (ne.spawnAttempts || 0) + 1;
+  delete ne.retryPending;
   persist();
   return shapeRun(run);
 }
@@ -841,6 +895,28 @@ function getSpawnAttempts(runId, nodeId) {
   if (!r) return 0;
   const ne = (r.nodeExecutions || []).find((n) => n.nodeId === nodeId);
   return ne && ne.spawnAttempts ? ne.spawnAttempts : 0;
+}
+
+// Failure retries are distinct from spawnAttempts: retryCount is the number of
+// retry respawns committed after a ran-and-failed attempt. retryPending closes
+// the crash window between committing that decision and recordSpawned(). Both
+// fields are persisted but deliberately remain off the wire.
+function recordRetryAttempt(runId, nodeId) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  if (!ne.retryPending) ne.retryCount = (ne.retryCount || 0) + 1;
+  ne.retryPending = true;
+  persist();
+  return shapeRun(run);
+}
+
+function getRetryState(runId, nodeId) {
+  const r = store.runs[runId];
+  const ne = r && (r.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+  return {
+    retryCount: ne && ne.retryCount ? ne.retryCount : 0,
+    retryPending: Boolean(ne && ne.retryPending),
+  };
 }
 
 // Park a ready human-approval gate without spawning an agent process. Persists.
@@ -1128,6 +1204,8 @@ export default {
   recordSpawned,
   recordGuidanceTurn,
   getSpawnAttempts,
+  recordRetryAttempt,
+  getRetryState,
   gateApprovalNode,
   recordNodeResult,
   setRunStatus,

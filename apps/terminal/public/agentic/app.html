@@ -446,6 +446,18 @@
     color: var(--mute);
   }
 
+  .workflow-retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+  }
+
+  .workflow-retry-num {
+    width: 56px;
+    flex: 0 0 auto;
+  }
+
   .check-row {
     display: flex;
     align-items: flex-start;
@@ -2105,6 +2117,13 @@
         };
         if (type === "agent-task") {
           draftNode.agentId = String(node.agentId || "");
+          // Retry policy is per-agent-task. Seed from stored values; absent =>
+          // maxAttempts 1 (no retry), backoff 0 — matches the backend default.
+          var rp = node.retryPolicy || {};
+          draftNode.retryMaxAttempts =
+            rp.maxAttempts != null ? Number(rp.maxAttempts) : 1;
+          draftNode.retryBackoffMs =
+            rp.backoffMs != null ? Number(rp.backoffMs) : 0;
         }
         return draftNode;
       }),
@@ -2196,6 +2215,50 @@
       });
       row.appendChild(agentSelect);
 
+      // Retry sub-form (agent-task only). maxAttempts is the TOTAL attempts incl.
+      // the first (1 = no retry); backoff is the fixed wait between attempts (ms).
+      if (node.type === "agent-task") {
+        if (node.retryMaxAttempts == null) node.retryMaxAttempts = 1;
+        if (node.retryBackoffMs == null) node.retryBackoffMs = 0;
+
+        var retryWrap = elem("span", "workflow-retry");
+        retryWrap.appendChild(elem("span", "lib-sub", "retries"));
+
+        var attemptsInput = elem("input", "field workflow-retry-num");
+        attemptsInput.type = "number";
+        attemptsInput.min = "1";
+        attemptsInput.max = "5";
+        attemptsInput.step = "1";
+        attemptsInput.value = String(node.retryMaxAttempts);
+        attemptsInput.title = "Max attempts (1 = no retry, max 5)";
+        attemptsInput.setAttribute("aria-label", "Max attempts for " + node.id);
+        attemptsInput.addEventListener("change", function () {
+          var v = Math.round(Number(attemptsInput.value));
+          if (!isFinite(v) || v < 1) v = 1;
+          if (v > 5) v = 5;
+          node.retryMaxAttempts = v;
+          attemptsInput.value = String(v);
+        });
+        retryWrap.appendChild(attemptsInput);
+
+        var backoffInput = elem("input", "field workflow-retry-num");
+        backoffInput.type = "number";
+        backoffInput.min = "0";
+        backoffInput.step = "1000";
+        backoffInput.value = String(node.retryBackoffMs);
+        backoffInput.title = "Backoff between attempts (ms)";
+        backoffInput.setAttribute("aria-label", "Retry backoff ms for " + node.id);
+        backoffInput.addEventListener("change", function () {
+          var v = Math.round(Number(backoffInput.value));
+          if (!isFinite(v) || v < 0) v = 0;
+          node.retryBackoffMs = v;
+          backoffInput.value = String(v);
+        });
+        retryWrap.appendChild(elem("span", "lib-sub", "backoff ms"));
+        retryWrap.appendChild(backoffInput);
+        row.appendChild(retryWrap);
+      }
+
       var remove = elem("button", "icon-btn", "Remove");
       remove.type = "button";
       remove.addEventListener("click", function () {
@@ -2266,7 +2329,20 @@
     var nodes = draft.nodes.map(function (node) {
       var type = node.type === "human-approval" ? "human-approval" : "agent-task";
       var savedNode = { id: node.id, type: type };
-      if (type === "agent-task") savedNode.agentId = node.agentId;
+      if (type === "agent-task") {
+        savedNode.agentId = node.agentId;
+        // Only emit a retryPolicy when it departs from the default (1 attempt,
+        // no backoff) — an absent policy is the backend's "single attempt".
+        var maxAttempts = node.retryMaxAttempts != null ? node.retryMaxAttempts : 1;
+        var backoffMs = node.retryBackoffMs != null ? node.retryBackoffMs : 0;
+        if (maxAttempts > 1 || backoffMs > 0) {
+          savedNode.retryPolicy = {
+            maxAttempts: maxAttempts,
+            backoffMs: backoffMs,
+            retryOn: "failure",
+          };
+        }
+      }
       return savedNode;
     });
     if (
