@@ -600,12 +600,21 @@ Carried over from v1, still deferred:
 - **`parallel` mode + `workspace-write` collision** — unchanged from v1: recommend
   restricting `parallel` to `read-only` agents, requiring `sequential`/`supervisor`
   for anything `workspace-write`.
-- **MCP token scoping for the proxy's own forwarding credential**
-  (`AGENT_MCP_SCOPED_TOKENS`, §10) — the CLI's own exposure is resolved either way by
-  D5's proxy design; this only decides whether the _proxy_ forwards with the shared
-  token or a minted scoped one. Recommend starting with the shared token (the proxy
-  itself is already the hard boundary) and revisiting only if audit requirements
-  demand per-run credential rotation.
+- **MCP token scoping (D-Token) — ✅ RESOLVED (iter5, 2026-07-29).** Implemented and
+  now **ENABLED BY DEFAULT** (`AGENT_MCP_SCOPED_TOKENS`, §10): each agent-task with
+  connections is handed a freshly-minted, short-lived, capability-scoped bearer in its
+  mcp.json instead of the shared `GATEWAY_API_TOKEN`. A leaked copy reaches ONLY the
+  agent's connected artifact prefixes (`/api/pm`/`/api/kanban`) and its OWN
+  pending-tool-call callback — never approve/reject (also cookie-only), Agentic
+  CRUD/run, or another run's callback — and is revoked when the run ends. Side benefit:
+  agentic MCP works in prod with NO shared token configured. Proven by a test that reads
+  the actual minted token from the run's mcp.json and asserts the boundary. Honest
+  residual (deferred): a scoped token still permits direct REST to its _connected
+  artifact_, so it bounds WHICH artifact, not WHICH tool — full per-tool closure (proxy
+  children never holding a gateway-callable token) is a later refinement. Also iter5:
+  codex-cli agents with artifact connections are **fail-closed at run start**
+  (`codex_mcp_unsupported`) since codex's ambient MCP can't be mediated (isolating
+  `CODEX_HOME` breaks its auth — verified).
 - **Interactive vs. batch invocation for "send guidance"** — supporting mid-run
   guidance (§5d) requires that step's runtime provider to have been invoked
   interactively inside the tmux pane rather than as a one-shot batch call, so the

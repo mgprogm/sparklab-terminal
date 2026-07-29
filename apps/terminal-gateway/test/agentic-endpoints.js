@@ -1361,6 +1361,168 @@ async function main() {
     );
   }
 
+  // ---- (iter5) per-run SCOPED MCP token capability boundary -------------
+  // A claude-cli agent with a pm connection mints a scoped token that is baked
+  // into the run's mcp.json (readable by the agent). Read that ACTUAL token from
+  // the materialized scratch file and prove its capability boundary: it may reach
+  // ONLY /api/pm (its scoped prefix) and its OWN pending-tool-call callback —
+  // NOT /api/kanban, NOT agentic CRUD, NOT approve/reject, NOT another run's
+  // callback — and it is REVOKED when the run ends.
+  {
+    const connRes = await req("POST", "/api/agentic/connections", {
+      body: { targetType: "pm", scope: "fixed" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(connRes.status === 201, `scoped: connection -> ${connRes.status}`);
+    const connId = (await connRes.json()).id;
+    const agRes = await req("POST", "/api/agentic/agents", {
+      body: {
+        name: `scoped-claude-${Date.now()}`,
+        runtimeProvider: "claude-cli",
+        sandboxMode: "read-only",
+        systemPrompt: "",
+        toolPolicies: [{ connectionId: connId, tools: "all", policy: "allow" }],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(agRes.status === 201, `scoped: claude agent -> ${agRes.status}`);
+    const scAgentId = (await agRes.json()).id;
+    const appRes = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: `scoped-app-${Date.now()}`,
+        orchestrationMode: "single",
+        agentIds: [scAgentId],
+        connectionIds: [connId],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(appRes.status === 201, `scoped: app -> ${appRes.status}`);
+    const scApp = await appRes.json();
+    const runRes = await req("POST", `/api/agentic/apps/${enc(scApp.id)}/run`, {
+      body: { sessionId: targetSessionId, objective: "hold token SLEEP=30" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(runRes.status === 202, `scoped: start run -> ${runRes.status}`);
+    const scRun = await runRes.json();
+
+    // Read the ACTUAL minted scoped token out of the run's materialized mcp.json.
+    const mcpPath = path.join(runsDir, scRun.id, "n0", "mcp.json");
+    let scopedToken = "";
+    for (let i = 0; i < 40 && !scopedToken; i++) {
+      try {
+        const mcp = JSON.parse(fs.readFileSync(mcpPath, "utf8"));
+        scopedToken =
+          mcp.mcpServers["agentic-proxy"].env.GATEWAY_API_TOKEN || "";
+      } catch {
+        /* not materialized yet */
+      }
+      if (!scopedToken) await sleep(100);
+    }
+    assert(
+      scopedToken && scopedToken.length >= 32,
+      "scoped: minted token present in run mcp.json",
+    );
+    // It must NOT be the (empty in this test) shared token, and must be random hex.
+    assert(
+      /^[0-9a-f]{64}$/.test(scopedToken),
+      "scoped: token is a 256-bit random hex capability token",
+    );
+
+    const bear = (method, pathname) =>
+      req(method, pathname, {
+        headers: { authorization: `Bearer ${scopedToken}` },
+        cookie: false,
+      });
+
+    // Allowed: its scoped artifact prefix (pm) and its OWN pending-tool-call.
+    const pmOk = await bear("GET", "/api/pm/projects");
+    assert(pmOk.status !== 401, `scoped: pm allowed (got ${pmOk.status})`);
+    const ownCb = await bear(
+      "GET",
+      `/api/agentic/runs/${enc(scRun.id)}/nodes/n0/pending-tool-call/nope`,
+    );
+    assert(
+      ownCb.status !== 401,
+      `scoped: own pending-tool-call allowed (got ${ownCb.status})`,
+    );
+
+    // Denied: other artifact, agentic CRUD, approve, another run's callback.
+    const kbNo = await bear("GET", "/api/kanban/boards");
+    assert(kbNo.status === 401, `scoped: kanban denied (got ${kbNo.status})`);
+    const crudNo = await bear("GET", "/api/agentic/apps");
+    assert(
+      crudNo.status === 401,
+      `scoped: agentic CRUD denied (got ${crudNo.status})`,
+    );
+    const apprNo = await bear(
+      "POST",
+      `/api/agentic/runs/${enc(scRun.id)}/nodes/n0/approve`,
+    );
+    assert(
+      apprNo.status === 401 || apprNo.status === 403,
+      `scoped: approve not reachable by token (got ${apprNo.status})`,
+    );
+    const otherCb = await bear(
+      "GET",
+      `/api/agentic/runs/run-someone-else/nodes/n0/pending-tool-call/x`,
+    );
+    assert(
+      otherCb.status === 401,
+      `scoped: other run's callback denied (got ${otherCb.status})`,
+    );
+
+    // Revoked when the run ends.
+    const delRun = await req("DELETE", `/api/agentic/runs/${enc(scRun.id)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(delRun.status === 204, `scoped: cancel run -> ${delRun.status}`);
+    const afterRevoke = await bear("GET", "/api/pm/projects");
+    assert(
+      afterRevoke.status === 401,
+      `scoped: token revoked after run ends (got ${afterRevoke.status})`,
+    );
+    console.log(
+      `  ok: (iter5) scoped MCP token — pm+own-callback only; kanban/CRUD/approve/other-run denied; revoked on run end`,
+    );
+
+    // codex-cli + a connection is fail-closed at run start.
+    const cxAg = await req("POST", "/api/agentic/agents", {
+      body: {
+        name: `scoped-codex-${Date.now()}`,
+        runtimeProvider: "codex-cli",
+        sandboxMode: "read-only",
+        systemPrompt: "",
+        toolPolicies: [{ connectionId: connId, tools: "all", policy: "allow" }],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(cxAg.status === 201, `scoped: codex agent -> ${cxAg.status}`);
+    const cxApp = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: `scoped-codex-app-${Date.now()}`,
+        orchestrationMode: "single",
+        agentIds: [(await cxAg.json()).id],
+        connectionIds: [connId],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    const cxRun = await req(
+      "POST",
+      `/api/agentic/apps/${enc((await cxApp.json()).id)}/run`,
+      {
+        body: { sessionId: targetSessionId, objective: "x" },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(
+      cxRun.status === 400 || cxRun.status === 422,
+      `scoped: codex-cli + connection rejected at run start (got ${cxRun.status})`,
+    );
+    console.log(
+      `  ok: (iter5) codex-cli agent with an artifact connection is fail-closed at run start`,
+    );
+  }
+
   // ---- (a) THE LOAD-BEARING TEST: crash mid-run, boot rediscovery -------
   {
     const { appId } = await createRunnerApp({

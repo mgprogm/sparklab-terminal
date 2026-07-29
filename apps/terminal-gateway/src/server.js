@@ -57,6 +57,18 @@ const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
 // value keeps working unchanged (PM-TOOL-PLAN.md D10). Unset => cookie only.
 const GATEWAY_API_TOKEN =
   process.env.GATEWAY_API_TOKEN || process.env.KANBAN_API_TOKEN || "";
+const AGENT_MCP_SCOPED_TOKENS = !["0", "false"].includes(
+  String(process.env.AGENT_MCP_SCOPED_TOKENS || "")
+    .trim()
+    .toLowerCase(),
+);
+const configuredAgentMcpTokenTtlMs = Number(process.env.AGENT_MCP_TOKEN_TTL_MS);
+const AGENT_MCP_TOKEN_TTL_MS =
+  Number.isFinite(configuredAgentMcpTokenTtlMs) &&
+  configuredAgentMcpTokenTtlMs > 0
+    ? configuredAgentMcpTokenTtlMs
+    : 3_600_000;
+const SCOPED_MCP_TOKENS = new Map();
 
 // The pre-user/pass shared secret is gone. Refusing to start (rather than
 // ignoring the var) keeps an un-migrated deploy from silently coming up with
@@ -217,6 +229,61 @@ function isArtifactBearerAuthorized(req) {
   return (
     provided.length === expected.length &&
     crypto.timingSafeEqual(provided, expected)
+  );
+}
+
+function mintScopedMcpToken(runId, nodeId, prefixes) {
+  const now = Date.now();
+  for (const [token, entry] of SCOPED_MCP_TOKENS) {
+    if (now > entry.expiresAt) SCOPED_MCP_TOKENS.delete(token);
+  }
+  const token = crypto.randomBytes(32).toString("hex");
+  SCOPED_MCP_TOKENS.set(token, {
+    runId,
+    nodeId,
+    prefixes: [...new Set(prefixes)].filter(
+      (prefix) => prefix === "pm" || prefix === "kanban",
+    ),
+    expiresAt: now + AGENT_MCP_TOKEN_TTL_MS,
+  });
+  return token;
+}
+
+function revokeScopedMcpTokensForRun(runId) {
+  for (const [token, entry] of SCOPED_MCP_TOKENS) {
+    if (entry.runId === runId) SCOPED_MCP_TOKENS.delete(token);
+  }
+}
+
+function isScopedMcpAuthorized(req, url) {
+  const header = req.headers.authorization || "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match) return false;
+  const entry = SCOPED_MCP_TOKENS.get(match[1]);
+  if (!entry) return false;
+  if (Date.now() > entry.expiresAt) {
+    SCOPED_MCP_TOKENS.delete(match[1]);
+    return false;
+  }
+
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (
+    parts[0] === "api" &&
+    (parts[1] === "pm" || parts[1] === "kanban") &&
+    entry.prefixes.includes(parts[1])
+  ) {
+    return true;
+  }
+  return (
+    (req.method === "POST" || req.method === "GET") &&
+    parts.length >= 7 &&
+    parts[0] === "api" &&
+    parts[1] === "agentic" &&
+    parts[2] === "runs" &&
+    parts[3] === entry.runId &&
+    parts[4] === "nodes" &&
+    parts[5] === entry.nodeId &&
+    parts[6] === "pending-tool-call"
   );
 }
 
@@ -2420,6 +2487,21 @@ async function spawnNode(run, cfg, nodeId) {
     startedAt: Date.now(),
   });
 
+  let gatewayApiToken = GATEWAY_API_TOKEN;
+  const toolPolicies = Array.isArray(agent.toolPolicies)
+    ? agent.toolPolicies
+    : [];
+  const prefixes = [
+    ...new Set(
+      toolPolicies
+        .map((policy) => cfg.connections?.[policy.connectionId]?.targetType)
+        .filter((targetType) => targetType === "pm" || targetType === "kanban"),
+    ),
+  ];
+  if (AGENT_MCP_SCOPED_TOKENS && prefixes.length > 0) {
+    gatewayApiToken = mintScopedMcpToken(run.id, nodeId, prefixes);
+  }
+
   let inv;
   try {
     inv = agentRuntime.buildInvocation({
@@ -2435,7 +2517,7 @@ async function spawnNode(run, cfg, nodeId) {
       // MCP proxy in (codex-cli and remote targets never read these — see
       // agent-runtime.js's own gating).
       connections: cfg.connections,
-      gatewayApiToken: GATEWAY_API_TOKEN,
+      gatewayApiToken,
       gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
     });
   } catch (e) {
@@ -2749,6 +2831,18 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
         },
       );
   }
+  for (const agent of Object.values(resolvedAgents)) {
+    if (
+      agent.runtimeProvider === "codex-cli" &&
+      Array.isArray(agent.toolPolicies) &&
+      agent.toolPolicies.length > 0
+    ) {
+      throw agenticErr(
+        "codex_mcp_unsupported",
+        "codex-cli agents cannot use artifact connections yet (MCP mediation unavailable) — remove the connection or use a claude-cli agent",
+      );
+    }
+  }
   // parallel + any workspace-write agent -> 422 (§9): concurrent writers to one
   // cwd are unsafe.
   if (app.orchestrationMode === "parallel") {
@@ -2873,11 +2967,13 @@ async function advanceRun(runId) {
         if (decision.terminal === "failed") {
           await killRunningJobs(run); // fail-fast: no orphan jobs
           agentic.setRunStatus(runId, "failed", { finishedAt: Date.now() });
+          revokeScopedMcpTokensForRun(runId);
           changed = true;
           continue;
         }
         if (decision.terminal === "completed") {
           agentic.setRunStatus(runId, "completed", { finishedAt: Date.now() });
+          revokeScopedMcpTokensForRun(runId);
           changed = true;
           continue;
         }
@@ -2948,12 +3044,14 @@ async function killRun(runId) {
     run.status !== "queued" &&
     run.status !== "waiting-approval"
   ) {
+    revokeScopedMcpTokensForRun(runId);
     await killAllRunSessions(run); // idempotent sweep; DO NOT touch status
     return agentic.getRun(runId);
   }
   // Mark cancelled synchronously FIRST so a racing advanceRun's status guard
   // bails before it can spawn anything new.
   agentic.setRunStatus(runId, "cancelled", { finishedAt: Date.now() });
+  revokeScopedMcpTokensForRun(runId);
   await killRunningJobs(run);
   // Catch a node the in-flight advance may have spawned during the race.
   await waitForAdvanceIdle(runId);
@@ -3903,7 +4001,7 @@ async function handleApi(req, res, url) {
     !isAuthenticated(req) &&
     !(
       (parts[1] === "kanban" || parts[1] === "pm" || parts[1] === "agentic") &&
-      isArtifactBearerAuthorized(req)
+      (isArtifactBearerAuthorized(req) || isScopedMcpAuthorized(req, url))
     )
   ) {
     return sendJson(res, 401, { error: "unauthorized" });
