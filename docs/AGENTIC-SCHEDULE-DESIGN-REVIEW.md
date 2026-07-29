@@ -215,3 +215,57 @@ human-approval nodes (B), durable `serverId+cwd` target (C), the pre-fire-claim 
 mutex at-most-once (E), and the start-reservation + one-run-per-schedule + durable
 outcome (F). The user must still sign off on **D-Sched-A: automated start acceptable
 at all** (now correctly framed as "human-installed persistent autonomous execution").
+
+---
+
+## 8. Codex review — round 2 (2026-07-29): converged to two blockers
+
+Opus's resolutions to §7 were re-reviewed. **R-A GO · R-B GO · R-C GO-w/-conditions ·
+R-D GO-w/-conditions · R-E GO · R-F NO-GO · R-OMIT NO-GO.** The single most important
+remaining risk: **authorization drift — a persistent human-installed schedule could
+execute bearer-mutated code/policy.** Two prerequisites remain; C/D conditions are
+spec-level.
+
+- **R-A GO** — explicit `isHumanCookieSession()` on schedule mutations closes the
+  persistent-schedule escalation; unattended-never-broad-token is right (the current
+  MCP-token path falls back to the broad token otherwise, server.js:2472).
+- **R-B GO** — the 4-layer fail-closed (before any pending record; human-approval
+  nodes fail immediately) is correct.
+- **R-C GO-with-conditions** — durable `serverId+cwd` is right, BUT `runServer()`
+  currently derives the server from `sessionId` (server.js:2341) and is used by
+  spawn+cleanup; the spec MUST change `runServer()` to resolve
+  `run.resolvedConfig.serverId`, or a sessionless scheduled run targets the wrong
+  server.
+- **R-D GO-with-conditions** — UTC + fixed-anchor + bounds sound; the spec must pick an
+  exact interval max and define/reject field combos (no `at*` for minute; `atMinute`
+  semantics for hour; defaults when daily `atHour`/`atMinute` omitted).
+- **R-E GO** — pre-fire claim (persist advanced `nextFireAt` before `startRun`) + tick
+  mutex gives at-most-once (occurrence loss on crash accepted), mirroring `advancing`.
+- **R-F NO-GO (prerequisite, not deferrable)** — `startRun` checks the cap BEFORE the
+  async server/cwd awaits (server.js:3242), so scheduler-vs-human starts can exceed
+  `AGENT_MAX_CONCURRENT_RUNS`; B1 adds an autonomous caller to that race. Requires a
+  **shared atomic start reservation/mutex** (human + scheduler paths). Also close the
+  crash gap between run creation and persisting the schedule's `currentRunId` (else
+  one-run-per-schedule overlap protection is lost on a crash there).
+- **R-OMIT NO-GO** — v1 must **REFUSE** a fire when the scheduled definition differs
+  from the current one (not merely report it) — else it knowingly runs a definition
+  the human did not schedule. And app `version` is insufficient: **agents referenced by
+  the app can be patched without bumping the app version** (agentic.js:681), so the
+  schedule must pin an **executable-definition fingerprint/revision over the full
+  closure (app + referenced agents + connections)** and refuse on mismatch. Loud
+  sidecar-corruption logging accepted.
+
+### Remaining before the implementation spec
+
+1. **R-F** — a shared atomic start-reservation (module counter reserved before the
+   async cap-affecting work in `startRun`, released in `finally`; cap check =
+   `activeRuns + reserved >= max`), shared by the human + scheduler paths; and persist
+   `currentRunId` atomically with / before run creation for overlap safety.
+2. **R-OMIT** — pin an executable-definition fingerprint (hash over app def + each
+   referenced agent's def + connection targets) at schedule create; recompute at fire;
+   **refuse** (outcome `definition_changed`) on mismatch.
+3. Fold R-C (`runServer` resolves `resolvedConfig.serverId`) and R-D (exact field-combo
+   rules) directly into the spec.
+
+Direction sound; auth model now correct. Not yet an implementation spec until R-F +
+R-OMIT are resolved.
