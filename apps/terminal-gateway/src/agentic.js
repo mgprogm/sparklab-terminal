@@ -67,8 +67,14 @@ const RUN_STATUSES = new Set([
   "completed",
   "failed",
   "cancelled",
+  "budget_exhausted",
 ]);
-const RUN_TERMINAL = new Set(["completed", "failed", "cancelled"]);
+const RUN_TERMINAL = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "budget_exhausted",
+]);
 // Fan-out cap for parallel groups — decide() returns at most this many toSpawn
 // ids (minus the count already running), so a wide group spawns in waves. Same
 // env name server.js reads for its own cap; the two share the value.
@@ -197,6 +203,20 @@ function cleanToolPolicies(raw) {
       throw err("bad_request", "toolPolicy.policy must be allow|deny|approval");
     return { connectionId: String(p.connectionId), tools, policy: p.policy };
   });
+}
+
+function cleanBudget(raw) {
+  if (raw == null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw))
+    throw err("bad_request", "budget must be an object");
+  const budget = {};
+  for (const key of ["maxSpawns", "maxWallClockMs"]) {
+    if (raw[key] === undefined) continue;
+    if (!Number.isInteger(raw[key]) || raw[key] <= 0)
+      throw err("bad_request", `budget.${key} must be a positive integer`);
+    budget[key] = raw[key];
+  }
+  return budget;
 }
 
 // Reject a toolPolicy whose connectionId does not resolve to a live connection
@@ -469,6 +489,7 @@ function shapeAgenticAi(aa) {
     agentIds: [...(aa.agentIds || [])],
     connectionIds: [...(aa.connectionIds || [])],
     workflow: shapeWorkflow(aa.workflow),
+    ...(aa.budget != null ? { budget: { ...aa.budget } } : {}),
     version: aa.version,
     rev: aa.rev,
     createdAt: aa.createdAt,
@@ -515,6 +536,10 @@ function shapeNodeExecution(ne) {
 }
 
 function shapeRun(r) {
+  const spawnsUsed = (r.nodeExecutions || []).reduce(
+    (sum, ne) => sum + (ne.spawnAttempts || 0),
+    0,
+  );
   return {
     id: r.id,
     agenticAiId: r.agenticAiId,
@@ -526,6 +551,9 @@ function shapeRun(r) {
     objective: r.objective ?? "",
     status: r.status,
     nodeExecutions: (r.nodeExecutions || []).map(shapeNodeExecution),
+    spawnsUsed,
+    budget:
+      r.resolvedConfig?.budget != null ? { ...r.resolvedConfig.budget } : null,
     // Bounded audit log (iter3) — allow/deny/approved/rejected/timed_out
     // dispositions, oldest trimmed at TOOL_CALL_LOG_CAP. Always present
     // (defaults to []), matching shared-types' RunSchema default.
@@ -728,6 +756,7 @@ function createAgenticAi(body = {}) {
   assertKnownIds(body.agentIds, store.agents, "agentIds");
   assertKnownIds(body.connectionIds, store.connections, "connectionIds");
   const workflow = resolveWorkflow(body.workflow);
+  const budget = cleanBudget(body.budget);
   const ts = now();
   const aa = {
     id: newId("aa"),
@@ -742,6 +771,7 @@ function createAgenticAi(body = {}) {
       ? body.connectionIds.map(String)
       : [],
     workflow,
+    ...(budget !== undefined ? { budget } : {}),
     version: 1,
     rev: 1,
     createdAt: ts,
@@ -764,6 +794,8 @@ function updateAgenticAi(id, patch = {}, expectedRev) {
   let nextWorkflow;
   if (patch.workflow !== undefined)
     nextWorkflow = resolveWorkflow(patch.workflow);
+  const nextBudget =
+    patch.budget !== undefined ? cleanBudget(patch.budget) : undefined;
   if (patch.orchestrationMode !== undefined) {
     if (!ORCH_MODES.has(patch.orchestrationMode))
       throw err(
@@ -786,6 +818,10 @@ function updateAgenticAi(id, patch = {}, expectedRev) {
       ? patch.connectionIds.map(String)
       : [];
   if (nextWorkflow !== undefined) aa.workflow = nextWorkflow;
+  if (patch.budget !== undefined) {
+    if (nextBudget === undefined) delete aa.budget;
+    else aa.budget = nextBudget;
+  }
   aa.version += 1; // D9 — definition edit
   touch(aa);
   persist();
@@ -1036,8 +1072,9 @@ function recordNodeResult(
 }
 
 // Set the run status (+ finishedAt when terminal). On a terminal run
-// (completed|failed|cancelled) every still-pending node flips to skipped so the
-// ledger has no dangling "pending" after the run ends. Persists.
+// (completed|failed|cancelled|budget_exhausted) every still-pending node flips
+// to skipped so the ledger has no dangling "pending" after the run ends.
+// Persists.
 function setRunStatus(runId, status, { finishedAt } = {}) {
   if (!RUN_STATUSES.has(status))
     throw err("bad_request", `invalid run status: ${status}`);

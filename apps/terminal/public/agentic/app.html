@@ -861,6 +861,11 @@
     border-color: rgba(224, 122, 106, 0.5);
   }
 
+  .badge-budget_exhausted {
+    color: var(--accent);
+    border-color: rgba(218, 210, 193, 0.55);
+  }
+
   .badge-pending,
   .badge-skipped,
   .badge-cancelled {
@@ -1209,6 +1214,39 @@
         </div>
       </div>
       <div>
+        <div class="section-label">Budget</div>
+        <div class="picker-row">
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="team-budget-max-spawns">Max spawns</label>
+            <input
+              id="team-budget-max-spawns"
+              class="field"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="Optional"
+            />
+          </div>
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="team-budget-max-wall-clock">Max wall-clock (ms)</label>
+            <input
+              id="team-budget-max-wall-clock"
+              class="field"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="Optional"
+            />
+          </div>
+        </div>
+        <div class="hint">Leave both blank for no app-level budget.</div>
+        <div class="row-end" style="margin-top: 8px">
+          <button id="team-budget-save" class="btn" type="button">
+            Save budget
+          </button>
+        </div>
+      </div>
+      <div>
         <div class="section-label">Team agents</div>
         <div id="team-agents" class="team-list"></div>
         <div class="picker-row" style="margin-top: 8px">
@@ -1428,6 +1466,11 @@
     teamEmptyHint: document.getElementById("team-empty-hint"),
     teamMode: document.getElementById("team-mode"),
     teamModeHint: document.getElementById("team-mode-hint"),
+    teamBudgetMaxSpawns: document.getElementById("team-budget-max-spawns"),
+    teamBudgetMaxWallClock: document.getElementById(
+      "team-budget-max-wall-clock",
+    ),
+    teamBudgetSave: document.getElementById("team-budget-save"),
     teamAgents: document.getElementById("team-agents"),
     teamAddSelect: document.getElementById("team-add-select"),
     teamAddBtn: document.getElementById("team-add-btn"),
@@ -1478,7 +1521,12 @@
   };
 
   // Run status buckets — mirror the gateway's RUN_TERMINAL set (agentic.js).
-  var RUN_TERMINAL = { completed: true, failed: true, cancelled: true };
+  var RUN_TERMINAL = {
+    completed: true,
+    failed: true,
+    cancelled: true,
+    budget_exhausted: true,
+  };
   var POLL_INTERVAL_MS = 1500;
 
   // ---------------------------------------------------------------------------
@@ -2536,8 +2584,13 @@
     var app = state.teamApp;
     if (!app) return;
     var agentIds = (app.agentIds || []).filter(Boolean);
+    var budget = app.budget || {};
 
     el.teamEmptyHint.style.display = agentIds.length === 0 ? "" : "none";
+    el.teamBudgetMaxSpawns.value =
+      budget.maxSpawns != null ? String(budget.maxSpawns) : "";
+    el.teamBudgetMaxWallClock.value =
+      budget.maxWallClockMs != null ? String(budget.maxWallClockMs) : "";
 
     // parallel + a workspace-write agent is rejected at run start (server §9).
     var parallelWarn =
@@ -2672,6 +2725,33 @@
     patchTeam({ agentIds: ids });
   }
 
+  function saveTeamBudget() {
+    var maxSpawnsRaw = el.teamBudgetMaxSpawns.value.trim();
+    var maxWallClockRaw = el.teamBudgetMaxWallClock.value.trim();
+    var budget = {};
+
+    if (maxSpawnsRaw) {
+      var maxSpawns = Number(maxSpawnsRaw);
+      if (!Number.isInteger(maxSpawns) || maxSpawns <= 0) {
+        showBanner("Max spawns must be a positive integer.");
+        el.teamBudgetMaxSpawns.focus();
+        return;
+      }
+      budget.maxSpawns = maxSpawns;
+    }
+    if (maxWallClockRaw) {
+      var maxWallClockMs = Number(maxWallClockRaw);
+      if (!Number.isInteger(maxWallClockMs) || maxWallClockMs <= 0) {
+        showBanner("Max wall-clock must be a positive integer in milliseconds.");
+        el.teamBudgetMaxWallClock.focus();
+        return;
+      }
+      budget.maxWallClockMs = maxWallClockMs;
+    }
+
+    patchTeam({ budget: Object.keys(budget).length > 0 ? budget : null });
+  }
+
   // PATCH the app definition (last-writer-wins, no expectedRev — mirrors
   // togglePublish). The response is the fresh full app; we adopt it, re-render the
   // modal, and refresh the catalog so its counts/hint stay in sync. Built-in modes
@@ -2692,7 +2772,8 @@
       patch.agentIds ||
       patch.connectionIds ||
       patch.orchestrationMode ||
-      patch.workflow
+      patch.workflow ||
+      Object.prototype.hasOwnProperty.call(patch, "budget")
     ) {
       // Fallback: adopt the patch locally if the response was unexpected.
       Object.keys(patch).forEach(function (k) {
@@ -3050,7 +3131,8 @@
   function renderRun(run) {
     var status = run.status || "running";
     el.runStatusBadge.className = "badge badge-" + status;
-    el.runStatusBadge.textContent = status;
+    el.runStatusBadge.textContent =
+      status === "budget_exhausted" ? "budget exhausted" : status;
 
     var terminal = !!RUN_TERMINAL[status];
     el.runKillBtn.style.display = terminal ? "none" : "";
@@ -3059,6 +3141,11 @@
     var meta = "v" + (run.agenticAiVersion || 1);
     var dur = fmtDuration(run.startedAt, run.finishedAt);
     if (dur) meta += " · " + dur;
+    if (run.budget && run.budget.maxSpawns != null) {
+      var spawnsUsed =
+        typeof run.spawnsUsed === "number" ? run.spawnsUsed : 0;
+      meta += " · spawns " + spawnsUsed + "/" + run.budget.maxSpawns;
+    }
     el.runStatusMeta.textContent = meta;
 
     el.runObjectiveEcho.textContent = run.objective
@@ -3496,6 +3583,7 @@
     }
     patchTeam({ orchestrationMode: el.teamMode.value });
   });
+  el.teamBudgetSave.addEventListener("click", saveTeamBudget);
   el.teamAddBtn.addEventListener("click", function () {
     var id = el.teamAddSelect.value;
     if (!id) return;

@@ -1224,6 +1224,13 @@ export const WorkflowDefinitionSchema = z.object({
 });
 export type WorkflowDefinition = z.infer<typeof WorkflowDefinitionSchema>;
 
+/** Spawn and wall-clock budgets. Token/cost budgets are deferred until usage is measured. */
+export const AgenticBudgetSchema = z.object({
+  maxSpawns: z.number().int().positive().optional(),
+  maxWallClockMs: z.number().int().positive().optional(),
+});
+export type AgenticBudget = z.infer<typeof AgenticBudgetSchema>;
+
 /** A full Agentic AI (catalog entry). Returned by GET /api/agentic/apps/:id. */
 export const AgenticAiSchema = z.object({
   id: z.string(),
@@ -1236,6 +1243,7 @@ export const AgenticAiSchema = z.object({
   agentIds: z.array(z.string()).default([]),
   connectionIds: z.array(z.string()).default([]),
   workflow: WorkflowDefinitionSchema,
+  budget: AgenticBudgetSchema.optional(),
   /** Monotonic definition version, bumped on every definition edit (D9). */
   version: z.number().int(),
   /** Monotonic revision (optimistic concurrency). */
@@ -1333,9 +1341,14 @@ export const RunSchema = z.object({
     "completed",
     "failed",
     "cancelled",
+    "budget_exhausted",
   ]),
   /** The durable workflow ledger — this array IS the run's position (D3). */
   nodeExecutions: z.array(NodeExecutionSchema).default([]),
+  /** Display-only spawn usage derived from node spawn attempts. */
+  spawnsUsed: z.number().optional(),
+  /** Display-only copy of the run's frozen budget. */
+  budget: AgenticBudgetSchema.nullable().optional(),
   /** Bounded MCP tool-call audit log (D5, iter3) — oldest entries trimmed. */
   toolCallLog: z.array(ToolCallLogEntrySchema).default([]),
   startedAt: z.number().nullable().default(null),
@@ -1355,6 +1368,7 @@ export const RunSummarySchema = z.object({
     "completed",
     "failed",
     "cancelled",
+    "budget_exhausted",
   ]),
   objective: z.string(),
   startedAt: z.number().nullable(),
@@ -1419,6 +1433,7 @@ export const CreateAgenticAiRequestSchema = z.object({
   agentIds: z.array(z.string()).default([]),
   connectionIds: z.array(z.string()).optional(),
   workflow: WorkflowDefinitionSchema.optional(),
+  budget: AgenticBudgetSchema.optional(),
 });
 export type CreateAgenticAiRequest = z.infer<
   typeof CreateAgenticAiRequestSchema
@@ -1436,6 +1451,8 @@ export const UpdateAgenticAiRequestSchema = z
     agentIds: z.array(z.string()).optional(),
     connectionIds: z.array(z.string()).optional(),
     workflow: WorkflowDefinitionSchema.optional(),
+    /** null clears the budget; the gateway's cleanBudget() treats null as "unset". */
+    budget: AgenticBudgetSchema.nullable().optional(),
   })
   .refine(
     (b) =>
@@ -1445,7 +1462,8 @@ export const UpdateAgenticAiRequestSchema = z
       b.orchestrationMode !== undefined ||
       b.agentIds !== undefined ||
       b.connectionIds !== undefined ||
-      b.workflow !== undefined,
+      b.workflow !== undefined ||
+      b.budget !== undefined,
     { message: "at least one field is required" },
   );
 export type UpdateAgenticAiRequest = z.infer<

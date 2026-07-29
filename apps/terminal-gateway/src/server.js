@@ -2306,6 +2306,11 @@ const AGENT_RUN_TIMEOUT_MS =
   Number(process.env.AGENT_RUN_TIMEOUT_MS) || 1_800_000; // per-step wall clock
 const AGENT_MAX_CONCURRENT_RUNS =
   Number(process.env.AGENT_MAX_CONCURRENT_RUNS) || 4;
+const configuredDefaultMaxSpawns = Number(process.env.AGENT_DEFAULT_MAX_SPAWNS);
+const AGENT_DEFAULT_MAX_SPAWNS =
+  Number.isInteger(configuredDefaultMaxSpawns) && configuredDefaultMaxSpawns > 0
+    ? configuredDefaultMaxSpawns
+    : undefined;
 const AGENTIC_RUN_MAX_AGE_MS =
   Number(process.env.AGENTIC_RUN_MAX_AGE_MS) || 259_200_000; // whole-run notify
 const AGENTIC_POLL_INTERVAL_MS =
@@ -2523,6 +2528,7 @@ function buildAgenticTemplate(app) {
       name: app.name,
       description: app.description,
       objectiveTemplate: app.objectiveTemplate,
+      ...(app.budget != null ? { budget: { ...app.budget } } : {}),
       orchestrationMode: app.orchestrationMode,
       agentIds: [...app.agentIds],
       connectionIds: [...app.connectionIds],
@@ -2702,6 +2708,7 @@ function importAgenticTemplate(template, name) {
       name: name || app.name,
       description: app.description,
       objectiveTemplate: app.objectiveTemplate,
+      ...(app.budget !== undefined ? { budget: app.budget } : {}),
       orchestrationMode: app.orchestrationMode,
       agentIds: app.agentIds.map((ref) => agentIds.get(ref)),
       connectionIds: app.connectionIds.map((ref) => connectionIds.get(ref)),
@@ -3267,6 +3274,11 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
     if (c) connections[connId] = { targetType: c.targetType };
   }
 
+  const budget = { ...(app.budget || {}) };
+  if (budget.maxSpawns == null && AGENT_DEFAULT_MAX_SPAWNS !== undefined) {
+    budget.maxSpawns = AGENT_DEFAULT_MAX_SPAWNS;
+  }
+
   const resolvedConfig = {
     agents: resolvedAgents,
     workflow,
@@ -3278,6 +3290,7 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
     cwd,
     serverId,
     objectiveTemplate: app.objectiveTemplate || "",
+    budget: Object.keys(budget).length > 0 ? budget : undefined,
   };
 
   const run = agentic.createRunRecord({
@@ -3299,6 +3312,20 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
 // NO run progress in memory. Loop: reap running -> decide -> spawn ready / apply
 // terminal, re-looping while the ledger changes. The advancing Set is pure
 // concurrency control (a mid-advance re-invocation coalesces into ONE rerun).
+function budgetExhausted(run, cfg) {
+  const budget = cfg.budget;
+  if (!budget) return false;
+  const spawnsUsed = run.spawnsUsed || 0;
+  if (budget.maxSpawns != null && spawnsUsed >= budget.maxSpawns) return true;
+  if (
+    budget.maxWallClockMs != null &&
+    run.startedAt &&
+    Date.now() - run.startedAt >= budget.maxWallClockMs
+  )
+    return true;
+  return false;
+}
+
 async function advanceRun(runId) {
   if (advancing.has(runId)) {
     rerunRequested.set(runId, true);
@@ -3372,9 +3399,26 @@ async function advanceRun(runId) {
           changed = true;
           continue;
         }
+        if (budgetExhausted(run, cfg)) {
+          const anyInFlight = (run.nodeExecutions || []).some(
+            (ne) => ne.status === "running" || ne.status === "waiting-approval",
+          );
+          if (!anyInFlight) {
+            agentic.setRunStatus(runId, "budget_exhausted", {
+              finishedAt: Date.now(),
+            });
+            revokeScopedMcpTokensForRun(runId);
+          }
+          break;
+        }
         // 4) spawn ready nodes (fan-out already capped by decide).
         if (decision.toSpawn.length) {
-          for (const nodeId of decision.toSpawn) {
+          const spawnsUsed = run.spawnsUsed || 0;
+          const spawnLimit =
+            cfg.budget?.maxSpawns != null
+              ? Math.max(0, cfg.budget.maxSpawns - spawnsUsed)
+              : decision.toSpawn.length;
+          for (const nodeId of decision.toSpawn.slice(0, spawnLimit)) {
             // FIX 4 (kill/cancel race): a concurrent killRun can flip the run
             // terminal BETWEEN fan-out iterations (spawnNode awaits slow ssh
             // I/O). Re-read the live status each iteration and stop spawning if

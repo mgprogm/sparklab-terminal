@@ -2932,6 +2932,350 @@ async function main() {
     }
   }
 
+  // ==================================================================
+  // ITERATION B2 — COST / BUDGET CAPS (richer workflows II §B2)
+  // ==================================================================
+  // A run may carry budget {maxSpawns, maxWallClockMs}. The DRIVER (never
+  // decide()) halts on the cap with terminal `budget_exhausted` (distinct from
+  // failed). spawnsUsed = sum(spawnAttempts) — persisted, so restart-safe.
+  {
+    const uniq = () =>
+      Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+    const bAgent = async (sandbox = "read-only") =>
+      (
+        await (
+          await req("POST", "/api/agentic/agents", {
+            body: {
+              name: `b-ag-${uniq()}`,
+              runtimeProvider: "codex-cli",
+              sandboxMode: sandbox,
+              systemPrompt: "",
+            },
+            origin: ALLOWED_ORIGIN,
+          })
+        ).json()
+      ).id;
+    const bApp = (body) =>
+      req("POST", "/api/agentic/apps", {
+        body: { name: `b-app-${uniq()}`, ...body },
+        origin: ALLOWED_ORIGIN,
+      });
+    const startOn = (appId, objective) =>
+      req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: { sessionId: targetSessionId, objective },
+        origin: ALLOWED_ORIGIN,
+      });
+    const chain = (ag, n) => Array.from({ length: n }, () => ag);
+
+    // (1) Spawn cap halts with budget_exhausted (NOT failed).
+    {
+      const ag = await bAgent();
+      const appRes = await bApp({
+        orchestrationMode: "sequential",
+        agentIds: chain(ag, 4),
+        budget: { maxSpawns: 2 },
+      });
+      assert(appRes.status === 201, `budget(1): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "quick");
+      assert(rres.status === 202, `budget(1): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 30000, label: "budget-spawns" },
+      );
+      const st = (id) => nodeOf(done, id).status;
+      assert(
+        done.status === "budget_exhausted",
+        `budget(1): halted budget_exhausted, not ${done.status}`,
+      );
+      assert(
+        st("n0") === "done" &&
+          st("n1") === "done" &&
+          st("n2") === "skipped" &&
+          st("n3") === "skipped",
+        "budget(1): first 2 ran, rest skipped",
+      );
+      assert(
+        done.spawnsUsed === 2,
+        `budget(1): spawnsUsed exactly 2 (got ${done.spawnsUsed})`,
+      );
+      console.log(
+        `  ok: (B2) spawn cap halts with budget_exhausted (not failed), rest skipped`,
+      );
+    }
+
+    // (2) Wall-clock cap + LET-FINISH: the in-flight node completes (not killed),
+    // then the run halts.
+    {
+      const ag = await bAgent();
+      const appRes = await bApp({
+        orchestrationMode: "sequential",
+        agentIds: chain(ag, 2),
+        budget: { maxWallClockMs: 1500 },
+      });
+      assert(appRes.status === 201, `budget(2): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "slow SLEEP=3");
+      assert(rres.status === 202, `budget(2): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 30000, label: "budget-wallclock" },
+      );
+      assert(
+        done.status === "budget_exhausted",
+        `budget(2): halted budget_exhausted (got ${done.status})`,
+      );
+      assert(
+        nodeOf(done, "n0").status === "done",
+        "budget(2): in-flight n0 was allowed to FINISH (let-finish, not killed)",
+      );
+      assert(
+        nodeOf(done, "n1").status === "skipped",
+        "budget(2): n1 never spawned (skipped)",
+      );
+      console.log(
+        `  ok: (B2) wall-clock cap — in-flight node finishes, then halt (let-finish)`,
+      );
+    }
+
+    // (4) Unset budget ⇒ unbounded (regression) — AGENT_DEFAULT_MAX_SPAWNS is
+    // UNSET in this harness, so a no-budget chain runs to completion.
+    {
+      const ag = await bAgent();
+      const appRes = await bApp({
+        orchestrationMode: "sequential",
+        agentIds: chain(ag, 5),
+      });
+      assert(appRes.status === 201, `budget(4): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "run");
+      assert(rres.status === 202, `budget(4): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 30000, label: "budget-unset" },
+      );
+      assert(
+        done.status === "completed" && done.spawnsUsed === 5,
+        `budget(4): no budget ⇒ all 5 ran to completion (status ${done.status}, spawns ${done.spawnsUsed})`,
+      );
+      console.log(
+        `  ok: (B2) unset budget ⇒ unbounded (5-node chain completes)`,
+      );
+    }
+
+    // (5) Validation: maxSpawns:0 / negative ⇒ 400; token/cost keys stripped.
+    {
+      const ag = await bAgent();
+      const zero = await bApp({
+        orchestrationMode: "single",
+        agentIds: [ag],
+        budget: { maxSpawns: 0 },
+      });
+      assert(
+        zero.status === 400,
+        `budget(5): maxSpawns:0 -> ${zero.status} (exp 400)`,
+      );
+      const neg = await bApp({
+        orchestrationMode: "single",
+        agentIds: [ag],
+        budget: { maxWallClockMs: -5 },
+      });
+      assert(
+        neg.status === 400,
+        `budget(5): negative wall-clock -> ${neg.status} (exp 400)`,
+      );
+      const stripped = await bApp({
+        orchestrationMode: "single",
+        agentIds: [ag],
+        budget: { maxTokens: 1, maxCostUsd: 0.5 },
+      });
+      assert(
+        stripped.status === 201,
+        `budget(5): token/cost keys accepted -> ${stripped.status}`,
+      );
+      const full = await (
+        await req("GET", `/api/agentic/apps/${enc((await stripped.json()).id)}`)
+      ).json();
+      assert(
+        full.budget &&
+          full.budget.maxSpawns === undefined &&
+          full.budget.maxWallClockMs === undefined &&
+          full.budget.maxTokens === undefined &&
+          full.budget.maxCostUsd === undefined,
+        `budget(5): unmeasurable token/cost keys stripped (got ${JSON.stringify(full.budget)})`,
+      );
+      console.log(
+        `  ok: (B2) validation — maxSpawns<=0 / negative ⇒ 400; token/cost keys stripped`,
+      );
+    }
+
+    // (6) waiting-approval DEFERS the halt (the #1 correctness guard): a run
+    // parked at a human-approval gate must NOT flip to budget_exhausted while the
+    // wall-clock budget elapses — its CLI/gate is still in flight.
+    {
+      const ag = await bAgent();
+      const appRes = await bApp({
+        orchestrationMode: "custom",
+        agentIds: [ag],
+        workflow: {
+          nodes: [
+            { id: "n0", type: "agent-task", agentId: ag },
+            { id: "g", type: "human-approval" },
+            { id: "n1", type: "agent-task", agentId: ag },
+          ],
+          edges: [
+            { from: "n0", to: "g" },
+            { from: "g", to: "n1" },
+          ],
+          entryNodeId: "n0",
+        },
+        budget: { maxWallClockMs: 1500 },
+      });
+      assert(appRes.status === 201, `budget(6): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "go");
+      assert(rres.status === 202, `budget(6): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      await pollRun(
+        runId,
+        (r) => nodeOf(r, "g").status === "waiting-approval",
+        {
+          deadlineMs: 20000,
+          label: "budget-gate-park",
+        },
+      );
+      // Wait well past the 1500ms wall-clock budget while parked at the gate.
+      await sleep(2200);
+      const parked = await (
+        await req("GET", `/api/agentic/runs/${enc(runId)}`)
+      ).json();
+      // A human-approval gate flips only the NODE to waiting-approval (the run
+      // stays "running"); the guard is that the budget did NOT halt it and the
+      // gate is still pending (anyInFlight counts the waiting-approval NODE).
+      assert(
+        parked.status !== "budget_exhausted" &&
+          nodeOf(parked, "g").status === "waiting-approval",
+        `budget(6): budget did NOT prematurely halt the gated run (run ${parked.status}, gate ${nodeOf(parked, "g").status})`,
+      );
+      // Approve; the gate resolves, n1 is then blocked by the (now-exceeded)
+      // budget -> budget_exhausted (nothing in flight).
+      const appr = await req(
+        "POST",
+        `/api/agentic/runs/${enc(runId)}/nodes/g/approve`,
+        { origin: ALLOWED_ORIGIN },
+      );
+      assert(appr.status === 200, `budget(6): approve -> ${appr.status}`);
+      const done = await pollRun(
+        runId,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 20000, label: "budget-gate-halt" },
+      );
+      assert(
+        done.status === "budget_exhausted" &&
+          nodeOf(done, "g").status === "done" &&
+          nodeOf(done, "n1").status === "skipped",
+        `budget(6): after approve the run halts budget_exhausted, n1 skipped (got ${done.status})`,
+      );
+      console.log(
+        `  ok: (B2) waiting-approval defers the budget halt (no premature halt / orphan)`,
+      );
+    }
+
+    // (7) Exact cap under PARALLEL fan-out (the wave clamp): 3 parallel nodes,
+    // maxSpawns:2 -> exactly 2 spawn, the 3rd is skipped.
+    {
+      const ag = await bAgent();
+      const appRes = await bApp({
+        orchestrationMode: "parallel",
+        agentIds: chain(ag, 3),
+        budget: { maxSpawns: 2 },
+      });
+      assert(appRes.status === 201, `budget(7): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "par SLEEP=1");
+      assert(rres.status === 202, `budget(7): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 30000, label: "budget-parallel" },
+      );
+      const statuses = (done.nodeExecutions || []).map((n) => n.status);
+      const nDone = statuses.filter((s) => s === "done").length;
+      const nSkipped = statuses.filter((s) => s === "skipped").length;
+      assert(
+        done.status === "budget_exhausted" && done.spawnsUsed === 2,
+        `budget(7): exactly 2 spawns under fan-out (status ${done.status}, spawns ${done.spawnsUsed})`,
+      );
+      assert(
+        nDone === 2 && nSkipped === 1,
+        `budget(7): 2 ran + 1 skipped, not the full wave (done ${nDone}, skipped ${nSkipped})`,
+      );
+      console.log(
+        `  ok: (B2) parallel fan-out — wave clamp makes maxSpawns EXACT (2 run, 1 skipped)`,
+      );
+    }
+
+    // (3) LOAD-BEARING (D-Budget-3): restart PRESERVES spend — the cap must not
+    // reset to zero on reboot. Placed LAST so it leaves a live, logged-in gateway.
+    {
+      const ag = await bAgent();
+      const appRes = await bApp({
+        orchestrationMode: "sequential",
+        agentIds: chain(ag, 6),
+        budget: { maxSpawns: 4 },
+      });
+      assert(appRes.status === 201, `budget(3): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "step SLEEP=1");
+      assert(rres.status === 202, `budget(3): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      // Let ~2 spawns happen, then crash.
+      await pollRun(runId, (r) => (r.spawnsUsed || 0) >= 2, {
+        deadlineMs: 20000,
+        label: "budget-restart-pre",
+      });
+      await stopServer("SIGKILL");
+      await startServer();
+      await login();
+      const done = await pollRun(
+        runId,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 40000, label: "budget-restart" },
+      );
+      assert(
+        done.status === "budget_exhausted",
+        `budget(3): halted after restart (got ${done.status})`,
+      );
+      assert(
+        done.spawnsUsed === 4,
+        `budget(3): cap held at 4 ACROSS the restart, not reset (got ${done.spawnsUsed})`,
+      );
+      assert(
+        nodeOf(done, "n4").status === "skipped" &&
+          nodeOf(done, "n5").status === "skipped",
+        "budget(3): tail nodes skipped after budget halt",
+      );
+      console.log(
+        `  ok: (B2) LOAD-BEARING — restart preserves spend, cap holds at 4 (no reset)`,
+      );
+    }
+  }
+
   // Server was restarted inside retry(4); the load-bearing test below assumes a
   // live, logged-in gateway (already re-established by retry(4)'s startServer +
   // login).
