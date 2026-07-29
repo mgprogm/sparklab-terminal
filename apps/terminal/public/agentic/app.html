@@ -571,6 +571,34 @@
     margin-top: 4px;
   }
 
+  .run-cwd {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    font-size: 12px;
+  }
+  .run-cwd .run-cwd-label {
+    color: var(--mute);
+    margin-right: 6px;
+  }
+  .run-cwd .run-cwd-path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink);
+    word-break: break-all;
+  }
+  .run-cwd.is-error .run-cwd-path {
+    font-family: var(--font);
+    color: var(--danger);
+  }
+  .run-cwd .run-cwd-note {
+    margin-top: 4px;
+    color: var(--mute);
+    font-size: 11px;
+    cursor: help;
+  }
+
   .row-end {
     display: flex;
     gap: 6px;
@@ -926,6 +954,7 @@
         <div class="hint">
           The run executes on this session's server, in its working directory.
         </div>
+        <div id="run-cwd" class="run-cwd" style="display: none"></div>
       </div>
       <div>
         <label for="run-objective">Objective</label>
@@ -1178,6 +1207,7 @@
     activeRunId: null, // the id of the run currently being polled
     pollToken: 0, // bumped to invalidate in-flight poll ticks
     pollTimer: null, // the setTimeout handle for the poll loop
+    cwdToken: 0, // bumped to invalidate stale session-cwd fetches (Run view)
   };
 
   var el = {
@@ -1229,6 +1259,7 @@
     runTitle: document.getElementById("run-title"),
     runForm: document.getElementById("run-form"),
     runSession: document.getElementById("run-session"),
+    runCwd: document.getElementById("run-cwd"),
     runObjective: document.getElementById("run-objective"),
     runStartBtn: document.getElementById("run-start-btn"),
     runActive: document.getElementById("run-active"),
@@ -2074,6 +2105,60 @@
     });
   }
 
+  // Resolve + show the working directory the currently-selected target session
+  // would run in (its pane_current_path), so the operator sees WHERE the run —
+  // and any workspace-write agent — will act BEFORE Start run, and is warned up
+  // front if the target's server is unreachable. Informational only: it never
+  // blocks Start run. Stale-guarded: each fetch captures a token; a response is
+  // dropped if the user switched sessions mid-flight (token no longer current).
+  function renderRunCwd() {
+    var box = el.runCwd;
+    var sessionId = el.runSession.value;
+    var token = ++state.cwdToken;
+    box.className = "run-cwd";
+    if (!sessionId) {
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "";
+    box.textContent = "";
+    box.appendChild(elem("span", "run-cwd-label", "Working directory:"));
+    box.appendChild(elem("span", "run-cwd-path", "resolving…"));
+    api("GET", "/session-cwd?sessionId=" + encodeURIComponent(sessionId))
+      .then(function (data) {
+        if (token !== state.cwdToken) return; // superseded selection
+        box.className = "run-cwd";
+        box.textContent = "";
+        box.appendChild(elem("span", "run-cwd-label", "Working directory:"));
+        box.appendChild(
+          elem("span", "run-cwd-path", (data && data.cwd) || "unknown"),
+        );
+        var note = elem(
+          "div",
+          "run-cwd-note",
+          "A workspace-write agent modifies files in this directory.",
+        );
+        note.title =
+          "Codex workspace-write is an OS sandbox confined to this directory with no network. " +
+          "Claude workspace-write (acceptEdits) is not filesystem-confined and keeps network access.";
+        box.appendChild(note);
+      })
+      .catch(function () {
+        if (token !== state.cwdToken) return; // superseded selection
+        box.className = "run-cwd is-error";
+        box.textContent = "";
+        box.appendChild(elem("span", "run-cwd-label", "Working directory:"));
+        box.appendChild(
+          elem(
+            "span",
+            "run-cwd-path",
+            "Couldn't resolve — the session's server may be unreachable.",
+          ),
+        );
+      });
+  }
+
   function setView(view) {
     state.view = view;
     var isRun = view === "run";
@@ -2121,8 +2206,14 @@
     el.runForm.style.display = "";
     el.runActive.style.display = "none";
     el.nodeList.textContent = "";
+    el.runCwd.style.display = "none";
+    el.runCwd.textContent = "";
     setView("run");
-    populateSessionPicker().catch(handleError);
+    populateSessionPicker()
+      .then(function () {
+        renderRunCwd(); // a session may be preselected on open
+      })
+      .catch(handleError);
   }
 
   function leaveRunView() {
@@ -2515,6 +2606,11 @@
 
   // ---- Run view wiring ----
   el.runBack.addEventListener("click", leaveRunView);
+
+  // Re-resolve + show the working directory whenever the target session changes.
+  el.runSession.addEventListener("change", function () {
+    renderRunCwd();
+  });
 
   el.runForm.addEventListener("submit", function (e) {
     e.preventDefault();

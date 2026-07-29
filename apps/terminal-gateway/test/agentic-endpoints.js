@@ -1056,6 +1056,56 @@ async function main() {
     console.log(`  ok: created run target session ${targetSessionId}`);
   }
 
+  // ---- GET /session-cwd — resolve the run's working directory up front -----
+  // Same resolution + error mapping as startRun (parse -> ID_RE -> registry ->
+  // serverExec display-message #{pane_current_path}). The FE shows this in the
+  // Run view before Start run.
+  {
+    // Happy path: the real local target session resolves to an absolute cwd.
+    const ok = await req(
+      "GET",
+      `/api/agentic/session-cwd?sessionId=${enc(targetSessionId)}`,
+    );
+    assert(ok.status === 200, `session-cwd ok -> ${ok.status} (exp 200)`);
+    const body = await ok.json();
+    assert(
+      typeof body.cwd === "string" && body.cwd.startsWith("/"),
+      `session-cwd returns an absolute cwd (got ${JSON.stringify(body.cwd)})`,
+    );
+    assert(body.sessionId === targetSessionId, "session-cwd echoes sessionId");
+    assert(body.serverId === "local", "session-cwd reports serverId local");
+
+    // Blank sessionId -> 400 (bad_request, ID_RE fails on "").
+    const blank = await req("GET", "/api/agentic/session-cwd?sessionId=");
+    assert(
+      blank.status === 400,
+      `session-cwd blank -> ${blank.status} (exp 400)`,
+    );
+
+    // Missing sessionId param entirely -> 400 (same ID_RE failure).
+    const missing = await req("GET", "/api/agentic/session-cwd");
+    assert(
+      missing.status === 400,
+      `session-cwd missing param -> ${missing.status} (exp 400)`,
+    );
+
+    // A well-formed but nonexistent web- session -> 502 (cwd_unresolved): passes
+    // ID_RE + registry, but display-message finds no such tmux session. Matches
+    // startRun's cwd-resolution failure code.
+    const unknown = await req(
+      "GET",
+      "/api/agentic/session-cwd?sessionId=web-does-not-exist-xyz",
+    );
+    assert(
+      unknown.status === 502,
+      `session-cwd unknown session -> ${unknown.status} (exp 502 cwd_unresolved)`,
+    );
+
+    console.log(
+      `  ok: GET /session-cwd (200 abs cwd; blank/missing -> 400; unknown web- -> 502)`,
+    );
+  }
+
   // ---- (b) end-to-end: codex-cli happy path (exit 0 -> done) + (h) prefix
   {
     const { appId } = await createRunnerApp({

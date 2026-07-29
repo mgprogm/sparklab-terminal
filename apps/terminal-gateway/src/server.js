@@ -3175,6 +3175,41 @@ async function handleAgentic(req, res, url) {
       return sendJson(res, 200, run);
     }
 
+    // GET /api/agentic/session-cwd?sessionId=<qualified-or-bare> — resolve the
+    // working directory a run WOULD execute in (pane_current_path), the SAME way
+    // startRun resolves + freezes resolvedConfig.cwd, so the Run view can show it
+    // before Start run (and surface an unreachable target up front). Read-only:
+    // origin-exempt + bearer-or-cookie, exactly like the other agentic GETs.
+    // Errors mirror startRun: bad/blank sessionId or unknown server -> 400
+    // (bad_request); server unreachable / no such tmux session -> 502
+    // (cwd_unresolved). serverExec already carries the SSH ConnectTimeout, so this
+    // is bounded — no probe/blocking loop.
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "session-cwd") {
+      const ref = String(url.searchParams.get("sessionId") || "");
+      const { serverId, tmuxName } = parseSessionRef(ref);
+      if (!ID_RE.test(tmuxName))
+        throw agenticErr("bad_request", "invalid sessionId");
+      const server = registry.get(serverId);
+      if (!server)
+        throw agenticErr("bad_request", `unknown server: ${serverId}`);
+      let cwd;
+      try {
+        const r = await serverExec(server, [
+          "display-message",
+          "-p",
+          "-t",
+          tmuxName,
+          "#{pane_current_path}",
+        ]);
+        cwd = r.stdout.trim();
+      } catch {
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+      }
+      if (!isAbsPath(cwd))
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+      return sendJson(res, 200, { sessionId: ref, serverId, cwd });
+    }
+
     // ---- Run-lifecycle write routes (iteration 2) ----
     // These call the async drivers in this module (startRun/killRun), which own
     // the tmux/marker I/O. Origin/CSRF + auth parity is enforced upstream in
