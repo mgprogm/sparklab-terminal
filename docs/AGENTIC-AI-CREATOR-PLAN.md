@@ -573,8 +573,12 @@ Carried over from v1, still deferred:
   entirely.
 - **Shared agent library UI** — agents are already reusable by id across Agentic AIs;
   a dedicated browsing/search library page is deferred.
-- **Templates/marketplace, scheduled/event-triggered runs, cost/token budgets,
-  evaluation datasets.**
+- **Templates** — ✅ SHIPPED (iter7, post-v1): export/import/clone an Agentic AI as a
+  portable, self-contained JSON (embeds its agents + connections; import recreates with
+  fresh ids + remapped refs, validate-first + rollback). A **marketplace/registry** for
+  sharing templates across users/installs is still deferred.
+- **Scheduled/event-triggered runs, cost/token budgets, evaluation datasets** — still
+  deferred (candidate post-v1 iterations).
 - **The generalized multi-artifact registry** (D8) — explicitly deferred a fourth
   time here; if ever built, it must be horizontal across Kanban/PM/Agentic AI, not
   bespoke to this artifact.
