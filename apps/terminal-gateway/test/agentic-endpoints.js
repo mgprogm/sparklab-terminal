@@ -1925,6 +1925,135 @@ async function main() {
     );
   }
 
+  // ---- (iter9) human-approval node: gate pauses, approve proceeds -------
+  {
+    const ag = (
+      await (
+        await req("POST", "/api/agentic/agents", {
+          body: {
+            name: `gate-agent-${Date.now()}`,
+            runtimeProvider: "codex-cli",
+            sandboxMode: "read-only",
+            systemPrompt: "",
+          },
+          origin: ALLOWED_ORIGIN,
+        })
+      ).json()
+    ).id;
+    // n0(agent-task) -> n1(human-approval gate) -> n2(agent-task)
+    const wf = {
+      nodes: [
+        { id: "n0", type: "agent-task", agentId: ag },
+        { id: "n1", type: "human-approval" },
+        { id: "n2", type: "agent-task", agentId: ag },
+      ],
+      edges: [
+        { from: "n0", to: "n1" },
+        { from: "n1", to: "n2" },
+      ],
+      entryNodeId: "n0",
+    };
+    const mkApp = async () =>
+      (
+        await (
+          await req("POST", "/api/agentic/apps", {
+            body: {
+              name: "gate-app",
+              orchestrationMode: "custom",
+              agentIds: [ag],
+              workflow: wf,
+            },
+            origin: ALLOWED_ORIGIN,
+          })
+        ).json()
+      ).id;
+
+    // Approve path
+    const appId = await mkApp();
+    const run = await (
+      await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: { sessionId: targetSessionId, objective: "gate go" },
+        origin: ALLOWED_ORIGIN,
+      })
+    ).json();
+    const paused = await pollRun(
+      run.id,
+      (r) => nodeOf(r, "n1").status === "waiting-approval",
+      { deadlineMs: 15000, label: "gate-pause" },
+    );
+    assert(nodeOf(paused, "n0").status === "done", "gate: n0 done before gate");
+    assert(
+      nodeOf(paused, "n1").status === "waiting-approval" &&
+        !nodeOf(paused, "n1").pendingToolCall,
+      "gate: n1 is a bare human-approval gate (no pendingToolCall)",
+    );
+    assert(
+      nodeOf(paused, "n2").status === "pending",
+      "gate: n2 stays pending while the gate is open",
+    );
+    // bearer cannot approve a gate (human-only)
+    const bear = await req(
+      "POST",
+      `/api/agentic/runs/${enc(run.id)}/nodes/n1/approve`,
+      { headers: { authorization: `Bearer ${API_TOKEN}` }, cookie: false },
+    );
+    assert(
+      bear.status === 403,
+      `gate: bearer approve -> 403 (got ${bear.status})`,
+    );
+    // human approve -> workflow proceeds to n2 -> completed
+    const appr = await req(
+      "POST",
+      `/api/agentic/runs/${enc(run.id)}/nodes/n1/approve`,
+      { origin: ALLOWED_ORIGIN },
+    );
+    assert(appr.status === 200, `gate: approve -> ${appr.status}`);
+    const doneRun = await pollRun(run.id, (r) => r.status === "completed", {
+      deadlineMs: 15000,
+      label: "gate-approve",
+    });
+    assert(
+      nodeOf(doneRun, "n1").status === "done" &&
+        nodeOf(doneRun, "n2").status === "done",
+      "gate: approve advances to n2 and completes",
+    );
+    console.log(
+      `  ok: (iter9) human-approval gate — pauses run, n2 waits, human approve proceeds; bearer 403`,
+    );
+
+    // Reject path -> run fails
+    const appId2 = await mkApp();
+    const run2 = await (
+      await req("POST", `/api/agentic/apps/${enc(appId2)}/run`, {
+        body: { sessionId: targetSessionId, objective: "gate stop" },
+        origin: ALLOWED_ORIGIN,
+      })
+    ).json();
+    await pollRun(
+      run2.id,
+      (r) => nodeOf(r, "n1").status === "waiting-approval",
+      {
+        deadlineMs: 15000,
+        label: "gate-pause2",
+      },
+    );
+    const rej = await req(
+      "POST",
+      `/api/agentic/runs/${enc(run2.id)}/nodes/n1/reject`,
+      { body: { reason: "no" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(rej.status === 200, `gate: reject -> ${rej.status}`);
+    const failRun = await pollRun(run2.id, (r) => r.status === "failed", {
+      deadlineMs: 15000,
+      label: "gate-reject",
+    });
+    assert(
+      nodeOf(failRun, "n1").status === "failed",
+      "gate: reject fails the gate node + run",
+    );
+    console.log(`  ok: (iter9) human-approval gate — reject fails the run`);
+  }
+
   // ---- (a) THE LOAD-BEARING TEST: crash mid-run, boot rediscovery -------
   {
     const { appId } = await createRunnerApp({

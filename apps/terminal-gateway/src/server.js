@@ -3085,6 +3085,7 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
     throw agenticErr("invalid_workflow", "agentic AI has no agents");
   const { workflow, resolvedAgents } = buildResolvedWorkflow(app);
   for (const n of workflow.nodes) {
+    if (n.type === "human-approval") continue;
     if (!n.agentId || !resolvedAgents[n.agentId])
       throw agenticErr(
         "invalid_workflow",
@@ -3110,6 +3111,7 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
   // cwd are unsafe.
   if (app.orchestrationMode === "parallel") {
     for (const n of workflow.nodes) {
+      if (n.type === "human-approval") continue;
       const ag = resolvedAgents[n.agentId];
       if (ag && ag.sandboxMode === "workspace-write")
         throw agenticErr(
@@ -3132,6 +3134,7 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
       [...inDegree.values()].filter((degree) => degree === 0).length > 1;
     if (isBranching) {
       for (const n of workflow.nodes) {
+        if (n.type === "human-approval") continue;
         const ag = resolvedAgents[n.agentId];
         if (ag && ag.sandboxMode === "workspace-write")
           throw agenticErr(
@@ -3281,7 +3284,14 @@ async function advanceRun(runId) {
                 cur.status !== "waiting-approval")
             )
               break;
-            await spawnNode(run, cfg, nodeId);
+            const workflowNode = (cfg.workflow?.nodes || []).find(
+              (node) => node.id === nodeId,
+            );
+            if (workflowNode?.type === "human-approval") {
+              agentic.gateApprovalNode(run.id, nodeId);
+            } else {
+              await spawnNode(run, cfg, nodeId);
+            }
           }
           changed = true;
           continue;
@@ -3973,9 +3983,28 @@ async function handleAgentic(req, res, url) {
         return sendJson(res, 403, { error: "approval_requires_human" });
       const r = await readJsonObject(req);
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
-      agentic.approveAction(seg[1], seg[3], { pendingId: r.body.pendingId });
-      void advanceRun(seg[1]);
-      return sendJson(res, 200, agentic.getRun(seg[1]));
+      const runId = seg[1];
+      const nodeId = seg[3];
+      const run = agentic.getRun(runId);
+      const node = agentic.getNode(runId, nodeId);
+      const workflowNode = run.resolvedConfig?.workflow?.nodes?.find(
+        (candidate) => candidate.id === nodeId,
+      );
+      if (node.pendingToolCall) {
+        agentic.approveAction(runId, nodeId, { pendingId: r.body.pendingId });
+      } else if (
+        workflowNode?.type === "human-approval" &&
+        node.status === "waiting-approval"
+      ) {
+        agentic.recordNodeResult(runId, nodeId, {
+          status: "done",
+          finishedAt: Date.now(),
+        });
+      } else {
+        agentic.approveAction(runId, nodeId, { pendingId: r.body.pendingId });
+      }
+      void advanceRun(runId);
+      return sendJson(res, 200, agentic.getRun(runId));
     }
 
     // POST /api/agentic/runs/:id/nodes/:nodeId/reject {pendingId?, reason?} —
@@ -3993,12 +4022,35 @@ async function handleAgentic(req, res, url) {
         return sendJson(res, 403, { error: "approval_requires_human" });
       const r = await readJsonObject(req);
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
-      agentic.rejectAction(seg[1], seg[3], {
-        pendingId: r.body.pendingId,
-        reason: r.body.reason,
-      });
-      void advanceRun(seg[1]);
-      return sendJson(res, 200, agentic.getRun(seg[1]));
+      const runId = seg[1];
+      const nodeId = seg[3];
+      const run = agentic.getRun(runId);
+      const node = agentic.getNode(runId, nodeId);
+      const workflowNode = run.resolvedConfig?.workflow?.nodes?.find(
+        (candidate) => candidate.id === nodeId,
+      );
+      if (node.pendingToolCall) {
+        agentic.rejectAction(runId, nodeId, {
+          pendingId: r.body.pendingId,
+          reason: r.body.reason,
+        });
+      } else if (
+        workflowNode?.type === "human-approval" &&
+        node.status === "waiting-approval"
+      ) {
+        agentic.recordNodeResult(runId, nodeId, {
+          status: "failed",
+          finishedAt: Date.now(),
+          error: "rejected by human",
+        });
+      } else {
+        agentic.rejectAction(runId, nodeId, {
+          pendingId: r.body.pendingId,
+          reason: r.body.reason,
+        });
+      }
+      void advanceRun(runId);
+      return sendJson(res, 200, agentic.getRun(runId));
     }
 
     return sendJson(res, 404, { error: "not found" });

@@ -217,18 +217,20 @@ function resolveWorkflow(raw) {
     if (nodeIds.has(id))
       throw err("invalid_workflow", `duplicate node id: ${id}`, { node: id });
     nodeIds.add(id);
-    // WorkflowNode.type is CLOSED to "agent-task" in iter2 (matches shared-types
-    // WorkflowNodeSchema.type = z.enum(["agent-task"])). Reject any other type at
-    // the store boundary so a "router"/etc node can never reach the run engine.
+    // WorkflowNode.type is closed to the executable task and human gate types.
+    // Reject any other type at the store boundary so a "router"/etc node can
+    // never reach the run engine.
     const type = n.type ? String(n.type) : "agent-task";
-    if (type !== "agent-task")
+    if (type !== "agent-task" && type !== "human-approval")
       throw err("invalid_workflow", `unsupported node type: ${type}`, {
         node: id,
       });
     cleanNodes.push({
       id,
       type,
-      ...(n.agentId != null ? { agentId: String(n.agentId) } : {}),
+      ...(type === "agent-task" && n.agentId != null
+        ? { agentId: String(n.agentId) }
+        : {}),
     });
   }
 
@@ -841,6 +843,17 @@ function getSpawnAttempts(runId, nodeId) {
   return ne && ne.spawnAttempts ? ne.spawnAttempts : 0;
 }
 
+// Park a ready human-approval gate without spawning an agent process. Persists.
+function gateApprovalNode(runId, nodeId) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  if (ne.status !== "pending")
+    throw err("bad_request", "human-approval node must be pending");
+  ne.status = "waiting-approval";
+  persist();
+  return shapeRun(run);
+}
+
 // Record a node's TERMINAL result (done|failed|skipped) + finishedAt. Persists.
 function recordNodeResult(runId, nodeId, { status, finishedAt, error } = {}) {
   if (!NODE_TERMINAL.has(status))
@@ -1115,6 +1128,7 @@ export default {
   recordSpawned,
   recordGuidanceTurn,
   getSpawnAttempts,
+  gateApprovalNode,
   recordNodeResult,
   setRunStatus,
   decide,

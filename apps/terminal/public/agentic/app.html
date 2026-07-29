@@ -2098,11 +2098,15 @@
     var sourceEdges = workflow && Array.isArray(workflow.edges) ? workflow.edges : [];
     state.teamWorkflowDraft = {
       nodes: sourceNodes.map(function (node) {
-        return {
+        var type = node.type === "human-approval" ? "human-approval" : "agent-task";
+        var draftNode = {
           id: String(node.id || ""),
-          type: "agent-task",
-          agentId: String(node.agentId || ""),
+          type: type,
         };
+        if (type === "agent-task") {
+          draftNode.agentId = String(node.agentId || "");
+        }
+        return draftNode;
       }),
       edges: sourceEdges.map(function (edge) {
         return { from: String(edge.from || ""), to: String(edge.to || "") };
@@ -2148,9 +2152,28 @@
       var row = elem("div", "team-item workflow-row");
       row.appendChild(elem("span", "workflow-node-id", node.id));
 
+      var typeSelect = elem("select", "field");
+      typeSelect.setAttribute("aria-label", "Type for " + node.id);
+      var agentTaskOption = elem("option", null, "Agent task");
+      agentTaskOption.value = "agent-task";
+      typeSelect.appendChild(agentTaskOption);
+      var humanApprovalOption = elem("option", null, "Human approval");
+      humanApprovalOption.value = "human-approval";
+      typeSelect.appendChild(humanApprovalOption);
+      typeSelect.value = node.type;
+      typeSelect.addEventListener("change", function () {
+        node.type = typeSelect.value;
+        if (node.type === "human-approval") delete node.agentId;
+        renderWorkflowBuilder();
+      });
+      row.appendChild(typeSelect);
+
       var agentSelect = elem("select", "field");
       agentSelect.setAttribute("aria-label", "Agent for " + node.id);
-      if (teamAgentIds.length === 0) {
+      if (node.type === "human-approval") {
+        agentSelect.style.display = "none";
+        agentSelect.disabled = true;
+      } else if (teamAgentIds.length === 0) {
         var noAgent = elem("option", null, "No team agents available");
         noAgent.value = "";
         agentSelect.appendChild(noAgent);
@@ -2186,7 +2209,7 @@
       row.appendChild(remove);
       el.workflowNodes.appendChild(row);
     });
-    el.workflowAddNode.disabled = teamAgentIds.length === 0;
+    el.workflowAddNode.disabled = false;
 
     el.workflowEdges.textContent = "";
     if (draft.edges.length === 0) {
@@ -2241,19 +2264,27 @@
     var draft = state.teamWorkflowDraft;
     if (!draft) return;
     var nodes = draft.nodes.map(function (node) {
-      return { id: node.id, type: "agent-task", agentId: node.agentId };
+      var type = node.type === "human-approval" ? "human-approval" : "agent-task";
+      var savedNode = { id: node.id, type: type };
+      if (type === "agent-task") savedNode.agentId = node.agentId;
+      return savedNode;
     });
     if (
       nodes.some(function (node) {
-        return !node.agentId;
+        return node.type === "agent-task" && !node.agentId;
       })
     ) {
-      showBanner("Every workflow node needs a team agent.");
+      showBanner("Every agent-task workflow node needs a team agent.");
       return;
     }
     var agentIds = [];
     nodes.forEach(function (node) {
-      if (agentIds.indexOf(node.agentId) === -1) agentIds.push(node.agentId);
+      if (
+        node.type === "agent-task" &&
+        agentIds.indexOf(node.agentId) === -1
+      ) {
+        agentIds.push(node.agentId);
+      }
     });
     patchTeam({
       orchestrationMode: "custom",
@@ -2868,6 +2899,8 @@
     var ptc = ne.pendingToolCall;
     if (ne.status === "waiting-approval" && ptc && ptc.status === "pending") {
       card.appendChild(renderApprovalBanner(ne.nodeId, ptc));
+    } else if (ne.status === "waiting-approval" && !ptc) {
+      card.appendChild(renderHumanApprovalBanner(ne.nodeId));
     }
 
     if (ne.logTail) {
@@ -2983,6 +3016,38 @@
     return box;
   }
 
+  function renderHumanApprovalBanner(nodeId) {
+    var box = elem("div", "approval-box");
+    box.appendChild(elem("div", "approval-title", "Human-approval gate"));
+    box.appendChild(
+      elem(
+        "div",
+        "approval-val",
+        "Approve to let the workflow continue, or reject to stop.",
+      ),
+    );
+
+    var actions = elem("div", "approval-actions");
+    var approveBtn = elem("button", "btn btn-primary", "Approve");
+    approveBtn.type = "button";
+    var rejectBtn = elem("button", "btn btn-danger", "Reject");
+    rejectBtn.type = "button";
+    approveBtn.addEventListener("click", function () {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, null, "approve", null);
+    });
+    rejectBtn.addEventListener("click", function () {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, null, "reject", null);
+    });
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+    box.appendChild(actions);
+    return box;
+  }
+
   // POST the human decision. Both routes return the fresh Run (200); we render
   // it immediately, then keep polling so the resolution + downstream steps show.
   async function decidePendingCall(nodeId, pendingId, decision, reason) {
@@ -2996,7 +3061,8 @@
       encodeURIComponent(nodeId) +
       "/" +
       decision;
-    var body = { pendingId: pendingId };
+    var body = {};
+    if (pendingId != null) body.pendingId = pendingId;
     if (decision === "reject" && reason) body.reason = reason;
     var run;
     try {
@@ -3214,9 +3280,13 @@
   el.workflowAddNode.addEventListener("click", function () {
     var draft = state.teamWorkflowDraft;
     var agentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(Boolean);
-    if (!draft || agentIds.length === 0) return;
+    if (!draft) return;
     var id = "n" + state.nextWorkflowNodeNumber++;
-    draft.nodes.push({ id: id, type: "agent-task", agentId: agentIds[0] });
+    if (agentIds.length === 0) {
+      draft.nodes.push({ id: id, type: "human-approval" });
+    } else {
+      draft.nodes.push({ id: id, type: "agent-task", agentId: agentIds[0] });
+    }
     renderWorkflowBuilder();
   });
   el.workflowAddEdge.addEventListener("click", function () {

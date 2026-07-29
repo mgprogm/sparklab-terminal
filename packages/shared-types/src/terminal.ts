@@ -1191,7 +1191,7 @@ export type ArtifactConnection = z.infer<typeof ArtifactConnectionSchema>;
 /** One workflow node. DAG-shaped from day one so future node types are additive. */
 export const WorkflowNodeSchema = z.object({
   id: z.string().min(1).max(128),
-  type: z.enum(["agent-task"]),
+  type: z.enum(["agent-task", "human-approval"]),
   /** The Agent that executes this node (for type = "agent-task"). */
   agentId: z.string().optional(),
 });
