@@ -1523,6 +1523,136 @@ async function main() {
     );
   }
 
+  // ---- (iter6) send guidance: resume a completed claude-cli node ---------
+  {
+    const agRes = await req("POST", "/api/agentic/agents", {
+      body: {
+        name: `guide-claude-${Date.now()}`,
+        runtimeProvider: "claude-cli",
+        sandboxMode: "read-only",
+        systemPrompt: "",
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(agRes.status === 201, `guidance: claude agent -> ${agRes.status}`);
+    const gAgent = (await agRes.json()).id;
+    const appRes = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: `guide-app-${Date.now()}`,
+        orchestrationMode: "single",
+        agentIds: [gAgent],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    const gApp = await appRes.json();
+    const runRes = await req("POST", `/api/agentic/apps/${enc(gApp.id)}/run`, {
+      body: { sessionId: targetSessionId, objective: "turn one" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(runRes.status === 202, `guidance: start -> ${runRes.status}`);
+    const gRun = await runRes.json();
+    const doneRun = await pollRun(gRun.id, (r) => r.status === "completed", {
+      deadlineMs: 15000,
+      label: "guidance-turn1",
+    });
+    assert(
+      nodeOf(doneRun, "n0").status === "done",
+      "guidance: turn1 node done",
+    );
+    const wrapperPath = path.join(runsDir, gRun.id, "n0", "wrapper.sh");
+    assert(
+      /--session-id /.test(fs.readFileSync(wrapperPath, "utf8")),
+      "guidance: turn1 wrapper carried --session-id",
+    );
+
+    // Human-only: a bearer/scoped token must NOT trigger a guidance turn.
+    const bearerGuide = await req(
+      "POST",
+      `/api/agentic/runs/${enc(gRun.id)}/nodes/n0/guidance`,
+      {
+        body: { text: "nope" },
+        headers: { authorization: `Bearer ${API_TOKEN}` },
+        cookie: false,
+      },
+    );
+    assert(
+      bearerGuide.status === 403,
+      `guidance: bearer rejected 403 (got ${bearerGuide.status})`,
+    );
+
+    // Human guidance -> a resumed follow-up turn.
+    const gRes = await req(
+      "POST",
+      `/api/agentic/runs/${enc(gRun.id)}/nodes/n0/guidance`,
+      { body: { text: "please continue" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(gRes.status === 200, `guidance: human 200 (got ${gRes.status})`);
+    const after = await pollRun(
+      gRun.id,
+      (r) => r.status === "completed" && (nodeOf(r, "n0").turns || 1) >= 2,
+      { deadlineMs: 15000, label: "guidance-turn2" },
+    );
+    assert(nodeOf(after, "n0").status === "done", "guidance: turn2 node done");
+    assert(
+      (nodeOf(after, "n0").turns || 1) === 2,
+      `guidance: node turns == 2 (got ${nodeOf(after, "n0").turns})`,
+    );
+    assert(
+      /--resume /.test(fs.readFileSync(wrapperPath, "utf8")),
+      "guidance: turn2 wrapper carried --resume",
+    );
+    console.log(
+      `  ok: (iter6) send guidance — claude node resumes turn 2 (--session-id then --resume); bearer 403`,
+    );
+
+    // A codex-cli node cannot be guided (no resume support) -> 400.
+    const cxRes = await req("POST", "/api/agentic/agents", {
+      body: {
+        name: `guide-codex-${Date.now()}`,
+        runtimeProvider: "codex-cli",
+        sandboxMode: "read-only",
+        systemPrompt: "",
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    const cxApp = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: `guide-cx-app-${Date.now()}`,
+        orchestrationMode: "single",
+        agentIds: [(await cxRes.json()).id],
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    const cxRun = await req(
+      "POST",
+      `/api/agentic/apps/${enc((await cxApp.json()).id)}/run`,
+      {
+        body: { sessionId: targetSessionId, objective: "cx one" },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    const cxRunObj = await cxRun.json();
+    const cxDone = await pollRun(
+      cxRunObj.id,
+      (r) => r.status === "completed" || r.status === "failed",
+      { deadlineMs: 15000, label: "guidance-codex" },
+    );
+    if (nodeOf(cxDone, "n0").status === "done") {
+      const cxGuide = await req(
+        "POST",
+        `/api/agentic/runs/${enc(cxRunObj.id)}/nodes/n0/guidance`,
+        { body: { text: "x" }, origin: ALLOWED_ORIGIN },
+      );
+      assert(
+        cxGuide.status === 400,
+        `guidance: codex-cli node rejected 400 (got ${cxGuide.status})`,
+      );
+      console.log(
+        `  ok: (iter6) guidance on a codex-cli node is rejected (claude-only)`,
+      );
+    }
+  }
+
   // ---- (a) THE LOAD-BEARING TEST: crash mid-run, boot rediscovery -------
   {
     const { appId } = await createRunnerApp({

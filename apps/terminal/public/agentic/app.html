@@ -710,6 +710,12 @@
     white-space: nowrap;
   }
 
+  .node-turn {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
   .node-error {
     color: var(--danger);
     font-size: 12px;
@@ -765,6 +771,19 @@
     color: var(--body);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .guidance-form {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  textarea.guidance-input {
+    flex: 1 1 auto;
+    min-height: 48px;
+    resize: vertical;
+    line-height: 1.4;
   }
 
   .badge-running,
@@ -2475,6 +2494,10 @@
     var dur = fmtDuration(ne.startedAt, ne.finishedAt);
     if (dur) head.appendChild(elem("span", "node-dur", dur));
 
+    if (typeof ne.turns === "number" && ne.turns > 1) {
+      head.appendChild(elem("span", "node-turn", "Turn " + ne.turns));
+    }
+
     var st = ne.status || "pending";
     if (st === "failed" && ne.error) {
       head.appendChild(elem("span", "node-error", ne.error));
@@ -2504,7 +2527,58 @@
       raw.appendChild(elem("pre", "node-log", ne.logTail));
       card.appendChild(raw);
     }
+
+    if (ne.status === "done") {
+      card.appendChild(renderGuidanceForm(ne.nodeId));
+    }
     return card;
+  }
+
+  function renderGuidanceForm(nodeId) {
+    var form = elem("div", "guidance-form");
+    var input = elem("textarea", "field guidance-input");
+    input.placeholder = "Send a follow-up / answer the agent's question…";
+    input.setAttribute("aria-label", "Send guidance");
+    var sendBtn = elem("button", "btn btn-primary", "Send");
+    sendBtn.type = "button";
+    sendBtn.addEventListener("click", function () {
+      var text = input.value.trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      sendGuidance(nodeId, text, input, sendBtn);
+    });
+    form.appendChild(input);
+    form.appendChild(sendBtn);
+    return form;
+  }
+
+  async function sendGuidance(nodeId, text, input, sendBtn) {
+    var runId = state.activeRunId;
+    if (!runId) {
+      sendBtn.disabled = false;
+      return;
+    }
+    clearBanner();
+    var path =
+      "/runs/" +
+      encodeURIComponent(runId) +
+      "/nodes/" +
+      encodeURIComponent(nodeId) +
+      "/guidance";
+    var run;
+    try {
+      run = await api("POST", path, { text: text });
+    } catch (e) {
+      sendBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    input.value = "";
+    if (run) {
+      renderRun(run);
+      if (!RUN_TERMINAL[run.status]) startPolling();
+      else stopPolling();
+    }
   }
 
   // Prominent per-node approval banner. All fields via textContent. The pending

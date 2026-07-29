@@ -349,6 +349,7 @@ function shapeNodeExecution(ne) {
   return {
     nodeId: ne.nodeId,
     status: ne.status,
+    ...(ne.turns > 1 ? { turns: ne.turns } : {}),
     ...(ne.error != null ? { error: ne.error } : {}),
     ...(ne.agentRunId != null ? { agentRunId: ne.agentRunId } : {}),
     ...(ne.parentNodeId != null ? { parentNodeId: ne.parentNodeId } : {}),
@@ -726,6 +727,7 @@ function createRunRecord({
     seeded = nodeExecutions.map((ne) => ({
       nodeId: String(ne.nodeId),
       status: "pending",
+      turns: 1,
       parentNodeId: ne.parentNodeId != null ? String(ne.parentNodeId) : null,
     }));
   } else {
@@ -737,6 +739,7 @@ function createRunRecord({
     seeded = nodes.map((n) => ({
       nodeId: String(n.id),
       status: "pending",
+      turns: 1,
       parentNodeId: null,
     }));
   }
@@ -776,20 +779,49 @@ function listActiveRuns() {
     .map((r) => r.id);
 }
 
+// Raw node access for the server-side run driver. Internal fields such as the
+// provider conversation id are deliberately kept out of shapeNodeExecution.
+function getNode(runId, nodeId) {
+  return findNode(findRun(runId), nodeId);
+}
+
 // Mark a node RUNNING and tie it to its tmux job. Increments an internal
 // spawnAttempts counter (persisted to disk for restart-safety — the reap table's
 // "never-ran → respawn unless attempts>=2" cap — but NEVER shaped/in shared-types).
 // PERSISTS BEFORE the caller spawns tmux (ordering is load-bearing: a crash after
 // this persist but before spawn leaves a "running" node with no session/markers,
 // which the reap table re-spawns idempotently rather than losing).
-function recordSpawned(runId, nodeId, { agentRunId, startedAt } = {}) {
+function recordSpawned(
+  runId,
+  nodeId,
+  { agentRunId, startedAt, providerSessionId } = {},
+) {
   const run = findRun(runId);
   const ne = findNode(run, nodeId);
   ne.status = "running";
   if (agentRunId != null) ne.agentRunId = String(agentRunId);
+  if (providerSessionId != null)
+    ne.providerSessionId = String(providerSessionId);
+  if (!ne.turns) ne.turns = 1;
   ne.startedAt = startedAt != null ? Number(startedAt) : now();
   ne.finishedAt = null;
   ne.spawnAttempts = (ne.spawnAttempts || 0) + 1;
+  persist();
+  return shapeRun(run);
+}
+
+// Resume a completed provider conversation as another turn on the same node.
+function recordGuidanceTurn(runId, nodeId, { agentRunId, startedAt } = {}) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  if (ne.status !== "done")
+    throw err("bad_request", "guidance is only allowed on a completed step");
+  ne.status = "running";
+  if (agentRunId != null) ne.agentRunId = String(agentRunId);
+  ne.startedAt = startedAt != null ? Number(startedAt) : now();
+  ne.finishedAt = null;
+  delete ne.error;
+  ne.turns = (ne.turns || 1) + 1;
   persist();
   return shapeRun(run);
 }
@@ -833,6 +865,8 @@ function setRunStatus(runId, status, { finishedAt } = {}) {
         ne.finishedAt = ts;
       }
     }
+  } else {
+    run.finishedAt = null;
   }
   persist();
   return shapeRun(run);
@@ -1071,7 +1105,9 @@ export default {
   // Run-engine sync primitives (iter2) — server.js composes these with tmux I/O.
   createRunRecord,
   listActiveRuns,
+  getNode,
   recordSpawned,
+  recordGuidanceTurn,
   getSpawnAttempts,
   recordNodeResult,
   setRunStatus,

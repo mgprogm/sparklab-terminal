@@ -2445,6 +2445,24 @@ function composePromptText(run, cfg) {
   return tmpl ? `${tmpl}\n\n${obj}` : obj;
 }
 
+function gatewayApiTokenForNode(run, cfg, nodeId, agent) {
+  let gatewayApiToken = GATEWAY_API_TOKEN;
+  const toolPolicies = Array.isArray(agent.toolPolicies)
+    ? agent.toolPolicies
+    : [];
+  const prefixes = [
+    ...new Set(
+      toolPolicies
+        .map((policy) => cfg.connections?.[policy.connectionId]?.targetType)
+        .filter((targetType) => targetType === "pm" || targetType === "kanban"),
+    ),
+  ];
+  if (AGENT_MCP_SCOPED_TOKENS && prefixes.length > 0) {
+    gatewayApiToken = mintScopedMcpToken(run.id, nodeId, prefixes);
+  }
+  return gatewayApiToken;
+}
+
 function agenticErr(code, message, extra) {
   const e = new Error(message || code);
   e.code = code;
@@ -2472,6 +2490,8 @@ async function spawnNode(run, cfg, nodeId) {
     return;
   }
   const sessionName = nodeSessionName(run.id, nodeId);
+  const providerSessionId =
+    agent.runtimeProvider === "claude-cli" ? crypto.randomUUID() : undefined;
   let scratchDir;
   try {
     const base = await scratchBaseFor(server);
@@ -2485,22 +2505,10 @@ async function spawnNode(run, cfg, nodeId) {
   agentic.recordSpawned(run.id, nodeId, {
     agentRunId: sessionName,
     startedAt: Date.now(),
+    providerSessionId,
   });
 
-  let gatewayApiToken = GATEWAY_API_TOKEN;
-  const toolPolicies = Array.isArray(agent.toolPolicies)
-    ? agent.toolPolicies
-    : [];
-  const prefixes = [
-    ...new Set(
-      toolPolicies
-        .map((policy) => cfg.connections?.[policy.connectionId]?.targetType)
-        .filter((targetType) => targetType === "pm" || targetType === "kanban"),
-    ),
-  ];
-  if (AGENT_MCP_SCOPED_TOKENS && prefixes.length > 0) {
-    gatewayApiToken = mintScopedMcpToken(run.id, nodeId, prefixes);
-  }
+  const gatewayApiToken = gatewayApiTokenForNode(run, cfg, nodeId, agent);
 
   let inv;
   try {
@@ -2519,6 +2527,7 @@ async function spawnNode(run, cfg, nodeId) {
       connections: cfg.connections,
       gatewayApiToken,
       gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
+      agentSessionId: providerSessionId,
     });
   } catch (e) {
     console.warn(`[agentic] buildInvocation failed (${nodeId}): ${e.message}`);
@@ -3026,6 +3035,141 @@ async function waitForAdvanceIdle(runId, tries = 100) {
     await new Promise((r) => setTimeout(r, 20));
 }
 
+// Resume a completed claude-cli node as another turn in the same provider
+// conversation. The bounded idle wait avoids racing a currently-running
+// reducer pass; recordGuidanceTurn then performs the node transition atomically.
+async function sendGuidance(runId, nodeId, text) {
+  await waitForAdvanceIdle(runId);
+
+  const run = agentic.getRun(runId);
+  if (!run) throw agenticErr("not_found", "run not found");
+  // A failed/cancelled run is dead: reopening only handles "completed", so a
+  // done node inside one would go "running" with nothing to advance it (stuck).
+  if (run.status === "failed" || run.status === "cancelled")
+    throw agenticErr(
+      "bad_request",
+      "run is not resumable (failed or cancelled)",
+    );
+  const nodeExecution = agentic.getNode(runId, nodeId);
+  if (nodeExecution.status !== "done")
+    throw agenticErr(
+      "bad_request",
+      "guidance is only allowed on a completed step",
+    );
+
+  const cfg = run.resolvedConfig || {};
+  const workflowNode = (cfg.workflow?.nodes || []).find(
+    (node) => node.id === nodeId,
+  );
+  const agent = workflowNode && cfg.agents?.[workflowNode.agentId];
+  if (!agent)
+    throw agenticErr("not_found", `node execution not found: ${nodeId}`);
+  if (agent.runtimeProvider !== "claude-cli")
+    throw agenticErr(
+      "bad_request",
+      "guidance is only supported for claude-cli agents",
+    );
+  if (!nodeExecution.providerSessionId)
+    throw agenticErr("bad_request", "provider session id is missing");
+  if (typeof text !== "string" || text.trim().length === 0)
+    throw agenticErr("bad_request", "guidance text is required");
+  const promptBytes = Buffer.byteLength(text, "utf8");
+  if (promptBytes > agentRuntime.AGENT_PROMPT_MAX_BYTES)
+    throw agenticErr(
+      "bad_request",
+      `guidance exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
+    );
+
+  const server = runServer(run);
+  if (!server) throw agenticErr("bad_request", "run server not found");
+  let scratchDir;
+  try {
+    const base = await scratchBaseFor(server);
+    scratchDir = path.posix.join(base, run.id, nodeId);
+  } catch (e) {
+    throw agenticErr("backend_unavailable", e && e.message);
+  }
+  const sessionName = nodeSessionName(run.id, nodeId);
+
+  const failGuidanceSpawn = async (error) => {
+    const current = agentic.getRun(runId);
+    if (current?.status === "completed")
+      agentic.setRunStatus(runId, "running", {});
+    agentic.recordNodeResult(runId, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `guidance spawn failed: ${error && error.message}`,
+    });
+    startAgenticLoop();
+    return agentic.getRun(runId);
+  };
+
+  let inv;
+  try {
+    await serverCmd(server, [
+      "rm",
+      "-f",
+      "--",
+      path.posix.join(scratchDir, "start.marker"),
+      path.posix.join(scratchDir, "exit.marker"),
+      path.posix.join(scratchDir, "out.log"),
+    ]);
+    inv = agentRuntime.buildInvocation({
+      runId: run.id,
+      nodeId,
+      agent,
+      cwd: cfg.cwd,
+      promptText: text,
+      scratchDir,
+      server,
+      connections: cfg.connections,
+      gatewayApiToken: gatewayApiTokenForNode(run, cfg, nodeId, agent),
+      gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
+      agentSessionId: nodeExecution.providerSessionId,
+      resume: true,
+    });
+    await serverCmd(server, ["mkdir", "-p", "--", scratchDir]);
+    for (const f of inv.files) {
+      const dest = path.posix.join(scratchDir, f.relPath);
+      await serverCmdStdin(server, ["tee", "--", dest], f.content);
+      await serverCmd(server, ["chmod", f.mode, "--", dest]);
+    }
+  } catch (e) {
+    console.warn(
+      `[agentic] guidance materialize failed (${nodeId}): ${e.message}`,
+    );
+    return failGuidanceSpawn(e);
+  }
+
+  agentic.recordGuidanceTurn(runId, nodeId, {
+    agentRunId: sessionName,
+    startedAt: Date.now(),
+  });
+  if (agentic.getRun(runId)?.status === "completed")
+    agentic.setRunStatus(runId, "running", {});
+
+  try {
+    await serverExec(server, [
+      "new-session",
+      "-d",
+      "-s",
+      sessionName,
+      "-c",
+      cfg.cwd,
+      inv.tmuxArg,
+    ]);
+  } catch (e) {
+    console.warn(
+      `[agentic] guidance spawn failed (${sessionName}): ${e.message}`,
+    );
+    await tmuxKill(server, sessionName);
+    return failGuidanceSpawn(e);
+  }
+
+  startAgenticLoop();
+  return agentic.getRun(runId);
+}
+
 // ---- DRIVER: killRun ----
 // Kills the run's live agrun- job(s) — the ONLY kill path, always an agrun- name
 // derived from the run, NEVER a web- id (HARD-constraint #2 by construction) —
@@ -3466,6 +3610,28 @@ async function handleAgentic(req, res, url) {
       return true;
     }
 
+    // POST /api/agentic/runs/:id/nodes/:nodeId/guidance {text} — human-only
+    // follow-up turn for a completed claude-cli node.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "guidance"
+    ) {
+      // Resuming a CLI conversation is a human action. A scoped/bearer token
+      // available to the agent must never be able to trigger another turn.
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "guidance_requires_human" });
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(
+        res,
+        200,
+        await sendGuidance(seg[1], seg[3], r.body.text),
+      );
+    }
+
     // POST /api/agentic/runs/:id/nodes/:nodeId/approve {pendingId?} — human
     // (FE) decision. Resolves the node's current pending call (or an explicit
     // pendingId, defense-in-depth) as approved, kicks advanceRun in the
@@ -3517,8 +3683,6 @@ async function handleAgentic(req, res, url) {
       return sendJson(res, 200, agentic.getRun(seg[1]));
     }
 
-    // "guidance" (interactive CLI mode / a dedicated human-approval NODE type)
-    // is iteration 4+ — deliberately left to fall through to the 404 below.
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
     if (e && e.code) {

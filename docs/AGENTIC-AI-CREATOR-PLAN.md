@@ -615,13 +615,20 @@ Carried over from v1, still deferred:
   codex-cli agents with artifact connections are **fail-closed at run start**
   (`codex_mcp_unsupported`) since codex's ambient MCP can't be mediated (isolating
   `CODEX_HOME` breaks its auth — verified).
-- **Interactive vs. batch invocation for "send guidance"** — supporting mid-run
-  guidance (§5d) requires that step's runtime provider to have been invoked
-  interactively inside the tmux pane rather than as a one-shot batch call, so the
-  existing keystroke-injection endpoint has something live to write into. Recommend
-  scoping this to `codex-cli` and `claude-cli`'s interactive modes specifically as an
-  opt-in per Agent, not a blanket requirement — most agent-task steps are fine as
-  pure batch calls and shouldn't pay the complexity cost of staying interactive.
+- **"Send guidance" — ✅ RESOLVED (iter6, 2026-07-29), via resume, NOT interactive
+  panes.** The original worry (needing an interactive tmux pane + keystroke injection)
+  was avoided: each claude-cli node runs turn 1 with a controlled `--session-id <uuid>`;
+  a human then POSTs `/runs/:id/nodes/:nodeId/guidance {text}` (HUMAN-COOKIE-ONLY, like
+  approve/reject — a leaked scoped token can't trigger it), which clears the node's
+  stale markers, re-materializes the prompt = the guidance text with `--resume <uuid>`,
+  and respawns the SAME detached tmux job as a new turn (`turns++`); a `completed` run
+  is reopened to `running` and the normal reducer/reap advances it. Stays fully within
+  the survivable batch model — no interactive pane, no keystroke path. `codex-cli`
+  guidance is fail-closed (no resume support). Proven by a test that runs a claude node
+  to done, sends guidance, and asserts turn 2 resumed (`--session-id` then `--resume`,
+  `turns==2`) + bearer→403. Known edge (documented): a gateway crash in the ~ms window
+  between recording the turn and spawning it re-runs the node's ORIGINAL objective (the
+  guidance text isn't durably persisted); acceptable — retry the guidance.
 
 ---
 

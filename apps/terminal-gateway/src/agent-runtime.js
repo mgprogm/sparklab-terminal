@@ -245,6 +245,8 @@ function wrapperScript({ envExports, cwd, scratchDir, invocationLine }) {
  *   mcp.json env block, never via the manifest file (see the claude-cli
  *   builder + buildMcpPolicyManifest).
  * @property {string} [gatewayBaseUrl] - iter3 (D5): e.g. http://127.0.0.1:3007.
+ * @property {string} [agentSessionId] - claude-cli conversation UUID
+ * @property {boolean} [resume] - resume the claude-cli conversation
  */
 
 /**
@@ -297,6 +299,8 @@ function buildInvocation(input) {
     connections,
     gatewayApiToken,
     gatewayBaseUrl,
+    agentSessionId,
+    resume,
   } = input;
 
   const provider = agent && agent.runtimeProvider;
@@ -327,6 +331,8 @@ function buildInvocation(input) {
     connections,
     gatewayApiToken,
     gatewayBaseUrl,
+    agentSessionId,
+    resume,
   });
 }
 
@@ -540,6 +546,8 @@ const PROVIDERS = {
   // itself (isLocalServer) is provider-agnostic by construction.
   "claude-cli": {
     build(_input, ctx) {
+      if (ctx.resume && !ctx.agentSessionId)
+        throw new Error("agentSessionId is required to resume claude-cli");
       const sandboxMode = clampSandbox(ctx.agent.sandboxMode);
       const permissionMode = claudePermissionMode(sandboxMode);
       const cmd = CLAUDE_COMMAND.map(shSingleQuote).join(" ");
@@ -610,8 +618,15 @@ const PROVIDERS = {
         ];
       }
 
+      const sessionFlag = ctx.resume
+        ? `--resume ${shSingleQuote(ctx.agentSessionId)} `
+        : ctx.agentSessionId
+          ? `--session-id ${shSingleQuote(ctx.agentSessionId)} `
+          : "";
+
       const invocationLine =
         `cat ${promptPath} | ${cmd} -p ` +
+        sessionFlag +
         `--output-format stream-json --verbose ` +
         `--permission-mode ${shSingleQuote(permissionMode)} ` +
         `--append-system-prompt-file ${systemPath} ` +
