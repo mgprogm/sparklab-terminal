@@ -1,6 +1,6 @@
 # Bounded iteration ("revise-until-good") — A2 DESIGN REVIEW
 
-> **Status: DESIGN SETTLED (4 Codex review rounds, §7-§10) — build R8 parser first, then A2.** This was the HEAVY checkpoint the
+> **Status: SHIPPED (commit 98d88fa, deployed). Design settled over 4 Codex review rounds (§7-§10); R8 parser (970b137) + A2 both built + verified. test:agentic 417; real-claude --resume smoke passed.** This was the HEAVY checkpoint the
 > Arc II plan (`docs/AGENTIC-RICHER-WORKFLOWS-II-PLAN.md` §A2) mandates _before_
 > writing code. It asks for sign-off on the decisions in §2. Nothing is
 > implemented; `test:agentic` is at 381 (retry + router + eval + budget shipped).
