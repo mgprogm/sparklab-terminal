@@ -6,15 +6,29 @@
   Pluggable Agentic AI Creator artifact (AGENTIC-AI-CREATOR-PLAN.md D8: ONE
   artifact, an in-app catalog — NOT a per-app artifact).
 
-  SCOPE (iter1 + iter2): a catalog + a minimal Run view. The catalog lists
-  Agentic AIs from GET /api/agentic/apps (name + status badge + agent/connection
-  counts), offers a "New Agentic AI" form (POST /api/agentic/apps), and a
-  publish/unpublish toggle (PATCH /api/agentic/apps/:id/status). The Run view
-  (iter2) picks a target terminal session, starts a run (POST /apps/:id/run),
-  polls GET /runs/:id to render per-node status + tailed logs, and can Kill
-  (DELETE /runs/:id). The full visual Builder / workflow-DAG editor and the
-  human-approval UI are later, human-checkpointed iterations and are deliberately
-  NOT built here.
+  SCOPE: a catalog + a team-builder + a minimal Run view, across three tabbed
+  views:
+    · Agentic AIs — the catalog. Lists apps from GET /api/agentic/apps (name +
+      status badge + agent/connection counts), offers a "New Agentic AI" form
+      (POST /api/agentic/apps), a publish/unpublish toggle
+      (PATCH /api/agentic/apps/:id/status), and a per-app TEAM editor (a modal
+      that GETs /api/agentic/apps/:id and PATCHes {agentIds, connectionIds,
+      orchestrationMode}). The team editor is what lets an app actually run —
+      without ≥1 agent, POST /apps/:id/run rejects with "agentic AI has no
+      agents".
+    · Agents — the reusable agent library. Lists GET /api/agentic/agents,
+      creates (POST) / edits (PATCH) / deletes (DELETE) agents, and edits each
+      agent's per-connection tool policy (toolPolicies[], tools:"all").
+    · Connections — scoped MCP access to other artifacts. Lists / creates / deletes
+      GET|POST|DELETE /api/agentic/connections; targetType choices come from
+      GET /api/agentic/mcp-servers.
+  The Run view picks a target terminal session, starts a run (POST /apps/:id/run),
+  polls GET /runs/:id to render per-node status + tailed logs + tool-call
+  approvals, and can Kill (DELETE /runs/:id).
+
+  The workflow/DAG is AUTO-DERIVED by the backend from agentIds + orchestrationMode
+  (D9) — this artifact never sends a `workflow` object and builds no DAG editor.
+  Team order matters (supervisor/pipeline order), so agentIds preserve list order.
 
   A SINGLE self-contained document — inline <style> + inline <script>, ZERO
   external requests (no CDN, no fetched web fonts, no imports). Loaded into a
@@ -101,6 +115,33 @@
   .topbar .grow {
     flex: 1 1 auto;
     min-width: 0;
+  }
+
+  /* ---- Tabs ---- */
+  .tabs {
+    display: flex;
+    gap: 2px;
+  }
+
+  .tab {
+    background: transparent;
+    color: var(--mute);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 5px 11px;
+    transition: background 0.12s ease, color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .tab:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .tab.active {
+    color: var(--ink);
+    background: var(--canvas-soft);
+    border-color: var(--hairline);
   }
 
   .btn {
@@ -267,6 +308,199 @@
     color: var(--body);
   }
 
+  /* ---- Library views (agents / connections) ---- */
+  .library {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .library.show {
+    display: flex;
+  }
+
+  .lib-row {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 12px 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .lib-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .lib-name {
+    font-size: 14px;
+    font-weight: 500;
+    word-break: break-word;
+  }
+
+  .lib-sub {
+    color: var(--mute);
+    font-size: 12px;
+    word-break: break-word;
+  }
+
+  .lib-badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+  }
+
+  .lib-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+
+  .badge-codex-cli {
+    color: var(--accent);
+  }
+
+  .badge-claude-cli {
+    color: var(--ok);
+    border-color: rgba(143, 185, 138, 0.5);
+  }
+
+  /* ---- Team / policy editor bits (inside modals) ---- */
+  .team-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .team-item {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .team-item .team-idx {
+    color: var(--mute);
+    font-size: 11px;
+    min-width: 16px;
+    text-align: right;
+  }
+
+  .team-item .team-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .team-item .team-role {
+    color: var(--mute);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .picker-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .picker-row .field {
+    flex: 1 1 auto;
+  }
+
+  .check-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 5px 0;
+  }
+
+  .check-row input {
+    margin-top: 3px;
+  }
+
+  .check-row label {
+    margin: 0;
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .policy-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+  }
+
+  .policy-row .policy-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 13px;
+    word-break: break-word;
+  }
+
+  .policy-row select.field {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .section-label {
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 6px;
+  }
+
+  .icon-btn {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    line-height: 1.2;
+  }
+
+  .icon-btn:hover {
+    background: var(--canvas-softer);
+    color: var(--ink);
+  }
+
+  .icon-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .modal-scroll {
+    overflow-y: auto;
+    max-height: 62vh;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: -4px 0;
+    padding: 4px 2px;
+  }
+
+  .inline-hint {
+    font-size: 12px;
+    color: var(--accent);
+    background: rgba(218, 210, 193, 0.1);
+    border: 1px solid rgba(218, 210, 193, 0.35);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
   /* ---- Modal ---- */
   .overlay {
     position: fixed;
@@ -293,6 +527,10 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+  }
+
+  .modal-wide {
+    max-width: 540px;
   }
 
   .modal h3 {
@@ -639,15 +877,39 @@
 </style>
 
 <div class="topbar">
-  <span class="title grow">Agentic AI Creator</span>
+  <span class="title">Agentic AI Creator</span>
+  <div id="tabs" class="tabs">
+    <button id="tab-apps" class="tab active" type="button" data-tab="catalog">
+      Agentic AIs
+    </button>
+    <button id="tab-agents" class="tab" type="button" data-tab="agents">
+      Agents
+    </button>
+    <button id="tab-connections" class="tab" type="button" data-tab="connections">
+      Connections
+    </button>
+  </div>
+  <span class="grow"></span>
   <button id="new-app-btn" class="btn btn-primary" type="button">
     New Agentic AI
+  </button>
+  <button id="new-agent-btn" class="btn btn-primary" type="button" style="display: none">
+    New Agent
+  </button>
+  <button id="new-connection-btn" class="btn btn-primary" type="button" style="display: none">
+    New Connection
   </button>
 </div>
 
 <div id="banner" class="banner" role="alert"></div>
 
 <div id="catalog" class="catalog"></div>
+
+<!-- Agents library: the reusable agent roster. -->
+<div id="agents-view" class="library"></div>
+
+<!-- Connections library: scoped MCP access to other artifacts. -->
+<div id="connections-view" class="library"></div>
 
 <!-- Run view (iteration 2): pick a target session, start a run, watch the
      nodeExecutions[] ledger + tailed logs, kill it. No workflow/DAG editor. -->
@@ -741,6 +1003,163 @@
   </form>
 </div>
 
+<!-- Team editor modal: edit an app's agents (order matters), connections, and
+     orchestration mode. GETs the full app on open; PATCHes on every change. -->
+<div id="team-overlay" class="overlay">
+  <div class="modal modal-wide">
+    <h3 id="team-title">Team</h3>
+    <div id="team-empty-hint" class="inline-hint" style="display: none">
+      Add at least one agent before running this Agentic AI.
+    </div>
+    <div class="modal-scroll">
+      <div>
+        <label for="team-mode">Orchestration mode</label>
+        <select id="team-mode" class="field">
+          <option value="single">single</option>
+          <option value="supervisor">supervisor</option>
+          <option value="sequential">sequential</option>
+          <option value="parallel">parallel</option>
+        </select>
+        <div id="team-mode-hint" class="hint">
+          How the team coordinates. Order below is the supervisor / pipeline order.
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Team agents</div>
+        <div id="team-agents" class="team-list"></div>
+        <div class="picker-row" style="margin-top: 8px">
+          <select id="team-add-select" class="field"></select>
+          <button id="team-add-btn" class="btn" type="button">Add</button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Connections</div>
+        <div id="team-connections"></div>
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="team-overlay">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Agent create/edit modal. In edit mode the tool-policy section appears. -->
+<div id="agent-overlay" class="overlay">
+  <form id="agent-form" class="modal modal-wide">
+    <h3 id="agent-title">New Agent</h3>
+    <div class="modal-scroll">
+      <div>
+        <label for="ag-name">Name</label>
+        <input
+          id="ag-name"
+          class="field"
+          type="text"
+          autocomplete="off"
+          placeholder="Code reviewer"
+          required
+        />
+      </div>
+      <div>
+        <label>Runtime provider</label>
+        <div style="display: flex; gap: 16px; margin-top: 2px">
+          <label style="display: flex; align-items: center; gap: 6px; color: var(--ink)">
+            <input type="radio" name="ag-provider" value="claude-cli" checked />
+            Claude
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; color: var(--ink)">
+            <input type="radio" name="ag-provider" value="codex-cli" />
+            Codex
+          </label>
+        </div>
+      </div>
+      <div>
+        <label for="ag-role">Role <span style="opacity: 0.6">(optional)</span></label>
+        <input
+          id="ag-role"
+          class="field"
+          type="text"
+          autocomplete="off"
+          placeholder="supervisor / worker / reviewer"
+        />
+      </div>
+      <div>
+        <label for="ag-prompt">System prompt</label>
+        <textarea
+          id="ag-prompt"
+          class="field"
+          placeholder="Optional — how this agent should behave."
+        ></textarea>
+      </div>
+      <div>
+        <label for="ag-sandbox">Sandbox mode</label>
+        <select id="ag-sandbox" class="field">
+          <option value="read-only">read-only</option>
+          <option value="workspace-write">workspace-write</option>
+        </select>
+        <div class="hint">
+          workspace-write lets the agent modify files in the run's working directory.
+        </div>
+      </div>
+      <div>
+        <label for="ag-model">Model <span style="opacity: 0.6">(optional)</span></label>
+        <input
+          id="ag-model"
+          class="field"
+          type="text"
+          autocomplete="off"
+          placeholder="Provider default"
+        />
+      </div>
+      <div id="agent-policies-wrap" style="display: none">
+        <div class="section-label">Tool policy per connection</div>
+        <div id="agent-policies"></div>
+        <div class="hint">Applies to all tools on that connection.</div>
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="agent-overlay">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="agent-save-btn">Create</button>
+    </div>
+  </form>
+</div>
+
+<!-- Connection create modal. targetType options come from GET /mcp-servers. -->
+<div id="connection-overlay" class="overlay">
+  <form id="connection-form" class="modal">
+    <h3>New Connection</h3>
+    <div>
+      <label for="cn-target">Target artifact</label>
+      <select id="cn-target" class="field"></select>
+    </div>
+    <div>
+      <label for="cn-scope">Scope</label>
+      <select id="cn-scope" class="field">
+        <option value="fixed">fixed</option>
+        <option value="runtime-selection">runtime-selection</option>
+      </select>
+      <div class="hint">
+        fixed binds one board/project; runtime-selection lets a run pick.
+      </div>
+    </div>
+    <div id="cn-target-id-wrap">
+      <label for="cn-target-id">
+        Target id <span style="opacity: 0.6">(optional)</span>
+      </label>
+      <input
+        id="cn-target-id"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="A specific board / project id"
+      />
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="connection-overlay">Cancel</button>
+      <button type="submit" class="btn btn-primary">Create</button>
+    </div>
+  </form>
+</div>
+
 <script>
   "use strict";
 
@@ -749,8 +1168,13 @@
   // ---------------------------------------------------------------------------
   var state = {
     apps: [], // summaries: {id,name,status,orchestrationMode,agentCount,connectionCount,version,...}
-    view: "catalog", // "catalog" | "run"
+    agents: [], // full Agent[] (the reusable library)
+    connections: [], // full ArtifactConnection[]
+    mcpServers: [], // [{id,name}] connection targets from GET /mcp-servers
+    view: "catalog", // "catalog" | "agents" | "connections" | "run"
     runApp: null, // the app being run (a catalog summary)
+    teamApp: null, // the full app currently open in the team editor
+    editingAgentId: null, // the agent id open in the agent modal (null = create)
     activeRunId: null, // the id of the run currently being polled
     pollToken: 0, // bumped to invalidate in-flight poll ticks
     pollTimer: null, // the setTimeout handle for the poll loop
@@ -758,13 +1182,47 @@
 
   var el = {
     newAppBtn: document.getElementById("new-app-btn"),
+    newAgentBtn: document.getElementById("new-agent-btn"),
+    newConnectionBtn: document.getElementById("new-connection-btn"),
     banner: document.getElementById("banner"),
     catalog: document.getElementById("catalog"),
+    agentsView: document.getElementById("agents-view"),
+    connectionsView: document.getElementById("connections-view"),
     newAppOverlay: document.getElementById("new-app-overlay"),
     newAppForm: document.getElementById("new-app-form"),
     naName: document.getElementById("na-name"),
     naDesc: document.getElementById("na-desc"),
     naMode: document.getElementById("na-mode"),
+    // Tabs
+    tabs: Array.prototype.slice.call(document.querySelectorAll("#tabs .tab")),
+    // Team editor modal
+    teamOverlay: document.getElementById("team-overlay"),
+    teamTitle: document.getElementById("team-title"),
+    teamEmptyHint: document.getElementById("team-empty-hint"),
+    teamMode: document.getElementById("team-mode"),
+    teamModeHint: document.getElementById("team-mode-hint"),
+    teamAgents: document.getElementById("team-agents"),
+    teamAddSelect: document.getElementById("team-add-select"),
+    teamAddBtn: document.getElementById("team-add-btn"),
+    teamConnections: document.getElementById("team-connections"),
+    // Agent modal
+    agentOverlay: document.getElementById("agent-overlay"),
+    agentForm: document.getElementById("agent-form"),
+    agentTitle: document.getElementById("agent-title"),
+    agName: document.getElementById("ag-name"),
+    agRole: document.getElementById("ag-role"),
+    agPrompt: document.getElementById("ag-prompt"),
+    agSandbox: document.getElementById("ag-sandbox"),
+    agModel: document.getElementById("ag-model"),
+    agentPoliciesWrap: document.getElementById("agent-policies-wrap"),
+    agentPolicies: document.getElementById("agent-policies"),
+    agentSaveBtn: document.getElementById("agent-save-btn"),
+    // Connection modal
+    connectionOverlay: document.getElementById("connection-overlay"),
+    connectionForm: document.getElementById("connection-form"),
+    cnTarget: document.getElementById("cn-target"),
+    cnScope: document.getElementById("cn-scope"),
+    cnTargetId: document.getElementById("cn-target-id"),
     // Run view
     runView: document.getElementById("run-view"),
     runBack: document.getElementById("run-back-btn"),
@@ -884,6 +1342,54 @@
     renderCatalog();
   }
 
+  async function loadAgents() {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/agents");
+    } catch (e) {
+      handleError(e);
+      state.agents = [];
+      renderAgents();
+      return;
+    }
+    state.agents = (data && data.agents) || [];
+    renderAgents();
+  }
+
+  async function loadConnections() {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/connections");
+    } catch (e) {
+      handleError(e);
+      state.connections = [];
+      renderConnections();
+      return;
+    }
+    state.connections = (data && data.connections) || [];
+    renderConnections();
+  }
+
+  // The MCP targets a connection may point at (pm/kanban). Small + static; fetched
+  // once so the connection modal's target picker can label ids by name.
+  async function loadMcpServers() {
+    try {
+      var data = await api("GET", "/mcp-servers");
+      state.mcpServers = (data && data.servers) || [];
+    } catch (e) {
+      state.mcpServers = [];
+    }
+  }
+
+  function mcpServerName(id) {
+    var found = state.mcpServers.filter(function (s) {
+      return s.id === id;
+    })[0];
+    return (found && found.name) || id;
+  }
+
   // ---------------------------------------------------------------------------
   // Mutations
   // ---------------------------------------------------------------------------
@@ -957,7 +1463,24 @@
     meta.appendChild(elem("span", null, "v" + (app.version || 1)));
     card.appendChild(meta);
 
+    if (!(app.agentCount > 0)) {
+      card.appendChild(
+        elem(
+          "div",
+          "inline-hint",
+          'No agents yet — add at least one via "Team" before running.',
+        ),
+      );
+    }
+
     var actions = elem("div", "app-actions");
+
+    var teamBtn = elem("button", "btn", "Team");
+    teamBtn.type = "button";
+    teamBtn.addEventListener("click", function () {
+      openTeamEditor(app);
+    });
+    actions.appendChild(teamBtn);
 
     var runBtn = elem("button", "btn", "Run");
     runBtn.type = "button";
@@ -990,6 +1513,507 @@
 
     card.appendChild(actions);
     return card;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agents library
+  // ---------------------------------------------------------------------------
+  function renderAgents() {
+    var root = el.agentsView;
+    root.textContent = "";
+    if (state.agents.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No agents yet"));
+      empty.appendChild(
+        elem("div", null, 'Create one with "New Agent" above.'),
+      );
+      root.appendChild(empty);
+      return;
+    }
+    state.agents.forEach(function (agent) {
+      root.appendChild(renderAgentRow(agent));
+    });
+  }
+
+  function renderAgentRow(agent) {
+    var row = elem("div", "lib-row");
+
+    var main = elem("div", "lib-main");
+    main.appendChild(elem("div", "lib-name", agent.name));
+
+    var badges = elem("div", "lib-badges");
+    var prov = agent.runtimeProvider || "claude-cli";
+    badges.appendChild(
+      elem(
+        "span",
+        "badge badge-" + prov,
+        prov === "codex-cli" ? "codex" : "claude",
+      ),
+    );
+    badges.appendChild(
+      elem("span", "badge", agent.sandboxMode || "read-only"),
+    );
+    if (agent.role) badges.appendChild(elem("span", "badge", agent.role));
+    var polCount = (agent.toolPolicies || []).length;
+    if (polCount > 0) {
+      badges.appendChild(
+        elem("span", "badge", plural(polCount, "policy", "policies")),
+      );
+    }
+    main.appendChild(badges);
+
+    if (agent.model) {
+      main.appendChild(elem("div", "lib-sub", "model: " + agent.model));
+    }
+    row.appendChild(main);
+
+    var actions = elem("div", "lib-actions");
+    var editBtn = elem("button", "btn btn-ghost", "Edit");
+    editBtn.type = "button";
+    editBtn.addEventListener("click", function () {
+      openAgentModal(agent);
+    });
+    actions.appendChild(editBtn);
+
+    var delBtn = elem("button", "btn btn-ghost", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (
+        window.confirm('Delete agent "' + agent.name + '"? This cannot be undone.')
+      ) {
+        deleteAgent(agent).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function deleteAgent(agent) {
+    await api("DELETE", "/agents/" + encodeURIComponent(agent.id));
+    await loadAgents();
+  }
+
+  // Open the agent modal. `agent` present = edit (PATCH), absent = create (POST).
+  // In edit mode we refresh the connection library first so the per-connection
+  // tool-policy selects reflect what currently exists.
+  async function openAgentModal(agent) {
+    clearBanner();
+    if (agent) await loadConnections();
+    state.editingAgentId = agent ? agent.id : null;
+    el.agentTitle.textContent = agent ? "Edit Agent" : "New Agent";
+    el.agentSaveBtn.textContent = agent ? "Save" : "Create";
+    el.agName.value = agent ? agent.name || "" : "";
+    el.agRole.value = agent && agent.role ? agent.role : "";
+    el.agPrompt.value = agent ? agent.systemPrompt || "" : "";
+    el.agSandbox.value = agent ? agent.sandboxMode || "read-only" : "read-only";
+    el.agModel.value = agent && agent.model ? agent.model : "";
+    var prov = agent ? agent.runtimeProvider || "claude-cli" : "claude-cli";
+    document.querySelectorAll('input[name="ag-provider"]').forEach(function (r) {
+      r.checked = r.value === prov;
+    });
+    // Tool-policy section only in edit mode (needs a saved agent id + connections).
+    if (agent) {
+      renderAgentPolicies(agent);
+      el.agentPoliciesWrap.style.display =
+        state.connections.length > 0 ? "" : "none";
+    } else {
+      el.agentPolicies.textContent = "";
+      el.agentPoliciesWrap.style.display = "none";
+    }
+    openOverlay(el.agentOverlay);
+    el.agName.focus();
+  }
+
+  // Render one policy select per connection. The current disposition is read from
+  // the agent's toolPolicies[]; "none" (no entry) is the default. Selects are read
+  // on save and reassembled into a fresh toolPolicies array.
+  function renderAgentPolicies(agent) {
+    var wrap = el.agentPolicies;
+    wrap.textContent = "";
+    var byConn = {};
+    (agent.toolPolicies || []).forEach(function (p) {
+      byConn[p.connectionId] = p.policy;
+    });
+    state.connections.forEach(function (conn) {
+      var rowEl = elem("div", "policy-row");
+      rowEl.appendChild(
+        elem(
+          "span",
+          "policy-name",
+          mcpServerName(conn.targetType) + " · " + conn.id,
+        ),
+      );
+      var sel = elem("select", "field");
+      sel.setAttribute("data-conn", conn.id);
+      [
+        ["none", "none"],
+        ["allow", "allow"],
+        ["approval", "approval"],
+        ["deny", "deny"],
+      ].forEach(function (pair) {
+        var opt = elem("option", null, pair[1]);
+        opt.value = pair[0];
+        sel.appendChild(opt);
+      });
+      sel.value = byConn[conn.id] || "none";
+      rowEl.appendChild(sel);
+      wrap.appendChild(rowEl);
+    });
+  }
+
+  // Assemble toolPolicies[] from the policy selects (skipping "none"), all tools.
+  function collectToolPolicies() {
+    var policies = [];
+    el.agentPolicies
+      .querySelectorAll("select[data-conn]")
+      .forEach(function (sel) {
+        if (sel.value && sel.value !== "none") {
+          policies.push({
+            connectionId: sel.getAttribute("data-conn"),
+            tools: "all",
+            policy: sel.value,
+          });
+        }
+      });
+    return policies;
+  }
+
+  async function submitAgent() {
+    var name = el.agName.value.trim();
+    if (!name) return;
+    var providerEl = document.querySelector('input[name="ag-provider"]:checked');
+    var provider = providerEl ? providerEl.value : "claude-cli";
+    el.agentSaveBtn.disabled = true;
+    try {
+      if (state.editingAgentId) {
+        var patch = {
+          name: name,
+          runtimeProvider: provider,
+          role: el.agRole.value.trim() || null,
+          systemPrompt: el.agPrompt.value,
+          sandboxMode: el.agSandbox.value,
+          model: el.agModel.value.trim() || null,
+          toolPolicies: collectToolPolicies(),
+        };
+        await api(
+          "PATCH",
+          "/agents/" + encodeURIComponent(state.editingAgentId),
+          patch,
+        );
+      } else {
+        var body = {
+          name: name,
+          runtimeProvider: provider,
+          systemPrompt: el.agPrompt.value,
+          sandboxMode: el.agSandbox.value,
+        };
+        var role = el.agRole.value.trim();
+        if (role) body.role = role;
+        var model = el.agModel.value.trim();
+        if (model) body.model = model;
+        await api("POST", "/agents", body);
+      }
+    } catch (e) {
+      el.agentSaveBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    el.agentSaveBtn.disabled = false;
+    closeOverlay(el.agentOverlay);
+    await loadAgents();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connections library
+  // ---------------------------------------------------------------------------
+  function renderConnections() {
+    var root = el.connectionsView;
+    root.textContent = "";
+    if (state.connections.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No connections yet"));
+      empty.appendChild(
+        elem(
+          "div",
+          null,
+          "Connect an Agentic AI's agents to a PM or Kanban board via \"New Connection\".",
+        ),
+      );
+      root.appendChild(empty);
+      return;
+    }
+    state.connections.forEach(function (conn) {
+      root.appendChild(renderConnectionRow(conn));
+    });
+  }
+
+  function renderConnectionRow(conn) {
+    var row = elem("div", "lib-row");
+    var main = elem("div", "lib-main");
+    main.appendChild(elem("div", "lib-name", mcpServerName(conn.targetType)));
+    var sub = conn.scope || "fixed";
+    if (conn.targetId) sub += " · " + conn.targetId;
+    main.appendChild(elem("div", "lib-sub", sub));
+    var badges = elem("div", "lib-badges");
+    badges.appendChild(elem("span", "badge", conn.targetType));
+    badges.appendChild(elem("span", "badge", conn.scope || "fixed"));
+    main.appendChild(badges);
+    row.appendChild(main);
+
+    var actions = elem("div", "lib-actions");
+    var delBtn = elem("button", "btn btn-ghost", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm("Delete this connection? This cannot be undone.")) {
+        deleteConnection(conn).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function deleteConnection(conn) {
+    await api("DELETE", "/connections/" + encodeURIComponent(conn.id));
+    await loadConnections();
+    // A deleted connection may have been referenced by apps' connectionIds; the
+    // catalog counts are re-derived server-side on next load.
+    await loadApps();
+  }
+
+  function openConnectionModal() {
+    clearBanner();
+    var sel = el.cnTarget;
+    sel.textContent = "";
+    if (state.mcpServers.length === 0) {
+      var none = elem("option", null, "No MCP targets available");
+      none.value = "";
+      sel.appendChild(none);
+    } else {
+      state.mcpServers.forEach(function (s) {
+        var opt = elem("option", null, s.name);
+        opt.value = s.id;
+        sel.appendChild(opt);
+      });
+    }
+    el.cnScope.value = "fixed";
+    el.cnTargetId.value = "";
+    openOverlay(el.connectionOverlay);
+  }
+
+  async function submitConnection() {
+    var targetType = el.cnTarget.value;
+    if (!targetType) {
+      showBanner("Pick a target artifact first.");
+      return;
+    }
+    var body = { targetType: targetType, scope: el.cnScope.value };
+    var targetId = el.cnTargetId.value.trim();
+    if (targetId) body.targetId = targetId;
+    try {
+      await api("POST", "/connections", body);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    closeOverlay(el.connectionOverlay);
+    await loadConnections();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Team editor (fixes the "agentic AI has no agents" run failure)
+  // ---------------------------------------------------------------------------
+  function agentById(id) {
+    return (
+      state.agents.filter(function (a) {
+        return a.id === id;
+      })[0] || null
+    );
+  }
+
+  // Open the team modal for a catalog summary. Loads the FULL app (agentIds +
+  // connectionIds live only on the full record) and the agent/connection libraries
+  // so the pickers are populated, then renders.
+  async function openTeamEditor(appSummary) {
+    clearBanner();
+    try {
+      await Promise.all([loadAgents(), loadConnections()]);
+      var app = await api(
+        "GET",
+        "/apps/" + encodeURIComponent(appSummary.id),
+      );
+      state.teamApp = app;
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    el.teamTitle.textContent = "Team · " + (state.teamApp.name || "");
+    el.teamMode.value = state.teamApp.orchestrationMode || "single";
+    renderTeamModal();
+    openOverlay(el.teamOverlay);
+  }
+
+  function renderTeamModal() {
+    var app = state.teamApp;
+    if (!app) return;
+    var agentIds = (app.agentIds || []).filter(Boolean);
+
+    el.teamEmptyHint.style.display = agentIds.length === 0 ? "" : "none";
+
+    // parallel + a workspace-write agent is rejected at run start (server §9).
+    var parallelWarn =
+      el.teamMode.value === "parallel" &&
+      agentIds.some(function (id) {
+        var a = agentById(id);
+        return a && a.sandboxMode === "workspace-write";
+      });
+    el.teamModeHint.textContent = parallelWarn
+      ? "parallel mode forbids workspace-write agents — a run will be rejected."
+      : "How the team coordinates. Order below is the supervisor / pipeline order.";
+    el.teamModeHint.style.color = parallelWarn ? "var(--danger)" : "";
+
+    // Ordered team list, with up/down reorder + remove.
+    el.teamAgents.textContent = "";
+    if (agentIds.length === 0) {
+      el.teamAgents.appendChild(
+        elem("div", "lib-sub", "No agents in this team yet."),
+      );
+    }
+    agentIds.forEach(function (id, i) {
+      var agent = agentById(id);
+      var item = elem("div", "team-item");
+      item.appendChild(elem("span", "team-idx", String(i + 1)));
+      item.appendChild(
+        elem("span", "team-name", agent ? agent.name : id + " (missing)"),
+      );
+      if (agent && agent.role) {
+        item.appendChild(elem("span", "team-role", agent.role));
+      }
+
+      var up = elem("button", "icon-btn", "↑");
+      up.type = "button";
+      up.disabled = i === 0;
+      up.addEventListener("click", function () {
+        moveTeamAgent(i, i - 1);
+      });
+      item.appendChild(up);
+
+      var down = elem("button", "icon-btn", "↓");
+      down.type = "button";
+      down.disabled = i === agentIds.length - 1;
+      down.addEventListener("click", function () {
+        moveTeamAgent(i, i + 1);
+      });
+      item.appendChild(down);
+
+      var rm = elem("button", "icon-btn", "Remove");
+      rm.type = "button";
+      rm.addEventListener("click", function () {
+        var next = agentIds.slice();
+        next.splice(i, 1);
+        patchTeam({ agentIds: next });
+      });
+      item.appendChild(rm);
+
+      el.teamAgents.appendChild(item);
+    });
+
+    // Add-agent picker: agents not already on the team.
+    var addSel = el.teamAddSelect;
+    addSel.textContent = "";
+    var available = state.agents.filter(function (a) {
+      return agentIds.indexOf(a.id) === -1;
+    });
+    if (available.length === 0) {
+      var opt = elem(
+        "option",
+        null,
+        state.agents.length === 0
+          ? "No agents — create one in the Agents tab"
+          : "All agents added",
+      );
+      opt.value = "";
+      addSel.appendChild(opt);
+      el.teamAddBtn.disabled = true;
+    } else {
+      el.teamAddBtn.disabled = false;
+      available.forEach(function (a) {
+        var o = elem("option", null, a.name);
+        o.value = a.id;
+        addSel.appendChild(o);
+      });
+    }
+
+    // Connections: a checkbox per connection, checked = attached to this app.
+    var connIds = (app.connectionIds || []).filter(Boolean);
+    el.teamConnections.textContent = "";
+    if (state.connections.length === 0) {
+      el.teamConnections.appendChild(
+        elem("div", "lib-sub", "No connections — create one in the Connections tab."),
+      );
+    }
+    state.connections.forEach(function (conn) {
+      var rowEl = elem("div", "check-row");
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.id = "team-conn-" + conn.id;
+      cb.checked = connIds.indexOf(conn.id) !== -1;
+      cb.addEventListener("change", function () {
+        var next = ((state.teamApp && state.teamApp.connectionIds) || [])
+          .filter(Boolean)
+          .slice();
+        var at = next.indexOf(conn.id);
+        if (cb.checked && at === -1) next.push(conn.id);
+        else if (!cb.checked && at !== -1) next.splice(at, 1);
+        patchTeam({ connectionIds: next });
+      });
+      var lab = elem(
+        "label",
+        null,
+        mcpServerName(conn.targetType) + " · " + (conn.scope || "fixed"),
+      );
+      lab.setAttribute("for", cb.id);
+      rowEl.appendChild(cb);
+      rowEl.appendChild(lab);
+      el.teamConnections.appendChild(rowEl);
+    });
+  }
+
+  function moveTeamAgent(from, to) {
+    var ids = ((state.teamApp && state.teamApp.agentIds) || [])
+      .filter(Boolean)
+      .slice();
+    if (to < 0 || to >= ids.length) return;
+    var moved = ids.splice(from, 1)[0];
+    ids.splice(to, 0, moved);
+    patchTeam({ agentIds: ids });
+  }
+
+  // PATCH the app definition (last-writer-wins, no expectedRev — mirrors
+  // togglePublish). The response is the fresh full app; we adopt it, re-render the
+  // modal, and refresh the catalog so its counts/hint stay in sync. `workflow` is
+  // NEVER sent — the backend derives it from agentIds + orchestrationMode (D9).
+  async function patchTeam(patch) {
+    var app = state.teamApp;
+    if (!app) return;
+    clearBanner();
+    var updated;
+    try {
+      updated = await api("PATCH", "/apps/" + encodeURIComponent(app.id), patch);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    if (updated && updated.id) state.teamApp = updated;
+    else if (patch.agentIds || patch.connectionIds || patch.orchestrationMode) {
+      // Fallback: adopt the patch locally if the response was unexpected.
+      Object.keys(patch).forEach(function (k) {
+        state.teamApp[k] = patch[k];
+      });
+    }
+    renderTeamModal();
+    await loadApps();
   }
 
   // ---------------------------------------------------------------------------
@@ -1053,10 +2077,38 @@
   function setView(view) {
     state.view = view;
     var isRun = view === "run";
+    var isCatalog = view === "catalog";
+    var isAgents = view === "agents";
+    var isConnections = view === "connections";
+
     el.runView.classList.toggle("show", isRun);
-    el.catalog.style.display = isRun ? "none" : "";
-    el.newAppBtn.style.display = isRun ? "none" : "";
+    el.catalog.style.display = isCatalog ? "" : "none";
+    el.agentsView.classList.toggle("show", isAgents);
+    el.connectionsView.classList.toggle("show", isConnections);
+
+    // The tab bar + contextual "New …" button are hidden while inside a run.
+    document.getElementById("tabs").style.display = isRun ? "none" : "";
+    el.newAppBtn.style.display = isCatalog ? "" : "none";
+    el.newAgentBtn.style.display = isAgents ? "" : "none";
+    el.newConnectionBtn.style.display = isConnections ? "" : "none";
+
+    // Reflect the active tab (run keeps whatever tab was active underneath).
+    if (!isRun) {
+      el.tabs.forEach(function (t) {
+        t.classList.toggle("active", t.getAttribute("data-tab") === view);
+      });
+    }
+
     if (!isRun) stopPolling();
+  }
+
+  // Switch top-level tab: sets the view and (re)loads that tab's data.
+  function selectTab(view) {
+    clearBanner();
+    setView(view);
+    if (view === "catalog") loadApps();
+    else if (view === "agents") loadAgents();
+    else if (view === "connections") loadConnections();
   }
 
   function openRunView(app) {
@@ -1376,11 +2428,26 @@
       closeOverlay(document.getElementById(btn.getAttribute("data-close")));
     });
   });
-  el.newAppOverlay.addEventListener("mousedown", function (e) {
-    if (e.target === el.newAppOverlay) closeOverlay(el.newAppOverlay);
+
+  // Click-on-backdrop and Escape close whichever overlay is open. The team editor
+  // PATCHes live on each change, so closing it never loses work.
+  var ALL_OVERLAYS = [
+    el.newAppOverlay,
+    el.teamOverlay,
+    el.agentOverlay,
+    el.connectionOverlay,
+  ];
+  ALL_OVERLAYS.forEach(function (ov) {
+    ov.addEventListener("mousedown", function (e) {
+      if (e.target === ov) closeOverlay(ov);
+    });
   });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") closeOverlay(el.newAppOverlay);
+    if (e.key === "Escape") {
+      ALL_OVERLAYS.forEach(function (ov) {
+        closeOverlay(ov);
+      });
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -1405,6 +2472,45 @@
     };
     closeOverlay(el.newAppOverlay);
     createApp(fields).catch(handleError);
+  });
+
+  // ---- Tab wiring ----
+  el.tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      selectTab(t.getAttribute("data-tab"));
+    });
+  });
+
+  // ---- Agents wiring ----
+  el.newAgentBtn.addEventListener("click", function () {
+    openAgentModal(null);
+  });
+  el.agentForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    submitAgent().catch(handleError);
+  });
+
+  // ---- Connections wiring ----
+  el.newConnectionBtn.addEventListener("click", function () {
+    openConnectionModal();
+  });
+  el.connectionForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    submitConnection().catch(handleError);
+  });
+
+  // ---- Team editor wiring ----
+  el.teamMode.addEventListener("change", function () {
+    patchTeam({ orchestrationMode: el.teamMode.value });
+  });
+  el.teamAddBtn.addEventListener("click", function () {
+    var id = el.teamAddSelect.value;
+    if (!id) return;
+    var ids = ((state.teamApp && state.teamApp.agentIds) || [])
+      .filter(Boolean)
+      .slice();
+    if (ids.indexOf(id) === -1) ids.push(id);
+    patchTeam({ agentIds: ids });
   });
 
   // ---- Run view wiring ----
@@ -1439,5 +2545,9 @@
   // ---------------------------------------------------------------------------
   // Boot
   // ---------------------------------------------------------------------------
-  void loadApps();
+  // Preload the MCP target list (static, tiny) so the connection modal + policy
+  // labels are ready, then render the default (catalog) tab.
+  void loadMcpServers().then(function () {
+    void loadApps();
+  });
 </script>
