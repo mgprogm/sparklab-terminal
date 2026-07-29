@@ -2198,6 +2198,16 @@
           draftNode.retryBackoffMs =
             rp.backoffMs != null ? Number(rp.backoffMs) : 0;
         }
+        if (type === "agent-task") {
+          // Loop policy is agent-task-only. Seed absent values with the backend
+          // defaults so the form and conditional save path stay symmetrical.
+          var lp = node.loopPolicy || {};
+          draftNode.loopMaxIterations =
+            lp.maxIterations != null ? Number(lp.maxIterations) : 1;
+          draftNode.loopUntil = lp.until != null ? String(lp.until) : "done";
+          draftNode.loopBackoffMs =
+            lp.backoffMs != null ? Number(lp.backoffMs) : 0;
+        }
         return draftNode;
       }),
       edges: sourceEdges.map(function (edge) {
@@ -2351,6 +2361,73 @@
         row.appendChild(retryWrap);
       }
 
+      // Loop sub-form (agent-task nodes only). One iteration, a "done"
+      // verdict, and no backoff are the backend defaults.
+      if (node.type === "agent-task") {
+        if (node.loopMaxIterations == null) node.loopMaxIterations = 1;
+        if (node.loopUntil == null) node.loopUntil = "done";
+        if (node.loopBackoffMs == null) node.loopBackoffMs = 0;
+
+        var loopWrap = elem("span", "workflow-retry");
+        loopWrap.appendChild(elem("span", "lib-sub", "loop"));
+
+        var iterationsInput = elem("input", "field workflow-retry-num");
+        iterationsInput.type = "number";
+        iterationsInput.min = "1";
+        iterationsInput.step = "1";
+        iterationsInput.value = String(node.loopMaxIterations);
+        iterationsInput.title = "Max loop iterations (1 = single run)";
+        iterationsInput.setAttribute(
+          "aria-label",
+          "Max loop iterations for " + node.id,
+        );
+        iterationsInput.addEventListener("change", function () {
+          var v = Math.round(Number(iterationsInput.value));
+          if (!isFinite(v) || v < 1) v = 1;
+          node.loopMaxIterations = v;
+          iterationsInput.value = String(v);
+        });
+        loopWrap.appendChild(iterationsInput);
+
+        var untilInput = elem("input", "field workflow-edge-label");
+        untilInput.type = "text";
+        untilInput.value = node.loopUntil;
+        untilInput.placeholder = "done";
+        untilInput.title = "Stop on this single-token verdict";
+        untilInput.setAttribute(
+          "aria-label",
+          "Loop until verdict for " + node.id,
+        );
+        untilInput.addEventListener("change", function () {
+          var v = untilInput.value.trim();
+          if (!/^\S+$/.test(v)) v = "done";
+          node.loopUntil = v;
+          untilInput.value = v;
+        });
+        loopWrap.appendChild(elem("span", "lib-sub", "until"));
+        loopWrap.appendChild(untilInput);
+
+        var loopBackoffInput = elem("input", "field workflow-retry-num");
+        loopBackoffInput.type = "number";
+        loopBackoffInput.min = "0";
+        loopBackoffInput.step = "1000";
+        loopBackoffInput.value = String(node.loopBackoffMs);
+        loopBackoffInput.title = "Backoff between loop iterations (ms)";
+        loopBackoffInput.setAttribute(
+          "aria-label",
+          "Loop backoff ms for " + node.id,
+        );
+        loopBackoffInput.addEventListener("change", function () {
+          var v = Math.round(Number(loopBackoffInput.value));
+          if (!isFinite(v) || v < 0) v = 0;
+          node.loopBackoffMs = v;
+          loopBackoffInput.value = String(v);
+        });
+        loopWrap.appendChild(elem("span", "lib-sub", "backoff ms"));
+        loopWrap.appendChild(loopBackoffInput);
+        row.appendChild(loopWrap);
+      }
+
       var remove = elem("button", "icon-btn", "Remove");
       remove.type = "button";
       remove.addEventListener("click", function () {
@@ -2502,6 +2579,21 @@
             maxAttempts: maxAttempts,
             backoffMs: backoffMs,
             retryOn: "failure",
+          };
+        }
+      }
+      if (type === "agent-task") {
+        // Only emit a loopPolicy when it departs from the default (one
+        // iteration, "done" verdict, no backoff).
+        var maxIterations =
+          node.loopMaxIterations != null ? node.loopMaxIterations : 1;
+        var until = node.loopUntil != null ? node.loopUntil : "done";
+        var loopBackoffMs = node.loopBackoffMs != null ? node.loopBackoffMs : 0;
+        if (maxIterations > 1 || loopBackoffMs > 0 || until !== "done") {
+          savedNode.loopPolicy = {
+            maxIterations: maxIterations,
+            until: until,
+            backoffMs: loopBackoffMs,
           };
         }
       }
@@ -3205,6 +3297,17 @@
     }
     if (Number.isFinite(ne.score)) {
       card.appendChild(elem("div", "run-meta", "SCORE: " + ne.score));
+    }
+    if (Number.isFinite(ne.iterationCount) && ne.iterationCount > 1) {
+      card.appendChild(
+        elem("div", "run-meta", "iteration " + ne.iterationCount),
+      );
+    }
+    if (typeof ne.lastVerdict === "string") {
+      card.appendChild(elem("div", "run-meta", "verdict: " + ne.lastVerdict));
+    }
+    if (ne.loopExhausted === true) {
+      card.appendChild(elem("div", "run-meta", "loop exhausted"));
     }
 
     // Iter3: a node parked on an MCP tool-call approval carries a persisted

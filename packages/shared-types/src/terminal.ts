@@ -1196,6 +1196,15 @@ export const RetryPolicySchema = z.object({
 });
 export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
 
+/** Per-agent-task bounded iteration policy. `until` must be a single
+ * non-whitespace token, matching parseResult's `BRANCH: <\S+>` verdict. */
+export const LoopPolicySchema = z.object({
+  maxIterations: z.number().int().min(1).default(1),
+  until: z.string().regex(/^\S+$/).default("done"),
+  backoffMs: z.number().int().min(0).default(0),
+});
+export type LoopPolicy = z.infer<typeof LoopPolicySchema>;
+
 /** One workflow node. DAG-shaped from day one so future node types are additive. */
 export const WorkflowNodeSchema = z.object({
   id: z.string().min(1).max(128),
@@ -1204,6 +1213,7 @@ export const WorkflowNodeSchema = z.object({
   agentId: z.string().optional(),
   /** Ignored for human-approval nodes. */
   retryPolicy: RetryPolicySchema.optional(),
+  loopPolicy: LoopPolicySchema.optional(),
 });
 export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
 
@@ -1317,6 +1327,12 @@ export const NodeExecutionSchema = z.object({
   chosenEdges: z.array(z.string()).optional(),
   /** Display-only evaluation score; never used for routing or skip logic. */
   score: z.number().optional(),
+  /** Display-only current bounded-loop iteration. */
+  iterationCount: z.number().int().optional(),
+  /** Display-only marker that the bounded loop did not converge. */
+  loopExhausted: z.boolean().optional(),
+  /** Display-only verdict emitted by the most recently completed iteration. */
+  lastVerdict: z.string().optional(),
   /** The node's current/last MCP tool-call approval record, if any (D5, iter3). */
   pendingToolCall: PendingToolCallSchema.nullable().optional(),
   /** Derived on GET (tailed step log); never persisted. */

@@ -93,6 +93,19 @@ const AGENT_RETRY_BACKOFF_MAX_MS =
   Number.isFinite(configuredRetryBackoffCap) && configuredRetryBackoffCap >= 0
     ? configuredRetryBackoffCap
     : 60_000;
+const configuredLoopIterationsCap = Number(
+  process.env.AGENT_LOOP_MAX_ITERATIONS,
+);
+const AGENT_LOOP_MAX_ITERATIONS =
+  Number.isInteger(configuredLoopIterationsCap) &&
+  configuredLoopIterationsCap >= 1
+    ? configuredLoopIterationsCap
+    : 8;
+const configuredLoopBackoffCap = Number(process.env.AGENT_LOOP_BACKOFF_MAX_MS);
+const AGENT_LOOP_BACKOFF_MAX_MS =
+  Number.isFinite(configuredLoopBackoffCap) && configuredLoopBackoffCap >= 0
+    ? configuredLoopBackoffCap
+    : 60_000;
 // Bound on Run.toolCallLog[] (iter3) — oldest entries trimmed on append, same
 // "bounded" idiom as the push-notification history elsewhere in this repo.
 const TOOL_CALL_LOG_CAP = 200;
@@ -294,6 +307,51 @@ function resolveWorkflow(raw) {
         retryOn,
       };
     }
+    let loopPolicy;
+    if (n.loopPolicy !== undefined) {
+      if (type !== "agent-task")
+        throw err(
+          "invalid_workflow",
+          "loopPolicy is only allowed on agent-task nodes",
+          { node: id },
+        );
+      if (
+        !n.loopPolicy ||
+        typeof n.loopPolicy !== "object" ||
+        Array.isArray(n.loopPolicy)
+      )
+        throw err("invalid_workflow", "loopPolicy must be an object", {
+          node: id,
+        });
+      const maxIterations =
+        n.loopPolicy.maxIterations == null ? 1 : n.loopPolicy.maxIterations;
+      const until = n.loopPolicy.until == null ? "done" : n.loopPolicy.until;
+      const backoffMs =
+        n.loopPolicy.backoffMs == null ? 0 : n.loopPolicy.backoffMs;
+      if (!Number.isInteger(maxIterations) || maxIterations < 1)
+        throw err(
+          "invalid_workflow",
+          "loopPolicy.maxIterations must be a positive integer",
+          { node: id },
+        );
+      if (typeof until !== "string" || !/^\S+$/.test(until))
+        throw err(
+          "invalid_workflow",
+          "loopPolicy.until must be a single non-whitespace token",
+          { node: id },
+        );
+      if (!Number.isInteger(backoffMs) || backoffMs < 0)
+        throw err(
+          "invalid_workflow",
+          "loopPolicy.backoffMs must be a non-negative integer",
+          { node: id },
+        );
+      loopPolicy = {
+        maxIterations: Math.min(maxIterations, AGENT_LOOP_MAX_ITERATIONS),
+        until,
+        backoffMs: Math.min(backoffMs, AGENT_LOOP_BACKOFF_MAX_MS),
+      };
+    }
     cleanNodes.push({
       id,
       type,
@@ -301,6 +359,7 @@ function resolveWorkflow(raw) {
         ? { agentId: String(n.agentId) }
         : {}),
       ...(retryPolicy ? { retryPolicy } : {}),
+      ...(loopPolicy ? { loopPolicy } : {}),
     });
   }
 
@@ -467,6 +526,7 @@ function shapeWorkflow(wf) {
       type: n.type,
       ...(n.agentId != null ? { agentId: n.agentId } : {}),
       ...(n.retryPolicy != null ? { retryPolicy: { ...n.retryPolicy } } : {}),
+      ...(n.loopPolicy != null ? { loopPolicy: { ...n.loopPolicy } } : {}),
     })),
     edges: (w.edges || []).map((e) => ({
       from: e.from,
@@ -523,6 +583,10 @@ function shapeNodeExecution(ne) {
     ...(ne.chosenEdges != null ? { chosenEdges: [...ne.chosenEdges] } : {}),
     // score is display-only metadata; decide() and routing/skip logic must never read it.
     ...(Number.isFinite(ne.score) ? { score: Number(ne.score) } : {}),
+    // Bounded-loop fields are display-only; driver phase state stays off-wire.
+    ...(ne.iterationCount > 1 ? { iterationCount: ne.iterationCount } : {}),
+    ...(ne.loopExhausted === true ? { loopExhausted: true } : {}),
+    ...(ne.lastVerdict != null ? { lastVerdict: ne.lastVerdict } : {}),
     // pendingToolCall IS persisted (iter3) — the current/last MCP tool-call
     // approval record for this node, or absent if none has ever been posted.
     ...(ne.pendingToolCall != null
@@ -552,6 +616,7 @@ function shapeRun(r) {
     status: r.status,
     nodeExecutions: (r.nodeExecutions || []).map(shapeNodeExecution),
     spawnsUsed,
+    ...(r.budgetHalt === true ? { budgetHalt: true } : {}),
     budget:
       r.resolvedConfig?.budget != null ? { ...r.resolvedConfig.budget } : null,
     // Bounded audit log (iter3) — allow/deny/approved/rejected/timed_out
@@ -989,7 +1054,10 @@ function recordSpawned(
   ne.startedAt = startedAt != null ? Number(startedAt) : now();
   ne.finishedAt = null;
   ne.spawnAttempts = (ne.spawnAttempts || 0) + 1;
+  if (ne.iterationCount == null) ne.iterationCount = 1;
   delete ne.retryPending;
+  delete ne.loopPending;
+  delete ne.neverRanPending;
   persist();
   return shapeRun(run);
 }
@@ -1041,6 +1109,85 @@ function getRetryState(runId, nodeId) {
   };
 }
 
+// Bounded-loop iteration state mirrors retry state: commit the next iteration
+// before respawning, then recordSpawned() clears the pending phase flag.
+function commitLoopIteration(runId, nodeId, { verdict } = {}) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.loopPending = true;
+  ne.iterationCount = (ne.iterationCount || 1) + 1;
+  ne.retryCount = 0;
+  ne.lastVerdict = String(verdict);
+  persist();
+  return shapeRun(run);
+}
+
+function getLoopState(runId, nodeId) {
+  const r = store.runs[runId];
+  const ne = r && (r.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+  return {
+    iterationCount: ne && ne.iterationCount ? ne.iterationCount : 1,
+    loopPending: Boolean(ne && ne.loopPending),
+    lastVerdict: ne ? ne.lastVerdict : undefined,
+    sessionEstablished: Boolean(ne && ne.sessionEstablished),
+    iterationInvocation:
+      ne && ne.iterationInvocation ? { ...ne.iterationInvocation } : undefined,
+  };
+}
+
+function commitNeverRanRecovery(runId, nodeId) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.neverRanPending = true;
+  ne.neverRanRecoveryCount = (ne.neverRanRecoveryCount || 0) + 1;
+  persist();
+  return shapeRun(run);
+}
+
+function getNeverRanState(runId, nodeId) {
+  const r = store.runs[runId];
+  const ne = r && (r.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+  return {
+    neverRanRecoveryCount:
+      ne && ne.neverRanRecoveryCount ? ne.neverRanRecoveryCount : 0,
+    neverRanPending: Boolean(ne && ne.neverRanPending),
+  };
+}
+
+function markSessionEstablished(runId, nodeId) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.sessionEstablished = true;
+  persist();
+  return shapeRun(run);
+}
+
+function setIterationInvocation(
+  runId,
+  nodeId,
+  { mode, providerSessionId } = {},
+) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.iterationInvocation = {
+    mode: String(mode),
+    providerSessionId: String(providerSessionId),
+  };
+  persist();
+  return shapeRun(run);
+}
+
+function recordLoopBudgetHalt(runId, nodeId, { finishedAt } = {}) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  ne.status = "done";
+  ne.finishedAt = finishedAt != null ? Number(finishedAt) : now();
+  ne.loopExhausted = true;
+  run.budgetHalt = true;
+  persist();
+  return shapeRun(run);
+}
+
 // Park a ready human-approval gate without spawning an agent process. Persists.
 function gateApprovalNode(runId, nodeId) {
   const run = findRun(runId);
@@ -1056,7 +1203,15 @@ function gateApprovalNode(runId, nodeId) {
 function recordNodeResult(
   runId,
   nodeId,
-  { status, finishedAt, error, chosenEdges, score } = {},
+  {
+    status,
+    finishedAt,
+    error,
+    chosenEdges,
+    score,
+    loopExhausted,
+    lastVerdict,
+  } = {},
 ) {
   if (!NODE_TERMINAL.has(status))
     throw err("bad_request", "node status must be done|failed|skipped");
@@ -1067,6 +1222,8 @@ function recordNodeResult(
   if (typeof error === "string") ne.error = error.slice(0, 500);
   if (chosenEdges !== undefined) ne.chosenEdges = [...chosenEdges];
   if (Number.isFinite(score)) ne.score = Number(score);
+  if (loopExhausted) ne.loopExhausted = true;
+  if (lastVerdict !== undefined) ne.lastVerdict = String(lastVerdict);
   persist();
   return shapeRun(run);
 }
@@ -1362,6 +1519,13 @@ export default {
   getSpawnAttempts,
   recordRetryAttempt,
   getRetryState,
+  commitLoopIteration,
+  getLoopState,
+  commitNeverRanRecovery,
+  getNeverRanState,
+  markSessionEstablished,
+  setIterationInvocation,
+  recordLoopBudgetHalt,
   gateApprovalNode,
   recordNodeResult,
   setRunStatus,

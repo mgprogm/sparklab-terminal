@@ -2461,10 +2461,12 @@ function buildResolvedWorkflow(app) {
 // The per-node prompt (iter2: STATIC — objectiveTemplate + objective, NO
 // inter-node data threading; every node runs the objective independently. The
 // agent's systemPrompt is layered in by agent-runtime.buildInvocation).
-function composePromptText(run, cfg) {
+function composePromptText(run, cfg, opts = {}) {
   const tmpl = (cfg && cfg.objectiveTemplate) || "";
   const obj = (run && run.objective) || "";
-  return tmpl ? `${tmpl}\n\n${obj}` : obj;
+  const prompt = tmpl ? `${tmpl}\n\n${obj}` : obj;
+  if (!opts.resume) return prompt;
+  return `Revise the prior result. The last verdict was "${opts.lastVerdict}". Continue improving toward the goal, then end with a single line "BRANCH: <verdict>".\n\n${prompt}`;
 }
 
 function gatewayApiTokenForNode(run, cfg, nodeId, agent) {
@@ -2740,7 +2742,7 @@ function importAgenticTemplate(template, name) {
 //      (idempotent: a retried/boot advance never double-spawns a live job);
 //   4. tmux new-session -d the wrapper.
 // A crash/throw at any step leaves a recoverable ledger: the reap table re-spawns
-// a never-started node (no markers) or fails it after the spawnAttempts cap.
+// a never-started node (no markers) or fails it after one committed recovery.
 async function spawnNode(run, cfg, nodeId) {
   const server = runServer(run);
   const node = (cfg.workflow.nodes || []).find((n) => n.id === nodeId);
@@ -2753,8 +2755,22 @@ async function spawnNode(run, cfg, nodeId) {
     return;
   }
   const sessionName = nodeSessionName(run.id, nodeId);
-  const providerSessionId =
-    agent.runtimeProvider === "claude-cli" ? crypto.randomUUID() : undefined;
+  const ls = agentic.getLoopState(run.id, nodeId);
+  let providerSessionId;
+  let resume = false;
+  if (agent.runtimeProvider === "claude-cli") {
+    const inv = ls.iterationInvocation;
+    if (ls.sessionEstablished && inv?.providerSessionId) {
+      providerSessionId = inv.providerSessionId;
+      resume = true;
+    } else {
+      providerSessionId = crypto.randomUUID();
+    }
+    agentic.setIterationInvocation(run.id, nodeId, {
+      mode: resume ? "resume" : "fresh",
+      providerSessionId,
+    });
+  }
   let scratchDir;
   try {
     const base = await scratchBaseFor(server);
@@ -2780,7 +2796,10 @@ async function spawnNode(run, cfg, nodeId) {
       nodeId,
       agent,
       cwd: cfg.cwd,
-      promptText: composePromptText(run, cfg),
+      promptText: composePromptText(run, cfg, {
+        resume,
+        lastVerdict: ls.lastVerdict,
+      }),
       scratchDir,
       server,
       // iter3 (D5): frozen resolvedConfig.connections + this gateway's own
@@ -2791,6 +2810,7 @@ async function spawnNode(run, cfg, nodeId) {
       gatewayApiToken,
       gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
       agentSessionId: providerSessionId,
+      resume,
     });
   } catch (e) {
     console.warn(`[agentic] buildInvocation failed (${nodeId}): ${e.message}`);
@@ -2966,9 +2986,73 @@ async function retryOrFailNode(run, cfg, nodeId) {
   await spawnNode(liveRun, cfg, nodeId);
 }
 
+async function loopRespawn(run, cfg, nodeId, verdict) {
+  agentic.commitLoopIteration(run.id, nodeId, { verdict });
+
+  const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
+  const server = runServer(run);
+  const base = await scratchBaseFor(server);
+  const scratchDir = path.posix.join(base, run.id, nodeId);
+  await serverCmd(server, [
+    "rm",
+    "-f",
+    "--",
+    path.posix.join(scratchDir, "start.marker"),
+    path.posix.join(scratchDir, "exit.marker"),
+    path.posix.join(scratchDir, "out.log"),
+  ]);
+  if (node?.loopPolicy?.backoffMs > 0)
+    await new Promise((resolve) =>
+      setTimeout(resolve, node.loopPolicy.backoffMs),
+    );
+
+  const liveRun = agentic.getRun(run.id);
+  const liveNode = liveRun?.nodeExecutions?.find((n) => n.nodeId === nodeId);
+  if (
+    !liveRun ||
+    (liveRun.status !== "running" &&
+      liveRun.status !== "queued" &&
+      liveRun.status !== "waiting-approval") ||
+    liveNode?.status !== "running"
+  )
+    return;
+  await spawnNode(liveRun, cfg, nodeId);
+}
+
 async function recordTerminalDone(run, cfg, nodeId) {
   const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
-  if (node?.type === "router") {
+  if (node?.loopPolicy) {
+    const logTail = await agenticNodeLogTail(run, nodeId);
+    const { branch } = agentRuntime.parseResult(logTail, 0);
+    const agent = cfg.agents?.[node.agentId];
+    if (agent?.runtimeProvider === "claude-cli")
+      agentic.markSessionEstablished(run.id, nodeId);
+    const lastVerdict = branch ?? "";
+    if (branch === node.loopPolicy.until) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "done",
+        finishedAt: Date.now(),
+        lastVerdict,
+      });
+    } else if (
+      agentic.getLoopState(run.id, nodeId).iterationCount >=
+      node.loopPolicy.maxIterations
+    ) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "done",
+        finishedAt: Date.now(),
+        loopExhausted: true,
+        lastVerdict,
+      });
+    } else if (budgetExhausted(run, cfg)) {
+      agentic.recordLoopBudgetHalt(run.id, nodeId, {
+        finishedAt: Date.now(),
+      });
+      return;
+    } else {
+      await loopRespawn(run, cfg, nodeId, branch);
+    }
+  } else if (node?.type === "router") {
     const logTail = await agenticNodeLogTail(run, nodeId);
     const { branch, score } = agentRuntime.parseResult(logTail, 0);
     const outs = (cfg.workflow.edges || []).filter(
@@ -3008,6 +3092,30 @@ async function reapRunningNodes(run, cfg) {
   for (const ne of run.nodeExecutions || []) {
     if (ne.status !== "running") continue;
     const nodeId = ne.nodeId;
+
+    // A committed-but-not-yet-respawned phase (retry / loop / crash-recovery) is
+    // AUTHORITATIVE over any STALE markers the prior attempt left behind: the
+    // verdict/decision was already counted, so resume the respawn rather than
+    // re-interpret the old markers — which would re-decide/double-count a loop
+    // iteration (loopRespawn commits loopPending BEFORE clearing the old
+    // exit.marker; a crash in that window must NOT re-enter recordTerminalDone).
+    // (F-R2 / F-R4: check the *Pending phase flags before reading any marker.)
+    if (agentic.getLoopState(run.id, nodeId).loopPending) {
+      await spawnNode(run, cfg, nodeId); // recordSpawned clears loopPending
+      changed = true;
+      continue;
+    }
+    if (agentic.getRetryState(run.id, nodeId).retryPending) {
+      await retryOrFailNode(run, cfg, nodeId); // idempotent on retryPending
+      changed = true;
+      continue;
+    }
+    if (agentic.getNeverRanState(run.id, nodeId).neverRanPending) {
+      await spawnNode(run, cfg, nodeId); // recordSpawned clears neverRanPending
+      changed = true;
+      continue;
+    }
+
     const sessionName = nodeSessionName(run.id, nodeId);
     const scratchDir = path.posix.join(base, run.id, nodeId);
     const hasSession = await tmuxHasSession(server, sessionName);
@@ -3061,22 +3169,11 @@ async function reapRunningNodes(run, cfg) {
       continue;
     }
     // No session, no markers => the node NEVER actually ran (crash between
-    // persist-running and spawn). Re-spawn idempotently, unless we've already
-    // burned this CRASH-recovery budget (cap) -> fail.
-    const retryState = agentic.getRetryState(run.id, nodeId);
-    if (retryState.retryPending) {
-      await retryOrFailNode(run, cfg, nodeId);
-      changed = true;
-      continue;
-    }
-    // The cap bounds CRASH-in-spawn respawns only. spawnAttempts counts every
-    // recordSpawned — including failure-retry respawns (D-Retry-3) — so subtract
-    // retryCount to isolate the crash-recovery count; otherwise a node that
-    // crashed in the retry's spawn window (retryPending already cleared by
-    // recordSpawned, no markers yet) would be wrongly failed instead of
-    // recovered while retry budget remains. retryCount is 0 for non-retry nodes,
-    // so this is identical to the original `>= 2` there.
-    if (agentic.getSpawnAttempts(run.id, nodeId) - retryState.retryCount >= 2) {
+    // persist-running and spawn). The *Pending phases were already handled at
+    // the top of the loop, so here neither retry/loop/neverRan is pending:
+    // re-spawn idempotently ONCE, unless the single crash-recovery is spent.
+    const neverRanState = agentic.getNeverRanState(run.id, nodeId);
+    if (neverRanState.neverRanRecoveryCount >= 1) {
       agentic.recordNodeResult(run.id, nodeId, {
         status: "failed",
         finishedAt: Date.now(),
@@ -3084,6 +3181,7 @@ async function reapRunningNodes(run, cfg) {
       changed = true;
       continue;
     }
+    agentic.commitNeverRanRecovery(run.id, nodeId);
     await spawnNode(run, cfg, nodeId);
     changed = true;
   }
@@ -3193,6 +3291,16 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
           node: n.id,
         },
       );
+  }
+  for (const n of workflow.nodes) {
+    const agent = n.agentId && resolvedAgents[n.agentId];
+    if (n.loopPolicy && agent?.runtimeProvider === "codex-cli") {
+      throw agenticErr(
+        "invalid_workflow",
+        "loopPolicy requires claude-cli (codex has no resume)",
+        { node: n.id },
+      );
+    }
   }
   for (const agent of Object.values(resolvedAgents)) {
     if (
@@ -3392,6 +3500,18 @@ async function advanceRun(runId) {
           revokeScopedMcpTokensForRun(runId);
           changed = true;
           continue;
+        }
+        if (run.budgetHalt) {
+          const anyInFlight = (run.nodeExecutions || []).some(
+            (ne) => ne.status === "running" || ne.status === "waiting-approval",
+          );
+          if (!anyInFlight) {
+            agentic.setRunStatus(runId, "budget_exhausted", {
+              finishedAt: Date.now(),
+            });
+            revokeScopedMcpTokensForRun(runId);
+          }
+          break;
         }
         if (decision.terminal === "completed") {
           agentic.setRunStatus(runId, "completed", { finishedAt: Date.now() });

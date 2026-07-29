@@ -105,6 +105,17 @@ if [ -n "$brlabel" ]; then echo "BRANCH: $brlabel"; fi
 # parseResult reads as the display-only score (never a routing input).
 scoreval="$(printf '%s' "$prompt" | sed -n 's/.*SCORE=\\(-\\{0,1\\}[0-9.][0-9.]*\\).*/\\1/p' | head -n1)"
 if [ -n "$scoreval" ]; then echo "SCORE: $scoreval"; fi
+# Loop sentinel: LOOPFILE=<abs-path> counts invocations (persists across
+# iterations AND gateway restarts); emits "BRANCH: revise" until the count
+# reaches LOOPUNTIL=<n>, then "BRANCH: done" (the loop default until). Lets a
+# test drive convergence-on-iteration-N deterministically. Independent of BRANCH=.
+loopfile="$(printf '%s' "$prompt" | sed -n 's/.*LOOPFILE=\\([^ ]*\\).*/\\1/p' | head -n1)"
+loopuntil="$(printf '%s' "$prompt" | sed -n 's/.*LOOPUNTIL=\\([0-9][0-9]*\\).*/\\1/p' | head -n1)"
+if [ -n "$loopfile" ]; then
+  n=0; [ -f "$loopfile" ] && n="$(cat "$loopfile" 2>/dev/null || echo 0)"
+  n=$((n+1)); printf '%s' "$n" > "$loopfile"
+  if [ -n "$loopuntil" ] && [ "$n" -ge "$loopuntil" ]; then echo "BRANCH: done"; else echo "BRANCH: revise"; fi
+fi
 echo "STUB-DONE-OK"
 exit 0
 `;
@@ -3272,6 +3283,401 @@ async function main() {
       );
       console.log(
         `  ok: (B2) LOAD-BEARING — restart preserves spend, cap holds at 4 (no reset)`,
+      );
+    }
+  }
+
+  // ==================================================================
+  // ITERATION A2 — BOUNDED ITERATION / revise-until (richer workflows II §A2)
+  // ==================================================================
+  // A claude-cli agent-task with loopPolicy {maxIterations, until, backoffMs}
+  // self-judges via `BRANCH: <verdict>`; on a non-`until` verdict the DRIVER
+  // respawns it as the next iteration (decide() UNTOUCHED). The stub's
+  // LOOPFILE/LOOPUNTIL sentinel emits `revise` until invocation N, then `done`.
+  {
+    const readCtr = (f) => {
+      try {
+        return Number(fs.readFileSync(f, "utf8").trim()) || 0;
+      } catch {
+        return 0;
+      }
+    };
+    const uniq = () =>
+      Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+    const lAgent = async (provider = "claude-cli") =>
+      (
+        await (
+          await req("POST", "/api/agentic/agents", {
+            body: {
+              name: `loop-ag-${uniq()}`,
+              runtimeProvider: provider,
+              sandboxMode: "read-only",
+              systemPrompt: "",
+            },
+            origin: ALLOWED_ORIGIN,
+          })
+        ).json()
+      ).id;
+    // Single loop node app. `loop` is the loopPolicy (or null); extra merges more.
+    const loopApp = async (ag, loop, extra = {}) => {
+      const node = { id: "n0", type: "agent-task", agentId: ag };
+      if (loop) node.loopPolicy = loop;
+      return req("POST", "/api/agentic/apps", {
+        body: {
+          name: `loop-app-${uniq()}`,
+          orchestrationMode: "custom",
+          agentIds: [ag],
+          workflow: { nodes: [node], edges: [], entryNodeId: "n0" },
+          ...extra,
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+    };
+    const startOn = (appId, objective) =>
+      req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: { sessionId: targetSessionId, objective },
+        origin: ALLOWED_ORIGIN,
+      });
+
+    // (1) Converges on iteration 2 (LOOPUNTIL=2: revise, then done).
+    {
+      const ag = await lAgent();
+      const ctr = path.join(tmpDir, `loop-conv-${Date.now()}`);
+      const appRes = await loopApp(ag, { maxIterations: 5, until: "done" });
+      assert(appRes.status === 201, `loop(1): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `improve LOOPFILE=${ctr} LOOPUNTIL=2`,
+      );
+      assert(rres.status === 202, `loop(1): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "loop-converge" },
+      );
+      const n0 = nodeOf(done, "n0");
+      assert(
+        done.status === "completed" && n0.status === "done",
+        `loop(1): completed (${done.status})`,
+      );
+      assert(
+        n0.iterationCount === 2 && !n0.loopExhausted,
+        `loop(1): iterationCount 2, not exhausted (got ${n0.iterationCount}/${n0.loopExhausted})`,
+      );
+      assert(
+        readCtr(ctr) === 2,
+        `loop(1): exactly 2 invocations (got ${readCtr(ctr)})`,
+      );
+      assert(
+        n0.lastVerdict === "done",
+        `loop(1): lastVerdict done (${n0.lastVerdict})`,
+      );
+      console.log(
+        `  ok: (A2) loop converges on iteration 2 → completed, iterationCount 2`,
+      );
+    }
+
+    // (2) Never converges → exhausts at maxIterations, done + loopExhausted (NOT
+    // failed — F-R1 display-only), run completed.
+    {
+      const ag = await lAgent();
+      const ctr = path.join(tmpDir, `loop-exh-${Date.now()}`);
+      const appRes = await loopApp(ag, { maxIterations: 3, until: "done" });
+      assert(appRes.status === 201, `loop(2): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `never LOOPFILE=${ctr} LOOPUNTIL=99`,
+      );
+      assert(rres.status === 202, `loop(2): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "loop-exhaust" },
+      );
+      const n0 = nodeOf(done, "n0");
+      assert(
+        done.status === "completed" &&
+          n0.status === "done" &&
+          n0.loopExhausted === true,
+        `loop(2): exhausted → done+loopExhausted, run completed (${done.status}/${n0.loopExhausted})`,
+      );
+      assert(
+        n0.iterationCount === 3 && readCtr(ctr) === 3,
+        `loop(2): exactly maxIterations=3 invocations (iter ${n0.iterationCount}, ctr ${readCtr(ctr)})`,
+      );
+      console.log(
+        `  ok: (A2) never-converge → done+loopExhausted after exactly maxIterations`,
+      );
+    }
+
+    // (3) loopPolicy absent ⇒ single shot (regression) — BRANCH ignored, one run.
+    {
+      const ag = await lAgent();
+      const ctr = path.join(tmpDir, `loop-none-${Date.now()}`);
+      const appRes = await loopApp(ag, null);
+      assert(appRes.status === 201, `loop(3): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `plain LOOPFILE=${ctr} LOOPUNTIL=99`,
+      );
+      assert(rres.status === 202, `loop(3): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 20000, label: "loop-absent" },
+      );
+      const n0 = nodeOf(done, "n0");
+      assert(
+        done.status === "completed" &&
+          n0.status === "done" &&
+          readCtr(ctr) === 1,
+        `loop(3): no loopPolicy ⇒ single shot (status ${done.status}, ctr ${readCtr(ctr)})`,
+      );
+      assert(
+        n0.iterationCount === undefined || n0.iterationCount === 1,
+        "loop(3): no multi-iteration",
+      );
+      console.log(`  ok: (A2) loopPolicy absent ⇒ single shot (regression)`);
+    }
+
+    // (9) maxIterations:1 ⇒ exactly one invocation; not `until` on the first shot
+    // ⇒ done + loopExhausted immediately.
+    {
+      const ag = await lAgent();
+      const ctr = path.join(tmpDir, `loop-one-${Date.now()}`);
+      const appRes = await loopApp(ag, { maxIterations: 1, until: "done" });
+      assert(appRes.status === 201, `loop(9): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `single LOOPFILE=${ctr} LOOPUNTIL=99`,
+      );
+      assert(rres.status === 202, `loop(9): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 20000, label: "loop-one" },
+      );
+      const n0 = nodeOf(done, "n0");
+      assert(
+        done.status === "completed" &&
+          n0.status === "done" &&
+          n0.loopExhausted === true &&
+          readCtr(ctr) === 1,
+        `loop(9): maxIterations:1 ⇒ 1 invocation + loopExhausted (ctr ${readCtr(ctr)}, exh ${n0.loopExhausted})`,
+      );
+      console.log(
+        `  ok: (A2) maxIterations:1 ⇒ exactly one shot, loopExhausted`,
+      );
+    }
+
+    // (8) codex-cli + loopPolicy ⇒ fail-closed at startRun (F-R6).
+    {
+      const cag = await lAgent("codex-cli");
+      const appRes = await loopApp(cag, { maxIterations: 2, until: "done" });
+      assert(
+        appRes.status === 201,
+        `loop(8): create ok (provider unknown at save) -> ${appRes.status}`,
+      );
+      const rres = await startOn((await appRes.json()).id, "x");
+      assert(
+        rres.status === 422,
+        `loop(8): codex loopPolicy rejected at start -> ${rres.status} (exp 422)`,
+      );
+      console.log(
+        `  ok: (A2) codex-cli + loopPolicy ⇒ fail-closed 422 at startRun`,
+      );
+    }
+
+    // (7) loop × budget (F-R7): a single leaf loop under maxSpawns halts
+    // budget_exhausted (NOT completed) via the atomic budgetHalt intent.
+    {
+      const ag = await lAgent();
+      const ctr = path.join(tmpDir, `loop-bud-${Date.now()}`);
+      const appRes = await loopApp(
+        ag,
+        { maxIterations: 9, until: "done" },
+        { budget: { maxSpawns: 2 } },
+      );
+      assert(appRes.status === 201, `loop(7): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `burn LOOPFILE=${ctr} LOOPUNTIL=99`,
+      );
+      assert(rres.status === 202, `loop(7): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) =>
+          r.status === "completed" ||
+          r.status === "failed" ||
+          r.status === "budget_exhausted",
+        { deadlineMs: 30000, label: "loop-budget" },
+      );
+      assert(
+        done.status === "budget_exhausted",
+        `loop(7): budget halts the loop (budget_exhausted not ${done.status})`,
+      );
+      assert(
+        done.spawnsUsed === 2 && readCtr(ctr) === 2,
+        `loop(7): exactly maxSpawns=2 iterations before halt (spawns ${done.spawnsUsed}, ctr ${readCtr(ctr)})`,
+      );
+      console.log(
+        `  ok: (A2) loop × budget — maxSpawns halts loop budget_exhausted (not completed)`,
+      );
+    }
+
+    // (6) retry × loop (F-R6): an iteration that FAILS once (retry within the
+    // iteration) then succeeds with a verdict, then loops. FAILFILE fails only
+    // invocation 1; LOOPFILE drives the verdicts. n0 has both retryPolicy + loopPolicy.
+    {
+      const ag = await lAgent();
+      const fctr = path.join(tmpDir, `loop-retry-fail-${Date.now()}`);
+      const lctr = path.join(tmpDir, `loop-retry-loop-${Date.now()}`);
+      const node = {
+        id: "n0",
+        type: "agent-task",
+        agentId: ag,
+        retryPolicy: { maxAttempts: 2, backoffMs: 0 },
+        loopPolicy: { maxIterations: 5, until: "done" },
+      };
+      const appRes = await req("POST", "/api/agentic/apps", {
+        body: {
+          name: `loop-retry-app-${uniq()}`,
+          orchestrationMode: "custom",
+          agentIds: [ag],
+          workflow: { nodes: [node], edges: [], entryNodeId: "n0" },
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(appRes.status === 201, `loop(6): create -> ${appRes.status}`);
+      // FAILUNTIL=1: only the very first invocation exits nonzero (retried);
+      // LOOPFILE increments on EVERY invocation that reaches the verdict lines.
+      // Note: a failed invocation exits BEFORE the loop sentinel, so LOOPFILE
+      // counts only successful invocations. LOOPUNTIL=2 ⇒ converge on the 2nd
+      // SUCCESSFUL invocation.
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `fix FAILUNTIL=1 FAILFILE=${fctr} LOOPFILE=${lctr} LOOPUNTIL=2`,
+      );
+      assert(rres.status === 202, `loop(6): start -> ${rres.status}`);
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "loop-retry" },
+      );
+      const n0 = nodeOf(done, "n0");
+      assert(
+        done.status === "completed" && n0.status === "done",
+        `loop(6): retry-within-iteration then loop converges (${done.status})`,
+      );
+      // 2 successful invocations (iteration 1 after its retry, iteration 2).
+      assert(
+        readCtr(lctr) === 2 && n0.iterationCount === 2,
+        `loop(6): 2 iterations, retry didn't leak across them (loopctr ${readCtr(lctr)}, iter ${n0.iterationCount})`,
+      );
+      console.log(
+        `  ok: (A2) retry × loop — retry within an iteration, then loop converges`,
+      );
+    }
+
+    // (4) LOAD-BEARING (D3-layer-2): restart WHILE a loop iteration is committed
+    // but not yet respawned. backoffMs=3000 opens the window: iteration 1 emits
+    // revise, the driver commits iteration 2 (loopPending) + clears markers, then
+    // sleeps the backoff — SIGKILL there. Reboot must RESUME (loopPending) and
+    // converge WITHOUT double-counting. Placed near-last; ends live+logged-in.
+    {
+      const ag = await lAgent();
+      const ctr = path.join(tmpDir, `loop-restart-${Date.now()}`);
+      const appRes = await loopApp(ag, {
+        maxIterations: 5,
+        until: "done",
+        backoffMs: 3000,
+      });
+      assert(appRes.status === 201, `loop(4): create -> ${appRes.status}`);
+      const rres = await startOn(
+        (await appRes.json()).id,
+        `restart LOOPFILE=${ctr} LOOPUNTIL=3`,
+      );
+      assert(rres.status === 202, `loop(4): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      // Wait until iteration 1 ran (ctr=1); the driver is now committing/backing
+      // off iteration 2. SIGKILL within the 3s backoff window.
+      const t0 = Date.now();
+      while (readCtr(ctr) < 1 && Date.now() - t0 < 15000) await sleep(100);
+      assert(
+        readCtr(ctr) === 1,
+        `loop(4): iteration 1 ran before crash (ctr ${readCtr(ctr)})`,
+      );
+      await sleep(400); // let the driver commit loopPending + enter backoff
+      await stopServer("SIGKILL");
+      await startServer();
+      await login();
+      const done = await pollRun(
+        runId,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 45000, label: "loop-restart" },
+      );
+      const n0 = nodeOf(done, "n0");
+      assert(
+        done.status === "completed" && n0.status === "done",
+        `loop(4): fresh gateway resumed the loop to convergence (${done.status})`,
+      );
+      assert(
+        n0.iterationCount === 3 && readCtr(ctr) === 3,
+        `loop(4): exactly 3 iterations across the restart, no double-count (iter ${n0.iterationCount}, ctr ${readCtr(ctr)})`,
+      );
+      console.log(
+        `  ok: (A2) LOAD-BEARING — restart mid-iteration resumes via loopPending, converges, no double-count`,
+      );
+    }
+
+    // (5) crash cap decoupled from loops (F-R4): a hand-crafted "never-ran"
+    // observation with neverRanRecoveryCount already 1 (one recovery spent) must
+    // FAIL — regardless of a healthy iterationCount — proving loop iterations
+    // don't pollute the crash cap. (The healthy-loop-doesn't-trip-cap direction
+    // is already proven by loop(2)/(4): 3 iterations, never failed.)
+    {
+      const ag = await lAgent();
+      const appRes = await loopApp(ag, { maxIterations: 9, until: "done" });
+      assert(appRes.status === 201, `loop(5): create -> ${appRes.status}`);
+      const rres = await startOn((await appRes.json()).id, "hold SLEEP=300");
+      assert(rres.status === 202, `loop(5): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      const sess = `agrun-${runId}-n0`;
+      assert(tmuxHasSession(sess), "loop(5): n0 live before crash");
+      await stopServer("SIGKILL");
+      // Craft the persisted state: node running, a HEALTHY loop (iterationCount 4)
+      // but the single crash-recovery already spent (neverRanRecoveryCount:1),
+      // no session, no markers, no pending flags → reap MUST fail it (cap), NOT
+      // treat the 4 iterations as recoveries.
+      tmuxKill(sess);
+      fs.rmSync(path.join(runsDir, runId, "n0"), {
+        recursive: true,
+        force: true,
+      });
+      const store = JSON.parse(fs.readFileSync(agenticFile, "utf8"));
+      const ne = store.runs[runId].nodeExecutions.find(
+        (n) => n.nodeId === "n0",
+      );
+      ne.status = "running";
+      ne.iterationCount = 4;
+      ne.neverRanRecoveryCount = 1;
+      delete ne.neverRanPending;
+      delete ne.loopPending;
+      delete ne.retryPending;
+      fs.writeFileSync(agenticFile, JSON.stringify(store, null, 2), "utf8");
+      await startServer();
+      await login();
+      const done = await pollRun(
+        runId,
+        (r) => r.status === "completed" || r.status === "failed",
+        { deadlineMs: 30000, label: "loop-crashcap" },
+      );
+      assert(
+        done.status === "failed" && nodeOf(done, "n0").status === "failed",
+        `loop(5): crash cap fires (neverRanRecoveryCount≥1) despite 4 healthy iterations (${done.status})`,
+      );
+      console.log(
+        `  ok: (A2) crash cap decoupled — loop iterations don't pollute neverRanRecoveryCount`,
       );
     }
   }
