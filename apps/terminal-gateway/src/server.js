@@ -2443,6 +2443,7 @@ async function spawnNode(run, cfg, nodeId) {
     agentic.recordNodeResult(run.id, nodeId, {
       status: "failed",
       finishedAt: Date.now(),
+      error: `buildInvocation failed: ${e && e.message}`,
     });
     return;
   }
@@ -2458,7 +2459,12 @@ async function spawnNode(run, cfg, nodeId) {
     }
   } catch (e) {
     console.warn(`[agentic] materialize failed (${nodeId}): ${e.message}`);
-    return; // running with no session/markers -> reap respawns (or fails at cap)
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `materialize failed: ${e && e.message}`,
+    });
+    return;
   }
 
   // FIX 4 (kill/cancel race): the materialize steps above involve async I/O
@@ -2498,7 +2504,15 @@ async function spawnNode(run, cfg, nodeId) {
     ]);
   } catch (e) {
     console.warn(`[agentic] tmux spawn failed (${sessionName}): ${e.message}`);
-    // leave running; reap disambiguates via the two-marker scheme.
+    // A remote ssh drop can leave the session actually created despite the
+    // thrown error; best-effort kill (idempotent, agrun- only) so we never
+    // orphan a run session before marking the node failed.
+    await tmuxKill(server, sessionName);
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `spawn failed: ${e && e.message}`,
+    });
   }
 }
 
@@ -2815,10 +2829,11 @@ async function advanceRun(runId) {
   try {
     // Reachability gate (mirrors the push loop's `if (!s.reachable) continue`):
     // a transient ssh blip must NOT let reap read "no session" and wrongly fail /
-    // respawn a live remote job. Leave the ledger untouched this tick. Local is
-    // always ok, so this never affects the local path.
+    // respawn a live remote job. Apart from the store-local approval sweep,
+    // leave the ledger untouched this tick. Local is always ok.
     const first = agentic.getRun(runId);
     if (!first) return;
+    sweepStalePendingApprovals(first);
     if (
       first.status === "running" ||
       first.status === "queued" ||
@@ -2846,15 +2861,6 @@ async function advanceRun(runId) {
         break;
       const cfg = run.resolvedConfig || {};
       try {
-        // 0) sweep stale pending MCP tool-call approvals (iter3, hard-constraint
-        //    #4's actual guarantee — see sweepStalePendingApprovals' own
-        //    comment). Runs before reap so a just-timed-out node's tmux job
-        //    (now back to "running") gets reaped in the SAME tick if it also
-        //    happens to have already finished.
-        if (sweepStalePendingApprovals(run)) {
-          changed = true;
-          continue;
-        }
         // 1) reap running nodes (finished/died/timed-out/never-ran).
         if (await reapRunningNodes(run, cfg)) {
           changed = true;

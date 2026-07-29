@@ -349,6 +349,7 @@ function shapeNodeExecution(ne) {
   return {
     nodeId: ne.nodeId,
     status: ne.status,
+    ...(ne.error != null ? { error: ne.error } : {}),
     ...(ne.agentRunId != null ? { agentRunId: ne.agentRunId } : {}),
     ...(ne.parentNodeId != null ? { parentNodeId: ne.parentNodeId } : {}),
     ...(ne.startedAt != null ? { startedAt: ne.startedAt } : {}),
@@ -803,13 +804,14 @@ function getSpawnAttempts(runId, nodeId) {
 }
 
 // Record a node's TERMINAL result (done|failed|skipped) + finishedAt. Persists.
-function recordNodeResult(runId, nodeId, { status, finishedAt } = {}) {
+function recordNodeResult(runId, nodeId, { status, finishedAt, error } = {}) {
   if (!NODE_TERMINAL.has(status))
     throw err("bad_request", "node status must be done|failed|skipped");
   const run = findRun(runId);
   const ne = findNode(run, nodeId);
   ne.status = status;
   ne.finishedAt = finishedAt != null ? Number(finishedAt) : now();
+  if (typeof error === "string") ne.error = error.slice(0, 500);
   persist();
   return shapeRun(run);
 }

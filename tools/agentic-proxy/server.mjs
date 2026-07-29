@@ -175,6 +175,7 @@ const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "agentic-proxy", version: "1.0.0" };
 const POLL_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 170000;
+const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const RANK = { allow: 1, approval: 2, deny: 3 }; // higher = more restrictive
 const VALID_POLICIES = new Set(["allow", "approval", "deny"]);
 
@@ -273,6 +274,16 @@ class McpChildClient {
         if (msg.error) reject(new Error(msg.error.message || "child error"));
         else resolve(msg.result);
       }
+    }
+    if (Buffer.byteLength(this.buf, "utf8") > MAX_LINE_BYTES) {
+      this.buf = "";
+      this.dead = true;
+      const err = new Error(
+        `${this.label} MCP child sent a line exceeding ${MAX_LINE_BYTES} bytes`,
+      );
+      for (const { reject } of this.pending.values()) reject(err);
+      this.pending.clear();
+      this.kill();
     }
   }
 
@@ -454,6 +465,17 @@ const children = {}; // targetType -> McpChildClient
 const toolSchema = {}; // toolName -> real tool definition (from the child)
 const toolTargetType = {}; // toolName -> targetType
 let toolPolicy = {}; // toolName -> { policy, connectionIds, targetType }
+let cleaningUp = false;
+
+function cleanupAndExit() {
+  if (cleaningUp) return;
+  cleaningUp = true;
+  for (const child of Object.values(children)) child.kill();
+  process.exit(0);
+}
+
+process.on("SIGTERM", cleanupAndExit);
+process.on("SIGINT", cleanupAndExit);
 
 function buildToolsList() {
   const out = [];
@@ -694,11 +716,14 @@ function startStdinLoop() {
           replyError(msg.id, -32603, String((e && e.message) || e));
       });
     }
+    if (Buffer.byteLength(buf, "utf8") > MAX_LINE_BYTES) {
+      buf = "";
+      process.stderr.write(
+        `[agentic-proxy] WARNING: dropped input line exceeding ${MAX_LINE_BYTES} bytes\n`,
+      );
+    }
   });
-  process.stdin.on("end", () => {
-    for (const child of Object.values(children)) child.kill();
-    process.exit(0);
-  });
+  process.stdin.on("end", cleanupAndExit);
 }
 
 // ---- startup: spawn needed children, aggregate tools/list, resolve policy -

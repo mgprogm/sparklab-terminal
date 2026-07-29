@@ -710,6 +710,47 @@
     white-space: nowrap;
   }
 
+  .node-error {
+    color: var(--danger);
+    font-size: 12px;
+    font-weight: 500;
+    word-break: break-word;
+  }
+
+  .node-result {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+  }
+
+  .node-result-title {
+    color: var(--mute);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+  }
+
+  .node-result-text {
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .node-raw summary {
+    color: var(--mute);
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .node-raw[open] summary {
+    margin-bottom: 6px;
+  }
+
   .node-log {
     margin: 0;
     max-height: 200px;
@@ -2328,6 +2369,68 @@
     return m + "m " + (s % 60) + "s";
   }
 
+  // Extract the human-readable final response from a tailed stream-json log.
+  // A tail can begin midway through a JSON line, so malformed lines are ignored.
+  // Plain Codex/text logs fall back to the unmodified trimmed tail.
+  function finalMessageFromLogTail(logTail) {
+    var raw = typeof logTail === "string" ? logTail.trim() : "";
+    if (!raw) return "";
+
+    var parsedAny = false;
+    var lastResult = null;
+    var lastAssistant = null;
+
+    function textFromContent(content) {
+      if (typeof content === "string") return content;
+      if (!Array.isArray(content)) return "";
+      return content
+        .map(function (part) {
+          if (typeof part === "string") return part;
+          if (part && typeof part.text === "string") return part.text;
+          if (part && typeof part.content === "string") return part.content;
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+
+    raw.split(/\r?\n/).forEach(function (line) {
+      var record;
+      try {
+        record = JSON.parse(line);
+      } catch (e) {
+        return;
+      }
+      parsedAny = true;
+      if (!record || typeof record !== "object") return;
+
+      if (record.type === "result" && typeof record.result === "string") {
+        lastResult = record.result;
+        return;
+      }
+
+      if (record.type === "assistant") {
+        var assistantText = "";
+        if (typeof record.text === "string") assistantText = record.text;
+        if (!assistantText) assistantText = textFromContent(record.content);
+        if (!assistantText && record.message) {
+          if (typeof record.message.text === "string") {
+            assistantText = record.message.text;
+          }
+          if (!assistantText) {
+            assistantText = textFromContent(record.message.content);
+          }
+        }
+        if (assistantText) lastAssistant = assistantText;
+      }
+    });
+
+    if (lastResult !== null) return lastResult;
+    if (lastAssistant !== null) return lastAssistant;
+    if (!parsedAny) return raw;
+    return raw;
+  }
+
   function renderRun(run) {
     var status = run.status || "running";
     el.runStatusBadge.className = "badge badge-" + status;
@@ -2373,6 +2476,9 @@
     if (dur) head.appendChild(elem("span", "node-dur", dur));
 
     var st = ne.status || "pending";
+    if (st === "failed" && ne.error) {
+      head.appendChild(elem("span", "node-error", ne.error));
+    }
     head.appendChild(elem("span", "badge badge-" + st, st));
     card.appendChild(head);
 
@@ -2386,7 +2492,17 @@
     }
 
     if (ne.logTail) {
-      card.appendChild(elem("pre", "node-log", ne.logTail));
+      var result = elem("div", "node-result");
+      result.appendChild(elem("div", "node-result-title", "Result"));
+      result.appendChild(
+        elem("div", "node-result-text", finalMessageFromLogTail(ne.logTail)),
+      );
+      card.appendChild(result);
+
+      var raw = elem("details", "node-raw");
+      raw.appendChild(elem("summary", null, "Show raw log"));
+      raw.appendChild(elem("pre", "node-log", ne.logTail));
+      card.appendChild(raw);
     }
     return card;
   }

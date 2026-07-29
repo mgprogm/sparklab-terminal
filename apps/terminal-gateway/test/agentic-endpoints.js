@@ -495,6 +495,68 @@ async function main() {
     );
   }
 
+  // ---- Unit: nodeExecution.error round-trips + truncates (iter4) -------------
+  // iter4 surfaces a run node's setup-failure reason: spawnNode passes an `error`
+  // string to recordNodeResult (buildInvocation/materialize/spawn failures) and
+  // GET /runs/:id returns it. Assert the store contract at the source, on an
+  // isolated AGENTIC_FILE, without needing to force a real spawn failure.
+  {
+    const unitDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-unit-"));
+    process.env.AGENTIC_FILE = path.join(unitDir, "agentic.json");
+    const store = (await import("../src/agentic.js")).default;
+    store.load();
+    const run = store.createRunRecord({
+      agenticAiId: "aa-unit",
+      sessionId: "local/web-unit",
+      objective: "o",
+      resolvedConfig: { cwd: "/tmp", resolvedAgents: {} },
+      agenticAiVersion: 1,
+      nodeExecutions: [{ nodeId: "n0", status: "pending" }],
+    });
+    const longReason = "materialize failed: " + "x".repeat(1000);
+    store.recordNodeResult(run.id, "n0", {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: longReason,
+    });
+    const got = store.getRun(run.id);
+    const ne = (got.nodeExecutions || []).find((n) => n.nodeId === "n0");
+    assert(ne && ne.status === "failed", "unit: node recorded failed");
+    assert(
+      ne.error && ne.error.startsWith("materialize failed: "),
+      "unit: nodeExecution.error is surfaced in the shaped run",
+    );
+    assert(
+      ne.error.length <= 500,
+      "unit: nodeExecution.error truncated to <=500",
+    );
+    // A node with no error must NOT emit the key (shaper is conditional).
+    const run2 = store.createRunRecord({
+      agenticAiId: "aa-unit",
+      sessionId: "local/web-unit",
+      objective: "o",
+      resolvedConfig: { cwd: "/tmp", resolvedAgents: {} },
+      agenticAiVersion: 1,
+      nodeExecutions: [{ nodeId: "n0", status: "pending" }],
+    });
+    store.recordNodeResult(run2.id, "n0", {
+      status: "done",
+      finishedAt: Date.now(),
+    });
+    const ne2 = (store.getRun(run2.id).nodeExecutions || []).find(
+      (n) => n.nodeId === "n0",
+    );
+    assert(
+      ne2 && ne2.error === undefined,
+      "unit: a node with no failure reason omits the error key",
+    );
+    delete process.env.AGENTIC_FILE;
+    fs.rmSync(unitDir, { recursive: true, force: true });
+    console.log(
+      `  ok: (iter4) nodeExecution.error round-trips + truncates; absent when unset`,
+    );
+  }
+
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-endpoints-"));
   agenticFile = path.join(tmpDir, "agentic.json");
   runsDir = path.join(tmpDir, "agentic-runs"); // absolute — required
