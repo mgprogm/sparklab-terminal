@@ -452,9 +452,12 @@ the eight resolutions are now GO / GO-with-conditions. Per item this round:
 
 ### Build sequence (approved direction)
 
-1. **R8 — claude stream-json parser slice FIRST** (mandatory prerequisite; also
-   retroactively hardens shipped router + eval; needs a real stream-json fixture; parses
-   BRANCH/SCORE only — session id stays engine-controlled).
+1. **R8 — claude stream-json parser slice — ✅ SHIPPED (commit `970b137`, deployed).**
+   `parseResult` now extracts BRANCH/SCORE structurally from claude stream-json (result →
+   assistant-text → raw-plaintext preference), verified against genuine claude 2.1.220
+   output; `test:parse` (21 checks); `test:agentic` still 381 (plaintext path
+   byte-identical). Retroactively fixed shipped router + eval (only ever proven against
+   the plaintext stub before). Session id stays engine-controlled.
 2. **A2 implementation spec** folding in: D-Loop-1/2 (policy, while-only), F-R1
    (display-only `loopExhausted`), F-R2 (`loopPending`), F-R3 (parse loop in
    `recordTerminalDone`), F-R4 (two-part crash-recovery state), F-R5 (engine-controlled
@@ -463,5 +466,5 @@ the eight resolutions are now GO / GO-with-conditions. Per item this round:
 3. Build A2 with the same Codex-writes / Opus-controls loop + the load-bearing
    restart/phase-crash tests §7 named.
 
-> **STATUS UPDATE:** design SETTLED after four review rounds. No longer "for review" —
-> awaiting the user's go to build R8 (then A2).
+> **STATUS UPDATE:** design SETTLED after four review rounds. **R8 prerequisite SHIPPED
+> (970b137).** Next: write the A2 implementation spec (fold §10 conditions) and build.
