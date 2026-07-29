@@ -24,6 +24,7 @@ import kanban from "./kanban.js";
 import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
 import agentic from "./agentic.js";
+import schedules from "./agentic-schedules.js";
 import agentRuntime from "./agent-runtime.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
@@ -2315,6 +2316,8 @@ const AGENTIC_RUN_MAX_AGE_MS =
   Number(process.env.AGENTIC_RUN_MAX_AGE_MS) || 259_200_000; // whole-run notify
 const AGENTIC_POLL_INTERVAL_MS =
   Number(process.env.AGENTIC_POLL_INTERVAL_MS) || 4000;
+const AGENT_SCHEDULE_POLL_INTERVAL_MS =
+  Number(process.env.AGENT_SCHEDULE_POLL_INTERVAL_MS) || 30_000;
 const AGENT_OUTPUT_MAX_BYTES =
   Number(process.env.AGENT_OUTPUT_MAX_BYTES) || 128 * 1024;
 // Per-MCP-tool-call approval hold window (iter3, D5). Read here (not just by
@@ -2337,9 +2340,15 @@ const agenticAgeNotified = new Set();
 const scratchBaseCache = new Map(); // serverId -> absolute base path
 
 let agenticPollTimer = null;
+let schedulePollTimer = null;
+let scheduleTicking = false;
+let startReservations = 0;
 
-// The registry server a run targets (derived from its qualified sessionId).
+// The registry server a run targets. Scheduled runs are sessionless and freeze
+// serverId directly; legacy/human runs retain the qualified-session fallback.
 function runServer(run) {
+  const frozenServerId = run?.resolvedConfig?.serverId;
+  if (frozenServerId) return registry.get(frozenServerId);
   const { serverId } = parseSessionRef(String((run && run.sessionId) || ""));
   return registry.get(serverId);
 }
@@ -2469,22 +2478,50 @@ function composePromptText(run, cfg, opts = {}) {
   return `Revise the prior result. The last verdict was "${opts.lastVerdict}". Continue improving toward the goal, then end with a single line "BRANCH: <verdict>".\n\n${prompt}`;
 }
 
-function gatewayApiTokenForNode(run, cfg, nodeId, agent) {
-  let gatewayApiToken = GATEWAY_API_TOKEN;
+function scopedMcpPrefixes(cfg, agent) {
   const toolPolicies = Array.isArray(agent.toolPolicies)
     ? agent.toolPolicies
     : [];
-  const prefixes = [
+  return [
     ...new Set(
       toolPolicies
         .map((policy) => cfg.connections?.[policy.connectionId]?.targetType)
         .filter((targetType) => targetType === "pm" || targetType === "kanban"),
     ),
   ];
+}
+
+function gatewayApiTokenForNode(run, cfg, nodeId, agent) {
+  let gatewayApiToken = GATEWAY_API_TOKEN;
+  const prefixes = scopedMcpPrefixes(cfg, agent);
   if (AGENT_MCP_SCOPED_TOKENS && prefixes.length > 0) {
     gatewayApiToken = mintScopedMcpToken(run.id, nodeId, prefixes);
+  } else if (run?.resolvedConfig?.unattended) {
+    if (Object.keys(cfg.connections || {}).length > 0) {
+      throw agenticErr(
+        "unattended_no_scoped_token",
+        "unattended runs with artifact connections require scoped MCP tokens",
+      );
+    }
+    // No connections means no MCP capability is needed. Keep the token empty;
+    // unattended jobs never receive the broad bearer even in this inert case.
+    gatewayApiToken = "";
   }
   return gatewayApiToken;
+}
+
+// Manifest input for unattended runs. agent-runtime builds the actual per-node
+// manifest from this snapshot, so approval-tier tools become unreachable before
+// the proxy starts (the callback route below remains a second fail-closed layer).
+function invocationAgentForRun(run, agent) {
+  if (!run?.resolvedConfig?.unattended) return agent;
+  return {
+    ...agent,
+    toolPolicies: (agent.toolPolicies || []).map((policy) => ({
+      ...policy,
+      policy: policy.policy === "approval" ? "deny" : policy.policy,
+    })),
+  };
 }
 
 function agenticErr(code, message, extra) {
@@ -2787,14 +2824,20 @@ async function spawnNode(run, cfg, nodeId) {
     providerSessionId,
   });
 
-  const gatewayApiToken = gatewayApiTokenForNode(run, cfg, nodeId, agent);
+  const invocationAgent = invocationAgentForRun(run, agent);
+  const gatewayApiToken = gatewayApiTokenForNode(
+    run,
+    cfg,
+    nodeId,
+    invocationAgent,
+  );
 
   let inv;
   try {
     inv = agentRuntime.buildInvocation({
       runId: run.id,
       nodeId,
-      agent,
+      agent: invocationAgent,
       cwd: cfg.cwd,
       promptText: composePromptText(run, cfg, {
         resume,
@@ -3233,186 +3276,277 @@ function maybeNotifyMaxAge(run) {
 // Freezes resolvedConfig + agenticAiVersion (D9), validates the target session +
 // dangling refs, creates the Run (+ pending nodeExecutions), starts the poll loop,
 // and advances once to spawn the entry/ready node(s). Returns the shaped Run.
-async function startRun({ agenticAiId, sessionId, objective } = {}) {
-  const app = agentic.getAgenticAi(agenticAiId);
-  if (!app) throw agenticErr("not_found", "agentic AI not found");
-  if (app.status === "archived")
-    throw agenticErr("bad_request", "cannot run an archived agentic AI");
-
-  // Concurrency cap (429).
-  if (agentic.listActiveRuns().length >= AGENT_MAX_CONCURRENT_RUNS)
+async function startRun({
+  agenticAiId,
+  sessionId,
+  serverId,
+  cwd: requestedCwd,
+  objective,
+  unattended,
+  scheduleId,
+  expectedFingerprint,
+} = {}) {
+  // Shared reservation for both human and scheduler starts. This is deliberately
+  // the first operation before any await: JS's single thread makes the check +
+  // increment atomic across callers while target resolution is in flight.
+  if (
+    agentic.listActiveRuns().length + startReservations >=
+    AGENT_MAX_CONCURRENT_RUNS
+  )
     throw agenticErr(
       "too_many_runs",
       `at most ${AGENT_MAX_CONCURRENT_RUNS} concurrent runs`,
     );
-
-  // Resolve + validate the target session/server.
-  const ref = String(sessionId || "");
-  const { serverId, tmuxName } = parseSessionRef(ref);
-  if (!ID_RE.test(tmuxName))
-    throw agenticErr("bad_request", "invalid sessionId");
-  const server = registry.get(serverId);
-  if (!server) throw agenticErr("bad_request", `unknown server: ${serverId}`);
-  const probe = await probeServer(server);
-  if (probe.reachability !== "ok")
-    throw agenticErr("session_unreachable", "target server is unreachable");
-
-  // Resolve the session cwd (same display-message mechanism as codex/git) and
-  // FREEZE it into resolvedConfig so a boot re-spawn never re-resolves (the
-  // user session may be gone by then; the run job is independent of it).
-  let cwd;
-  try {
-    const r = await serverExec(server, [
-      "display-message",
-      "-p",
-      "-t",
-      tmuxName,
-      "#{pane_current_path}",
-    ]);
-    cwd = r.stdout.trim();
-  } catch {
-    throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
-  }
-  if (!isAbsPath(cwd))
-    throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
-
-  // Build the frozen workflow from the orchestration mode + validate agents.
-  const agentIds = (app.agentIds || []).filter(Boolean);
-  if (!agentIds.length)
-    throw agenticErr("invalid_workflow", "agentic AI has no agents");
-  const { workflow, resolvedAgents } = buildResolvedWorkflow(app);
-  for (const n of workflow.nodes) {
-    if (n.type === "human-approval") continue;
-    if (!n.agentId || !resolvedAgents[n.agentId])
-      throw agenticErr(
-        "invalid_workflow",
-        `node ${n.id} has no resolvable agent`,
-        {
-          node: n.id,
-        },
-      );
-  }
-  for (const n of workflow.nodes) {
-    const agent = n.agentId && resolvedAgents[n.agentId];
-    if (n.loopPolicy && agent?.runtimeProvider === "codex-cli") {
-      throw agenticErr(
-        "invalid_workflow",
-        "loopPolicy requires claude-cli (codex has no resume)",
-        { node: n.id },
-      );
+  startReservations++;
+  let reservationHeld = true;
+  const releaseReservation = () => {
+    if (reservationHeld) {
+      reservationHeld = false;
+      startReservations--;
     }
-  }
-  for (const agent of Object.values(resolvedAgents)) {
+  };
+
+  try {
+    const app = agentic.getAgenticAi(agenticAiId);
+    if (!app) throw agenticErr("not_found", "agentic AI not found");
+    if (app.status === "archived")
+      throw agenticErr("bad_request", "cannot run an archived agentic AI");
+
+    // Scheduled starts provide a frozen target directly and never resolve a
+    // human tmux session. Human starts retain the existing session path.
+    let ref = null;
+    let resolvedServerId;
+    let server;
+    let cwd;
+    const directTarget = serverId !== undefined || requestedCwd !== undefined;
+    if (directTarget) {
+      if (typeof serverId !== "string" || !isAbsPath(requestedCwd))
+        throw agenticErr(
+          "bad_request",
+          "scheduled runs require serverId and an absolute cwd",
+        );
+      resolvedServerId = serverId;
+      cwd = requestedCwd;
+      server = registry.get(resolvedServerId);
+      if (!server)
+        throw agenticErr("bad_request", `unknown server: ${resolvedServerId}`);
+      const probe = await probeServer(server);
+      if (probe.reachability !== "ok")
+        throw agenticErr("session_unreachable", "target server is unreachable");
+    } else {
+      ref = String(sessionId || "");
+      const parsed = parseSessionRef(ref);
+      resolvedServerId = parsed.serverId;
+      if (!ID_RE.test(parsed.tmuxName))
+        throw agenticErr("bad_request", "invalid sessionId");
+      server = registry.get(resolvedServerId);
+      if (!server)
+        throw agenticErr("bad_request", `unknown server: ${resolvedServerId}`);
+      const probe = await probeServer(server);
+      if (probe.reachability !== "ok")
+        throw agenticErr("session_unreachable", "target server is unreachable");
+
+      // Resolve and freeze the human session cwd. Scheduled runs already froze
+      // cwd above and skip this tmux lookup entirely.
+      try {
+        const r = await serverExec(server, [
+          "display-message",
+          "-p",
+          "-t",
+          parsed.tmuxName,
+          "#{pane_current_path}",
+        ]);
+        cwd = r.stdout.trim();
+      } catch {
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+      }
+      if (!isAbsPath(cwd))
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+    }
+
+    // Re-pin after the final target-resolution await. No definition lookup or
+    // run creation can race past this TOCTOU check.
     if (
-      agent.runtimeProvider === "codex-cli" &&
-      Array.isArray(agent.toolPolicies) &&
-      agent.toolPolicies.length > 0
+      expectedFingerprint !== undefined &&
+      agentic.fingerprintExecutableDefinition(agenticAiId) !==
+        expectedFingerprint
     ) {
       throw agenticErr(
-        "codex_mcp_unsupported",
-        "codex-cli agents cannot use artifact connections yet (MCP mediation unavailable) — remove the connection or use a claude-cli agent",
+        "definition_changed",
+        "agentic AI executable definition changed since schedule approval",
       );
     }
-  }
-  // parallel + any workspace-write agent -> 422 (§9): concurrent writers to one
-  // cwd are unsafe.
-  if (app.orchestrationMode === "parallel") {
+
+    // Build the frozen workflow from the orchestration mode + validate agents.
+    const agentIds = (app.agentIds || []).filter(Boolean);
+    if (!agentIds.length)
+      throw agenticErr("invalid_workflow", "agentic AI has no agents");
+    const { workflow, resolvedAgents } = buildResolvedWorkflow(app);
     for (const n of workflow.nodes) {
       if (n.type === "human-approval") continue;
-      const ag = resolvedAgents[n.agentId];
-      if (ag && ag.sandboxMode === "workspace-write")
+      if (!n.agentId || !resolvedAgents[n.agentId])
         throw agenticErr(
-          "parallel_write_forbidden",
-          "parallel mode forbids workspace-write agents",
-          { node: n.id },
+          "invalid_workflow",
+          `node ${n.id} has no resolvable agent`,
+          {
+            node: n.id,
+          },
         );
     }
-  }
-  if (app.orchestrationMode === "custom") {
-    const inDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
-    const plainInDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
-    const plainOutDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
-    for (const edge of workflow.edges) {
-      inDegree.set(edge.to, (inDegree.get(edge.to) || 0) + 1);
-      if (!edge.on && !edge.when) {
-        plainOutDegree.set(edge.from, (plainOutDegree.get(edge.from) || 0) + 1);
-        plainInDegree.set(edge.to, (plainInDegree.get(edge.to) || 0) + 1);
+    for (const n of workflow.nodes) {
+      const agent = n.agentId && resolvedAgents[n.agentId];
+      if (n.loopPolicy && agent?.runtimeProvider === "codex-cli") {
+        throw agenticErr(
+          "invalid_workflow",
+          "loopPolicy requires claude-cli (codex has no resume)",
+          { node: n.id },
+        );
       }
     }
-    const isBranching =
-      [...plainOutDegree.values()].some((degree) => degree > 1) ||
-      [...plainInDegree.values()].some((degree) => degree > 1) ||
-      [...inDegree.values()].filter((degree) => degree === 0).length > 1;
-    if (isBranching) {
+    for (const agent of Object.values(resolvedAgents)) {
+      if (
+        agent.runtimeProvider === "codex-cli" &&
+        Array.isArray(agent.toolPolicies) &&
+        agent.toolPolicies.length > 0
+      ) {
+        throw agenticErr(
+          "codex_mcp_unsupported",
+          "codex-cli agents cannot use artifact connections yet (MCP mediation unavailable) — remove the connection or use a claude-cli agent",
+        );
+      }
+    }
+    // parallel + any workspace-write agent -> 422 (§9): concurrent writers to one
+    // cwd are unsafe.
+    if (app.orchestrationMode === "parallel") {
       for (const n of workflow.nodes) {
         if (n.type === "human-approval") continue;
         const ag = resolvedAgents[n.agentId];
         if (ag && ag.sandboxMode === "workspace-write")
           throw agenticErr(
             "parallel_write_forbidden",
-            "a branching custom workflow forbids workspace-write agents (they could run concurrently on the same cwd) — make the graph a linear chain or use read-only agents",
+            "parallel mode forbids workspace-write agents",
             { node: n.id },
           );
       }
     }
-  }
+    if (app.orchestrationMode === "custom") {
+      const inDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+      const plainInDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+      const plainOutDegree = new Map(
+        workflow.nodes.map((node) => [node.id, 0]),
+      );
+      for (const edge of workflow.edges) {
+        inDegree.set(edge.to, (inDegree.get(edge.to) || 0) + 1);
+        if (!edge.on && !edge.when) {
+          plainOutDegree.set(
+            edge.from,
+            (plainOutDegree.get(edge.from) || 0) + 1,
+          );
+          plainInDegree.set(edge.to, (plainInDegree.get(edge.to) || 0) + 1);
+        }
+      }
+      const isBranching =
+        [...plainOutDegree.values()].some((degree) => degree > 1) ||
+        [...plainInDegree.values()].some((degree) => degree > 1) ||
+        [...inDegree.values()].filter((degree) => degree === 0).length > 1;
+      if (isBranching) {
+        for (const n of workflow.nodes) {
+          if (n.type === "human-approval") continue;
+          const ag = resolvedAgents[n.agentId];
+          if (ag && ag.sandboxMode === "workspace-write")
+            throw agenticErr(
+              "parallel_write_forbidden",
+              "a branching custom workflow forbids workspace-write agents (they could run concurrently on the same cwd) — make the graph a linear chain or use read-only agents",
+              { node: n.id },
+            );
+        }
+      }
+    }
 
-  // Prompt byte cap at start (all nodes share the prompt in iter2) -> 400.
-  const promptText = composePromptText(
-    { objective },
-    { objectiveTemplate: app.objectiveTemplate },
-  );
-  const promptBytes = Buffer.byteLength(promptText, "utf8");
-  if (promptBytes > agentRuntime.AGENT_PROMPT_MAX_BYTES)
-    throw agenticErr(
-      "bad_request",
-      `prompt exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
+    // Prompt byte cap at start (all nodes share the prompt in iter2) -> 400.
+    const promptText = composePromptText(
+      { objective },
+      { objectiveTemplate: app.objectiveTemplate },
     );
+    const promptBytes = Buffer.byteLength(promptText, "utf8");
+    if (promptBytes > agentRuntime.AGENT_PROMPT_MAX_BYTES)
+      throw agenticErr(
+        "bad_request",
+        `prompt exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
+      );
 
-  // D9 freeze (iter3): connection targetTypes, frozen alongside the rest of
-  // resolvedConfig so a boot re-spawn or a later connection edit/delete can
-  // never change what an in-flight node's MCP proxy manifest was built from.
-  // Only targetType is needed here — the per-node manifest's toolPolicies come
-  // from each agent's OWN toolPolicies[] (already frozen verbatim in
-  // resolvedAgents above); this map exists so the manifest-builder can resolve
-  // a connectionId -> targetType without a live store lookup at spawn time.
-  const connections = {};
-  for (const connId of app.connectionIds || []) {
-    const c = agentic.getConnection(connId);
-    if (c) connections[connId] = { targetType: c.targetType };
+    // D9 freeze (iter3): connection targetTypes, frozen alongside the rest of
+    // resolvedConfig so a boot re-spawn or a later connection edit/delete can
+    // never change what an in-flight node's MCP proxy manifest was built from.
+    // Only targetType is needed here — the per-node manifest's toolPolicies come
+    // from each agent's OWN toolPolicies[] (already frozen verbatim in
+    // resolvedAgents above); this map exists so the manifest-builder can resolve
+    // a connectionId -> targetType without a live store lookup at spawn time.
+    const connections = {};
+    for (const connId of app.connectionIds || []) {
+      const c = agentic.getConnection(connId);
+      if (c) connections[connId] = { targetType: c.targetType };
+    }
+
+    // Scheduled runs may never fall back to the broad gateway bearer. Preflight
+    // every executable node now, before a durable run record exists; the token
+    // helper repeats this check defensively at actual mint time.
+    if (unattended && Object.keys(connections).length > 0) {
+      const executableAgents = new Set(
+        workflow.nodes
+          .filter((node) => node.type !== "human-approval")
+          .map((node) => resolvedAgents[node.agentId])
+          .filter(Boolean),
+      );
+      if (
+        !AGENT_MCP_SCOPED_TOKENS ||
+        [...executableAgents].some(
+          (agent) => scopedMcpPrefixes({ connections }, agent).length === 0,
+        )
+      ) {
+        throw agenticErr(
+          "unattended_no_scoped_token",
+          "unattended runs with artifact connections require scoped MCP tokens",
+        );
+      }
+    }
+
+    const budget = { ...(app.budget || {}) };
+    if (budget.maxSpawns == null && AGENT_DEFAULT_MAX_SPAWNS !== undefined) {
+      budget.maxSpawns = AGENT_DEFAULT_MAX_SPAWNS;
+    }
+
+    const resolvedConfig = {
+      agents: resolvedAgents,
+      workflow,
+      connections,
+      // toolPolicies are DEFINED-but-UNUSED at runtime in iter2 (the per-run MCP
+      // proxy is iter3); copied for provenance only.
+      toolPolicies: {},
+      // Frozen execution context (not in shared-types; internal to the run).
+      cwd,
+      serverId: resolvedServerId,
+      objectiveTemplate: app.objectiveTemplate || "",
+      budget: Object.keys(budget).length > 0 ? budget : undefined,
+    };
+
+    const run = agentic.createRunRecord({
+      agenticAiId,
+      sessionId: ref,
+      objective: typeof objective === "string" ? objective : "",
+      resolvedConfig,
+      agenticAiVersion: app.version,
+      nodeExecutions: workflow.nodes.map((n) => ({ nodeId: n.id })),
+      ...(unattended ? { unattended: true, scheduleId } : {}),
+    });
+    releaseReservation();
+
+    startAgenticLoop();
+    await advanceRun(run.id);
+    return agentic.getRun(run.id);
+  } finally {
+    releaseReservation();
   }
-
-  const budget = { ...(app.budget || {}) };
-  if (budget.maxSpawns == null && AGENT_DEFAULT_MAX_SPAWNS !== undefined) {
-    budget.maxSpawns = AGENT_DEFAULT_MAX_SPAWNS;
-  }
-
-  const resolvedConfig = {
-    agents: resolvedAgents,
-    workflow,
-    connections,
-    // toolPolicies are DEFINED-but-UNUSED at runtime in iter2 (the per-run MCP
-    // proxy is iter3); copied for provenance only.
-    toolPolicies: {},
-    // Frozen execution context (not in shared-types; internal to the run).
-    cwd,
-    serverId,
-    objectiveTemplate: app.objectiveTemplate || "",
-    budget: Object.keys(budget).length > 0 ? budget : undefined,
-  };
-
-  const run = agentic.createRunRecord({
-    agenticAiId,
-    sessionId: ref,
-    objective: typeof objective === "string" ? objective : "",
-    resolvedConfig,
-    agenticAiVersion: app.version,
-    nodeExecutions: workflow.nodes.map((n) => ({ nodeId: n.id })),
-  });
-
-  startAgenticLoop();
-  await advanceRun(run.id);
-  return agentic.getRun(run.id);
 }
 
 // ---- DRIVER: advanceRun (idempotent, re-entrancy-guarded) ----
@@ -3558,7 +3692,15 @@ async function advanceRun(runId) {
               (node) => node.id === nodeId,
             );
             if (workflowNode?.type === "human-approval") {
-              agentic.gateApprovalNode(run.id, nodeId);
+              if (cfg.unattended) {
+                agentic.recordNodeResult(runId, nodeId, {
+                  status: "failed",
+                  finishedAt: Date.now(),
+                  error: "unattended: no human to approve",
+                });
+              } else {
+                agentic.gateApprovalNode(run.id, nodeId);
+              }
             } else {
               await spawnNode(run, cfg, nodeId);
             }
@@ -3671,16 +3813,22 @@ async function sendGuidance(runId, nodeId, text) {
       path.posix.join(scratchDir, "exit.marker"),
       path.posix.join(scratchDir, "out.log"),
     ]);
+    const invocationAgent = invocationAgentForRun(run, agent);
     inv = agentRuntime.buildInvocation({
       runId: run.id,
       nodeId,
-      agent,
+      agent: invocationAgent,
       cwd: cfg.cwd,
       promptText: text,
       scratchDir,
       server,
       connections: cfg.connections,
-      gatewayApiToken: gatewayApiTokenForNode(run, cfg, nodeId, agent),
+      gatewayApiToken: gatewayApiTokenForNode(
+        run,
+        cfg,
+        nodeId,
+        invocationAgent,
+      ),
       gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
       agentSessionId: nodeExecution.providerSessionId,
       resume: true,
@@ -3801,6 +3949,104 @@ function bootRediscoverRuns() {
     );
 }
 
+// ---- Scheduled-run poll loop ----
+// Like push polling, this exists only while at least one enabled schedule is
+// persisted. A tick claims each due occurrence synchronously before awaiting
+// startRun, giving crash-safe at-most-once behavior. Due schedules are handled
+// sequentially so overlap/capacity outcomes are deterministic.
+async function schedulePollTick() {
+  if (scheduleTicking) return;
+  if (schedules.count() === 0) {
+    stopScheduleLoop();
+    return;
+  }
+  scheduleTicking = true;
+  try {
+    const now = Date.now();
+    for (const schedule of schedules.list()) {
+      if (
+        !schedule.enabled ||
+        !Number.isFinite(schedule.nextFireAt) ||
+        now < schedule.nextFireAt
+      ) {
+        continue;
+      }
+
+      const nextFireAt = schedules.computeNextFireAt(
+        schedule.spec,
+        now,
+        schedule.createdAt,
+      );
+      if (agentic.activeRunsForSchedule(schedule.id).length > 0) {
+        schedules.update(schedule.id, {
+          nextFireAt,
+          lastAttemptAt: now,
+          lastOutcome: "overlap_skipped",
+          lastError: null,
+        });
+        continue;
+      }
+
+      // Claim and persist before starting. A process crash after this point
+      // intentionally loses this one occurrence rather than double-starting it.
+      schedules.update(schedule.id, { nextFireAt });
+      try {
+        await startRun({
+          agenticAiId: schedule.agenticId,
+          serverId: schedule.serverId,
+          cwd: schedule.cwd,
+          objective: schedule.objective,
+          unattended: true,
+          scheduleId: schedule.id,
+          expectedFingerprint: schedule.defFingerprint,
+        });
+        schedules.update(schedule.id, {
+          lastFiredAt: now,
+          lastAttemptAt: now,
+          lastOutcome: "started",
+          lastError: null,
+        });
+      } catch (error) {
+        schedules.update(schedule.id, {
+          lastAttemptAt: now,
+          lastOutcome:
+            error?.code === "too_many_runs"
+              ? "capacity_skipped"
+              : error?.code === "definition_changed"
+                ? "definition_changed"
+                : "target_error",
+          lastError: error?.message || String(error),
+        });
+      }
+    }
+  } finally {
+    scheduleTicking = false;
+    if (schedules.count() === 0) stopScheduleLoop();
+  }
+}
+
+function startScheduleLoop() {
+  if (schedulePollTimer || schedules.count() === 0) return;
+  schedulePollTimer = setInterval(
+    () => void schedulePollTick(),
+    AGENT_SCHEDULE_POLL_INTERVAL_MS,
+  );
+  if (schedulePollTimer.unref) schedulePollTimer.unref();
+  console.log("[agentic] schedule poll loop started");
+}
+
+function stopScheduleLoop() {
+  if (!schedulePollTimer) return;
+  clearInterval(schedulePollTimer);
+  schedulePollTimer = null;
+  console.log("[agentic] schedule poll loop stopped");
+}
+
+function syncScheduleLoop() {
+  if (schedules.count() > 0) startScheduleLoop();
+  else stopScheduleLoop();
+}
+
 // Read a bounded tail of a node's out.log (display-only; injected by the GET
 // /api/agentic/runs/:id route in BE-3's routing work — exported below).
 async function agenticNodeLogTail(run, nodeId) {
@@ -3828,9 +4074,100 @@ async function agenticNodeLogTail(run, nodeId) {
 // `seg` = path after /api/agentic. ITERATION 1: CRUD only. The run-lifecycle
 // write routes (POST .../run, DELETE .../runs/:id, GET logTail) are wired by BE-3
 // on top of the startRun/advanceRun/killRun drivers above.
+function validateScheduleBody(body, { partial = false } = {}) {
+  const fields = [
+    "agenticId",
+    "serverId",
+    "cwd",
+    "objective",
+    "spec",
+    "enabled",
+  ];
+  const out = {};
+  for (const field of fields) {
+    if (body[field] !== undefined) out[field] = body[field];
+  }
+  if (partial && Object.keys(out).length === 0)
+    throw agenticErr("bad_request", "schedule patch is empty");
+  for (const field of ["agenticId", "serverId", "cwd", "objective"]) {
+    if (
+      (!partial || out[field] !== undefined) &&
+      typeof out[field] !== "string"
+    )
+      throw agenticErr("bad_request", `schedule ${field} must be a string`);
+  }
+  if (
+    (!partial || out.enabled !== undefined) &&
+    typeof out.enabled !== "boolean"
+  )
+    throw agenticErr("bad_request", "schedule enabled must be a boolean");
+  if (!partial || out.spec !== undefined) {
+    try {
+      const validationNow = Date.now();
+      schedules.computeNextFireAt(out.spec, validationNow, validationNow);
+    } catch (error) {
+      throw agenticErr("bad_request", error.message);
+    }
+  }
+  return out;
+}
+
 async function handleAgentic(req, res, url) {
   const seg = url.pathname.split("/").filter(Boolean).slice(2);
   try {
+    // ---- Scheduled runs ----
+    // Reads inherit the normal cookie-or-bearer Agentic gate and are Origin
+    // exempt. Every mutation adds the stronger human-cookie-only gate here;
+    // handleApi's standard Origin/CSRF check has already run for write methods.
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "schedules") {
+      return sendJson(res, 200, { schedules: schedules.list() });
+    }
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "schedules") {
+      const schedule = schedules.get(seg[1]);
+      if (!schedule) return sendJson(res, 404, { error: "schedule not found" });
+      return sendJson(res, 200, schedule);
+    }
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "schedules") {
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "human session required" });
+      const parsed = await readJsonObject(req);
+      if (!parsed.ok)
+        return sendJson(res, parsed.status, { error: parsed.error });
+      const body = validateScheduleBody(parsed.body);
+      const fingerprint = agentic.fingerprintExecutableDefinition(
+        body.agenticId,
+      );
+      const schedule = schedules.create(body, fingerprint);
+      syncScheduleLoop();
+      return sendJson(res, 201, schedule);
+    }
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "schedules") {
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "human session required" });
+      const current = schedules.get(seg[1]);
+      if (!current) return sendJson(res, 404, { error: "schedule not found" });
+      const parsed = await readJsonObject(req);
+      if (!parsed.ok)
+        return sendJson(res, parsed.status, { error: parsed.error });
+      const patch = validateScheduleBody(parsed.body, { partial: true });
+      const nextAgenticId = patch.agenticId ?? current.agenticId;
+      const fingerprint =
+        agentic.fingerprintExecutableDefinition(nextAgenticId);
+      const schedule = schedules.update(seg[1], patch, fingerprint);
+      syncScheduleLoop();
+      return sendJson(res, 200, schedule);
+    }
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "schedules") {
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "human session required" });
+      if (!schedules.delete(seg[1]))
+        return sendJson(res, 404, { error: "schedule not found" });
+      syncScheduleLoop();
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
     // ---- Agents ----
     // GET /api/agentic/agents — list
     if (req.method === "GET" && seg.length === 1 && seg[0] === "agents") {
@@ -4109,6 +4446,14 @@ async function handleAgentic(req, res, url) {
       seg[2] === "nodes" &&
       seg[4] === "pending-tool-call"
     ) {
+      const run = agentic.getRun(seg[1]);
+      if (run?.resolvedConfig?.unattended) {
+        return sendJson(res, 403, {
+          status: "rejected",
+          disposition: "deny",
+          reason: "unattended run: approvals are disabled",
+        });
+      }
       const r = await readJsonObject(req);
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
       const result = agentic.recordPendingToolCall(seg[1], seg[3], {
@@ -6504,6 +6849,7 @@ wss.on("connection", async (ws, req) => {
 // A3: Bind to HOST (default 127.0.0.1).
 server.listen(PORT, HOST, () => {
   console.log(`web-terminal gateway listening on http://${HOST}:${PORT}`);
+  schedules.load();
   // If subscriptions persisted across a restart AND VAPID is configured, boot
   // the poll loop now (its first tick re-baselines and notifies nothing).
   if (push.isConfigured() && push.count() > 0) {
@@ -6515,6 +6861,16 @@ server.listen(PORT, HOST, () => {
   // Agentic run-engine boot rediscovery: reap finished/died steps, re-spawn
   // never-ran steps, resume still-alive jobs, and advance every active run.
   bootRediscoverRuns();
+  // Persisted schedules are loaded after the other stores and only caught up
+  // after active runs have been counted. The guarded tick claims each overdue
+  // schedule at most once, then the normal interval handles future fires.
+  if (schedules.count() > 0) {
+    startScheduleLoop();
+    void schedulePollTick();
+    console.log(
+      `[agentic] ${schedules.count()} enabled schedule(s) loaded at boot.`,
+    );
+  }
 });
 
 // Test/BE-3 seam: the run-engine drivers live in server.js (they own the async

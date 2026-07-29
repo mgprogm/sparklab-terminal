@@ -414,6 +414,49 @@
     white-space: nowrap;
   }
 
+  .schedule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .schedule-item {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 9px;
+  }
+
+  .schedule-head,
+  .schedule-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .schedule-summary {
+    flex: 1 1 auto;
+    color: var(--ink);
+  }
+
+  .schedule-meta,
+  .schedule-objective {
+    color: var(--mute);
+    font-size: 12px;
+    margin-top: 5px;
+    overflow-wrap: anywhere;
+  }
+
+  .schedule-error {
+    color: var(--danger);
+  }
+
+  .schedule-actions {
+    margin-top: 8px;
+  }
+
   .picker-row {
     display: flex;
     gap: 6px;
@@ -1247,6 +1290,86 @@
         </div>
       </div>
       <div>
+        <div class="section-label">Schedule</div>
+        <div class="inline-hint">
+          Scheduled runs are UNATTENDED — approval-tier tool calls and human-approval
+          steps fail closed; editing this app requires re-saving the schedule (a
+          changed definition refuses to fire).
+        </div>
+        <div id="schedule-target" class="hint" style="margin-top: 8px">
+          New schedules snapshot the target currently selected in the Run view.
+        </div>
+        <div class="picker-row" style="margin-top: 8px">
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="schedule-every">Every</label>
+            <select id="schedule-every" class="field">
+              <option value="minute">minute</option>
+              <option value="hour">hour</option>
+              <option value="day">day</option>
+            </select>
+          </div>
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="schedule-interval">Interval</label>
+            <input
+              id="schedule-interval"
+              class="field"
+              type="number"
+              min="1"
+              step="1"
+              value="1"
+            />
+          </div>
+          <div
+            id="schedule-at-hour-wrap"
+            style="flex: 1 1 0; min-width: 0; display: none"
+          >
+            <label for="schedule-at-hour">UTC hour</label>
+            <input
+              id="schedule-at-hour"
+              class="field"
+              type="number"
+              min="0"
+              max="23"
+              step="1"
+              value="0"
+            />
+          </div>
+          <div
+            id="schedule-at-minute-wrap"
+            style="flex: 1 1 0; min-width: 0; display: none"
+          >
+            <label for="schedule-at-minute">UTC minute</label>
+            <input
+              id="schedule-at-minute"
+              class="field"
+              type="number"
+              min="0"
+              max="59"
+              step="1"
+              value="0"
+            />
+          </div>
+        </div>
+        <div style="margin-top: 8px">
+          <label for="schedule-objective">Objective</label>
+          <textarea
+            id="schedule-objective"
+            class="field"
+            placeholder="What should this unattended run do?"
+          ></textarea>
+        </div>
+        <div class="check-row">
+          <input id="schedule-enabled" type="checkbox" checked />
+          <label for="schedule-enabled">Enabled</label>
+        </div>
+        <div class="row-end">
+          <button id="schedule-create" class="btn" type="button">
+            Create schedule
+          </button>
+        </div>
+        <div id="schedule-list" class="schedule-list"></div>
+      </div>
+      <div>
         <div class="section-label">Team agents</div>
         <div id="team-agents" class="team-list"></div>
         <div class="picker-row" style="margin-top: 8px">
@@ -1434,6 +1557,7 @@
     pollToken: 0, // bumped to invalidate in-flight poll ticks
     pollTimer: null, // the setTimeout handle for the poll loop
     cwdToken: 0, // bumped to invalidate stale session-cwd fetches (Run view)
+    teamSchedules: [], // schedules belonging to the app open in the team editor
     teamWorkflowDraft: null, // local custom-DAG form state; saved explicitly
     nextWorkflowNodeNumber: 0,
   };
@@ -1471,6 +1595,17 @@
       "team-budget-max-wall-clock",
     ),
     teamBudgetSave: document.getElementById("team-budget-save"),
+    scheduleEvery: document.getElementById("schedule-every"),
+    scheduleTarget: document.getElementById("schedule-target"),
+    scheduleInterval: document.getElementById("schedule-interval"),
+    scheduleAtHourWrap: document.getElementById("schedule-at-hour-wrap"),
+    scheduleAtHour: document.getElementById("schedule-at-hour"),
+    scheduleAtMinuteWrap: document.getElementById("schedule-at-minute-wrap"),
+    scheduleAtMinute: document.getElementById("schedule-at-minute"),
+    scheduleObjective: document.getElementById("schedule-objective"),
+    scheduleEnabled: document.getElementById("schedule-enabled"),
+    scheduleCreate: document.getElementById("schedule-create"),
+    scheduleList: document.getElementById("schedule-list"),
     teamAgents: document.getElementById("team-agents"),
     teamAddSelect: document.getElementById("team-add-select"),
     teamAddBtn: document.getElementById("team-add-btn"),
@@ -2649,17 +2784,233 @@
     });
   }
 
+  function scheduleSpecSummary(spec) {
+    spec = spec || {};
+    var interval = spec.interval || 1;
+    var unit = spec.every || "minute";
+    var summary =
+      "every " + interval + " " + unit + (interval === 1 ? "" : "s");
+    if (unit === "hour") {
+      summary +=
+        " at minute " +
+        String(spec.atMinute == null ? 0 : spec.atMinute).padStart(2, "0") +
+        " UTC";
+    } else if (unit === "day") {
+      summary +=
+        " at " +
+        String(spec.atHour == null ? 0 : spec.atHour).padStart(2, "0") +
+        ":" +
+        String(spec.atMinute == null ? 0 : spec.atMinute).padStart(2, "0") +
+        " UTC";
+    }
+    return summary;
+  }
+
+  function scheduleUtcTime(ms) {
+    if (!Number.isFinite(ms)) return "not scheduled";
+    return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+
+  function renderScheduleFields() {
+    var every = el.scheduleEvery.value;
+    el.scheduleAtHourWrap.style.display = every === "day" ? "" : "none";
+    el.scheduleAtMinuteWrap.style.display =
+      every === "hour" || every === "day" ? "" : "none";
+  }
+
+  function renderScheduleTarget() {
+    var option = el.runSession.options[el.runSession.selectedIndex];
+    el.scheduleTarget.textContent =
+      option && option.value
+        ? "Run target: " + option.textContent + " (snapshotted when created)."
+        : "Select a target terminal session in the Run view before creating a schedule.";
+  }
+
+  async function loadTeamSchedules(agenticId) {
+    var data = await api("GET", "/schedules");
+    state.teamSchedules = ((data && data.schedules) || []).filter(
+      function (schedule) {
+        return schedule.agenticId === agenticId;
+      },
+    );
+  }
+
+  function renderTeamSchedules() {
+    var root = el.scheduleList;
+    root.textContent = "";
+    if (state.teamSchedules.length === 0) {
+      root.appendChild(elem("div", "lib-sub", "No schedules for this app."));
+      return;
+    }
+    state.teamSchedules.forEach(function (schedule) {
+      var item = elem("div", "schedule-item");
+      var head = elem("div", "schedule-head");
+      head.appendChild(
+        elem("span", "schedule-summary", scheduleSpecSummary(schedule.spec)),
+      );
+      head.appendChild(
+        elem("span", "badge", schedule.enabled ? "enabled" : "disabled"),
+      );
+      item.appendChild(head);
+      item.appendChild(
+        elem("div", "schedule-meta", "Next: " + scheduleUtcTime(schedule.nextFireAt)),
+      );
+      item.appendChild(
+        elem("div", "schedule-meta", "Last outcome: " + (schedule.lastOutcome || "none")),
+      );
+      if (schedule.lastError) {
+        item.appendChild(elem("div", "schedule-meta schedule-error", schedule.lastError));
+      }
+      item.appendChild(
+        elem("div", "schedule-objective", "Objective: " + (schedule.objective || "(empty)")),
+      );
+
+      var actions = elem("div", "schedule-actions");
+      var toggle = elem(
+        "button",
+        "btn",
+        schedule.enabled ? "Disable" : "Enable",
+      );
+      toggle.type = "button";
+      toggle.addEventListener("click", function () {
+        patchSchedule(schedule, { enabled: !schedule.enabled }, toggle);
+      });
+      actions.appendChild(toggle);
+
+      var resave = elem("button", "btn btn-ghost", "Re-save definition");
+      resave.type = "button";
+      resave.title = "Re-pin this schedule to the app's current executable definition.";
+      resave.addEventListener("click", function () {
+        patchSchedule(schedule, { enabled: schedule.enabled }, resave);
+      });
+      actions.appendChild(resave);
+
+      var remove = elem("button", "btn btn-ghost", "Delete");
+      remove.type = "button";
+      remove.addEventListener("click", function () {
+        if (
+          window.confirm(
+            "Delete this " + scheduleSpecSummary(schedule.spec) + " schedule?",
+          )
+        ) {
+          deleteSchedule(schedule, remove);
+        }
+      });
+      actions.appendChild(remove);
+      item.appendChild(actions);
+      root.appendChild(item);
+    });
+  }
+
+  async function refreshTeamSchedules() {
+    if (!state.teamApp) return;
+    await loadTeamSchedules(state.teamApp.id);
+    renderTeamSchedules();
+  }
+
+  async function patchSchedule(schedule, patch, button) {
+    clearBanner();
+    button.disabled = true;
+    try {
+      await api("PATCH", "/schedules/" + encodeURIComponent(schedule.id), patch);
+      await refreshTeamSchedules();
+    } catch (e) {
+      handleError(e);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function deleteSchedule(schedule, button) {
+    clearBanner();
+    button.disabled = true;
+    try {
+      await api("DELETE", "/schedules/" + encodeURIComponent(schedule.id));
+      await refreshTeamSchedules();
+    } catch (e) {
+      button.disabled = false;
+      handleError(e);
+    }
+  }
+
+  function scheduleNumber(input, label, min, max) {
+    var value = Number(input.value);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      showBanner(label + " must be an integer from " + min + " to " + max + ".");
+      input.focus();
+      return null;
+    }
+    return value;
+  }
+
+  async function createSchedule() {
+    var app = state.teamApp;
+    if (!app) return;
+    var sessionId = el.runSession.value;
+    if (!sessionId) {
+      showBanner("Select a target terminal session in the Run view first.");
+      return;
+    }
+    var interval = scheduleNumber(
+      el.scheduleInterval,
+      "Schedule interval",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (interval == null) return;
+    var every = el.scheduleEvery.value;
+    var spec = { every: every, interval: interval };
+    if (every === "day") {
+      var atHour = scheduleNumber(el.scheduleAtHour, "UTC hour", 0, 23);
+      if (atHour == null) return;
+      spec.atHour = atHour;
+    }
+    if (every === "hour" || every === "day") {
+      var atMinute = scheduleNumber(el.scheduleAtMinute, "UTC minute", 0, 59);
+      if (atMinute == null) return;
+      spec.atMinute = atMinute;
+    }
+
+    clearBanner();
+    el.scheduleCreate.disabled = true;
+    try {
+      var target = await api(
+        "GET",
+        "/session-cwd?sessionId=" + encodeURIComponent(sessionId),
+      );
+      if (!target || !target.serverId || !target.cwd) {
+        throw new ApiError(400, "Could not resolve the selected run target.");
+      }
+      await api("POST", "/schedules", {
+        agenticId: app.id,
+        serverId: target.serverId,
+        cwd: target.cwd,
+        objective: el.scheduleObjective.value,
+        spec: spec,
+        enabled: el.scheduleEnabled.checked,
+      });
+      el.scheduleObjective.value = "";
+      await refreshTeamSchedules();
+    } catch (e) {
+      handleError(e);
+    } finally {
+      el.scheduleCreate.disabled = false;
+    }
+  }
+
   // Open the team modal for a catalog summary. Loads the FULL app (agentIds +
   // connectionIds live only on the full record) and the agent/connection libraries
   // so the pickers are populated, then renders.
   async function openTeamEditor(appSummary) {
     clearBanner();
     try {
-      await Promise.all([loadAgents(), loadConnections()]);
-      var app = await api(
-        "GET",
-        "/apps/" + encodeURIComponent(appSummary.id),
-      );
+      var results = await Promise.all([
+        loadAgents(),
+        loadConnections(),
+        api("GET", "/apps/" + encodeURIComponent(appSummary.id)),
+        loadTeamSchedules(appSummary.id),
+      ]);
+      var app = results[2];
       state.teamApp = app;
       seedTeamWorkflow(app);
     } catch (e) {
@@ -2669,6 +3020,8 @@
     el.teamTitle.textContent = "Team · " + (state.teamApp.name || "");
     el.teamMode.value = state.teamApp.orchestrationMode || "single";
     renderTeamModal();
+    renderScheduleFields();
+    renderScheduleTarget();
     openOverlay(el.teamOverlay);
   }
 
@@ -2683,6 +3036,7 @@
       budget.maxSpawns != null ? String(budget.maxSpawns) : "";
     el.teamBudgetMaxWallClock.value =
       budget.maxWallClockMs != null ? String(budget.maxWallClockMs) : "";
+    renderTeamSchedules();
 
     // parallel + a workspace-write agent is rejected at run start (server §9).
     var parallelWarn =
@@ -3687,6 +4041,8 @@
     patchTeam({ orchestrationMode: el.teamMode.value });
   });
   el.teamBudgetSave.addEventListener("click", saveTeamBudget);
+  el.scheduleEvery.addEventListener("change", renderScheduleFields);
+  el.scheduleCreate.addEventListener("click", createSchedule);
   el.teamAddBtn.addEventListener("click", function () {
     var id = el.teamAddSelect.value;
     if (!id) return;
@@ -3751,6 +4107,7 @@
   // Re-resolve + show the working directory whenever the target session changes.
   el.runSession.addEventListener("change", function () {
     renderRunCwd();
+    renderScheduleTarget();
   });
 
   el.runForm.addEventListener("submit", function (e) {

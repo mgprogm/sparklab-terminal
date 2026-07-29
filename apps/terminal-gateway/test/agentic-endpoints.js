@@ -63,6 +63,7 @@ let cookie = "";
 let tmpDir = ""; // holds AGENTIC_FILE, AGENT_RUNS_DIR, stub, session cwd
 let agenticFile = "";
 let runsDir = "";
+let schedulesFile = ""; // temp AGENT_SCHEDULES_FILE store (B1 scheduled runs)
 let stubPath = "";
 let sessDir = "";
 let kanbanFile = ""; // temp KANBAN_FILE store (iter3 proxy tests — never the repo's)
@@ -171,6 +172,8 @@ function startServer(extraEnv = {}) {
         GATEWAY_AUTH_TOKEN: "",
         ALLOWED_ORIGINS: ALLOWED_ORIGIN,
         AGENTIC_FILE: agenticFile,
+        AGENT_SCHEDULES_FILE: schedulesFile,
+        AGENT_SCHEDULE_POLL_INTERVAL_MS: "400", // fire fast in the test
         GATEWAY_API_TOKEN: API_TOKEN,
         KANBAN_API_TOKEN: "",
         // Isolate the artifact stores so the iter3 proxy tests (real kanban-mcp)
@@ -593,6 +596,7 @@ async function main() {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentic-endpoints-"));
   agenticFile = path.join(tmpDir, "agentic.json");
+  schedulesFile = path.join(tmpDir, "agentic-schedules.json");
   runsDir = path.join(tmpDir, "agentic-runs"); // absolute — required
   sessDir = path.join(tmpDir, "sess");
   stubPath = path.join(tmpDir, "provider-stub.sh");
@@ -4206,6 +4210,208 @@ async function main() {
     await sleep(300);
     await stopServer("SIGTERM");
     console.log(`  ok: (d) AGENT_MAX_CONCURRENT_RUNS cap -> 429 too_many_runs`);
+  }
+
+  // ====================================================================
+  // ITERATION B1 — SCHEDULED RUNS (richer workflows II §B1)
+  // ====================================================================
+  // A cron-lite schedule fires the EXISTING startRun with unattended:true, on a
+  // durable serverId+cwd target. Admin is human-cookie-only; a fire refuses on
+  // definition drift; boot catch-up fires a missed window at most once.
+  {
+    await startServer();
+    await login();
+    const readSchedules = () => {
+      try {
+        return JSON.parse(fs.readFileSync(schedulesFile, "utf8"));
+      } catch {
+        return [];
+      }
+    };
+    const writeSchedules = (arr) =>
+      fs.writeFileSync(schedulesFile, JSON.stringify(arr, null, 2), "utf8");
+    const runsForApp = async (aid) =>
+      (await (await req("GET", "/api/agentic/runs")).json()).runs.filter(
+        (r) => r.agenticAiId === aid,
+      );
+    const mkSchedule = (agenticId, enabled) =>
+      req("POST", "/api/agentic/schedules", {
+        origin: ALLOWED_ORIGIN,
+        body: {
+          agenticId,
+          serverId: "local",
+          cwd: sessDir,
+          objective: `scheduled ${enabled}`,
+          spec: { every: "day", interval: 1, atHour: 3, atMinute: 0 },
+          enabled,
+        },
+      });
+
+    // (1) THE #1 INVARIANT: schedule admin is human-cookie-ONLY (a broad bearer,
+    // which CAN already start a run, must NOT be able to install a persistent
+    // autonomous schedule) + basic CRUD.
+    {
+      const app1 = (await createRunnerApp({ providers: ["codex-cli"] })).appId;
+      const body = {
+        agenticId: app1,
+        serverId: "local",
+        cwd: sessDir,
+        objective: "nightly",
+        spec: { every: "day", interval: 1, atHour: 2, atMinute: 30 },
+        enabled: false,
+      };
+      const bearerCreate = await req("POST", "/api/agentic/schedules", {
+        cookie: false,
+        headers: {
+          authorization: `Bearer ${API_TOKEN}`,
+          origin: ALLOWED_ORIGIN,
+        },
+        body,
+      });
+      assert(
+        bearerCreate.status === 403,
+        `B1(1): bearer create schedule -> ${bearerCreate.status} (exp 403 human-only)`,
+      );
+      const ok = await req("POST", "/api/agentic/schedules", {
+        origin: ALLOWED_ORIGIN,
+        body,
+      });
+      assert(ok.status === 201, `B1(1): cookie create -> ${ok.status}`);
+      const sched = await ok.json();
+      assert(
+        sched.defFingerprint && sched.nextFireAt > Date.now(),
+        `B1(1): schedule has a fingerprint + future nextFireAt`,
+      );
+      const bearerPatch = await req(
+        "PATCH",
+        `/api/agentic/schedules/${enc(sched.id)}`,
+        {
+          cookie: false,
+          headers: {
+            authorization: `Bearer ${API_TOKEN}`,
+            origin: ALLOWED_ORIGIN,
+          },
+          body: { enabled: true },
+        },
+      );
+      assert(
+        bearerPatch.status === 403,
+        `B1(1): bearer patch -> ${bearerPatch.status} (exp 403)`,
+      );
+      const bearerDel = await req(
+        "DELETE",
+        `/api/agentic/schedules/${enc(sched.id)}`,
+        {
+          cookie: false,
+          headers: {
+            authorization: `Bearer ${API_TOKEN}`,
+            origin: ALLOWED_ORIGIN,
+          },
+        },
+      );
+      assert(
+        bearerDel.status === 403,
+        `B1(1): bearer delete -> ${bearerDel.status} (exp 403)`,
+      );
+      const list = await req("GET", "/api/agentic/schedules");
+      assert(
+        list.status === 200 &&
+          (await list.json()).schedules.some((s) => s.id === sched.id),
+        "B1(1): GET schedules lists it (reads open)",
+      );
+      // clean up so it can't fire later
+      await req("DELETE", `/api/agentic/schedules/${enc(sched.id)}`, {
+        origin: ALLOWED_ORIGIN,
+      });
+      console.log(
+        `  ok: (B1) schedule admin human-cookie-ONLY (bearer 403 on create/patch/delete), CRUD, fingerprint + nextFireAt`,
+      );
+    }
+
+    // (2) Boot catch-up fires a due ENABLED schedule EXACTLY ONCE; a DISABLED
+    // schedule never fires; and it does not re-fire (at-most-once).
+    {
+      const enApp = (await createRunnerApp({ providers: ["codex-cli"] })).appId;
+      const disApp = (await createRunnerApp({ providers: ["codex-cli"] }))
+        .appId;
+      await (await mkSchedule(enApp, true)).json();
+      await (await mkSchedule(disApp, false)).json();
+      // Force both due (past nextFireAt) via the sidecar, then restart → boot
+      // catch-up. (Editing the file while stopped; the fresh gateway reloads it.)
+      await stopServer("SIGTERM");
+      const arr = readSchedules();
+      for (const s of arr) s.nextFireAt = Date.now() - 5000;
+      writeSchedules(arr);
+      await startServer();
+      await login();
+      // wait for boot catch-up to claim+fire + the run to be created
+      const t0 = Date.now();
+      while ((await runsForApp(enApp)).length < 1 && Date.now() - t0 < 15000)
+        await sleep(300);
+      const enRuns = await runsForApp(enApp);
+      const disRuns = await runsForApp(disApp);
+      assert(
+        enRuns.length === 1,
+        `B1(2): enabled schedule fired exactly one run (got ${enRuns.length})`,
+      );
+      assert(
+        disRuns.length === 0,
+        `B1(2): disabled schedule never fired (got ${disRuns.length})`,
+      );
+      // at-most-once: give it >1 poll interval; still exactly one.
+      await sleep(1200);
+      assert(
+        (await runsForApp(enApp)).length === 1,
+        "B1(2): does not re-fire (nextFireAt advanced to the future)",
+      );
+      const sAfter = (await (await req("GET", "/api/agentic/schedules")).json())
+        .schedules;
+      const en = sAfter.find((s) => s.agenticId === enApp);
+      assert(
+        en && en.lastOutcome === "started" && en.nextFireAt > Date.now(),
+        `B1(2): enabled schedule lastOutcome started + nextFireAt advanced (${en && en.lastOutcome})`,
+      );
+      console.log(
+        `  ok: (B1) boot catch-up fires enabled schedule once, disabled never, no re-fire (at-most-once)`,
+      );
+    }
+
+    // (3) Definition drift REFUSES the fire (security: run only the approved
+    // closure). Patch the app after scheduling → fingerprint changes → refuse.
+    {
+      const dApp = (await createRunnerApp({ providers: ["codex-cli"] })).appId;
+      await (await mkSchedule(dApp, true)).json();
+      // Mutate the app definition (objectiveTemplate is in the fingerprint).
+      const patched = await req("PATCH", `/api/agentic/apps/${enc(dApp)}`, {
+        origin: ALLOWED_ORIGIN,
+        body: { objectiveTemplate: "MUTATED after scheduling" },
+      });
+      assert(patched.status === 200, `B1(3): patch app -> ${patched.status}`);
+      await stopServer("SIGTERM");
+      const arr = readSchedules();
+      for (const s of arr)
+        if (s.agenticId === dApp) s.nextFireAt = Date.now() - 5000;
+      writeSchedules(arr);
+      await startServer();
+      await login();
+      // wait for the catch-up tick to process (refuse) — no run should appear.
+      await sleep(2500);
+      const runs = await runsForApp(dApp);
+      const sched = (
+        await (await req("GET", "/api/agentic/schedules")).json()
+      ).schedules.find((s) => s.agenticId === dApp);
+      assert(
+        runs.length === 0 &&
+          sched &&
+          sched.lastOutcome === "definition_changed",
+        `B1(3): drift REFUSED — no run, lastOutcome definition_changed (runs ${runs.length}, outcome ${sched && sched.lastOutcome})`,
+      );
+      console.log(
+        `  ok: (B1) definition drift refuses the fire (lastOutcome definition_changed, no run)`,
+      );
+    }
+
+    await stopServer("SIGTERM");
   }
 
   // ---- (e) per-step AGENT_RUN_TIMEOUT_MS -> step reaped as failed -------

@@ -1278,6 +1278,56 @@ export const AgenticAiSummarySchema = z.object({
 });
 export type AgenticAiSummary = z.infer<typeof AgenticAiSummarySchema>;
 
+/** Fixed-anchor UTC recurrence used by an Agentic AI schedule. */
+export const AgenticScheduleSpecSchema = z.object({
+  every: z.enum(["minute", "hour", "day"]),
+  interval: z.number().int().min(1),
+  atHour: z.number().int().min(0).max(23).optional(),
+  atMinute: z.number().int().min(0).max(59).optional(),
+});
+export type AgenticScheduleSpec = z.infer<typeof AgenticScheduleSpecSchema>;
+
+/** A persisted scheduled-run definition and its latest firing state. */
+export const AgenticScheduleSchema = z.object({
+  id: z.string(),
+  agenticId: z.string(),
+  serverId: z.string(),
+  cwd: z.string(),
+  objective: z.string(),
+  spec: AgenticScheduleSpecSchema,
+  enabled: z.boolean(),
+  defFingerprint: z.string(),
+  lastFiredAt: z.number().nullable(),
+  nextFireAt: z.number().nullable(),
+  lastAttemptAt: z.number().nullable(),
+  lastOutcome: z
+    .enum([
+      "started",
+      "capacity_skipped",
+      "target_error",
+      "definition_changed",
+      "overlap_skipped",
+    ])
+    .nullable()
+    .optional(),
+  lastError: z.string().nullable().optional(),
+  createdAt: z.number(),
+});
+export type AgenticSchedule = z.infer<typeof AgenticScheduleSchema>;
+
+/** Complete request body used to create or replace a schedule definition. */
+export const AgenticScheduleRequestSchema = z.object({
+  agenticId: z.string(),
+  serverId: z.string(),
+  cwd: z.string(),
+  objective: z.string(),
+  spec: AgenticScheduleSpecSchema,
+  enabled: z.boolean(),
+});
+export type AgenticScheduleRequest = z.infer<
+  typeof AgenticScheduleRequestSchema
+>;
+
 /** A node's current/last MCP tool-call approval record (D5, iter3). PERSISTED
  *  (unlike `logTail`) — it is the durable half of the per-run proxy's
  *  approval-mediation ledger. */

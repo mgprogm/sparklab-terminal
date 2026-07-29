@@ -912,6 +912,99 @@ function deleteAgenticAi(id) {
   return true;
 }
 
+function sortObjectKeys(value) {
+  if (Array.isArray(value)) return value.map(sortObjectKeys);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortObjectKeys(value[key])]),
+  );
+}
+
+// Hash only the complete executable closure. Schedule-owned target/objective
+// fields deliberately stay outside this projection.
+function fingerprintExecutableDefinition(agenticId) {
+  const app = store.agenticAis[agenticId];
+  if (!app) throw err("not_found", "agentic AI not found");
+
+  const agentIds = [];
+  const seenAgents = new Set();
+  const addAgentId = (id) => {
+    if (id == null || id === "") return;
+    const normalized = String(id);
+    if (!seenAgents.has(normalized)) {
+      seenAgents.add(normalized);
+      agentIds.push(normalized);
+    }
+  };
+  for (const id of app.agentIds || []) addAgentId(id);
+  for (const node of app.workflow?.nodes || []) addAgentId(node?.agentId);
+
+  const agents = {};
+  const connectionIds = [];
+  const seenConnections = new Set();
+  const addConnectionId = (id) => {
+    if (id == null || id === "") return;
+    const normalized = String(id);
+    if (!seenConnections.has(normalized)) {
+      seenConnections.add(normalized);
+      connectionIds.push(normalized);
+    }
+  };
+  for (const id of app.connectionIds || []) addConnectionId(id);
+
+  for (const id of agentIds) {
+    const agent = store.agents[id];
+    if (!agent)
+      throw err("bad_request", `agentic AI references unknown agent: ${id}`);
+    agents[id] = {
+      runtimeProvider: agent.runtimeProvider,
+      systemPrompt: agent.systemPrompt,
+      sandboxMode: agent.sandboxMode,
+      model: agent.model,
+      toolPolicies: agent.toolPolicies,
+    };
+    for (const policy of agent.toolPolicies || [])
+      addConnectionId(policy?.connectionId);
+  }
+
+  const connections = {};
+  for (const id of connectionIds) {
+    const connection = store.connections[id];
+    if (!connection)
+      throw err(
+        "bad_request",
+        `agentic AI references unknown connection: ${id}`,
+      );
+    connections[id] = {
+      targetType: connection.targetType,
+      targetId: connection.targetId,
+    };
+  }
+
+  const projection = {
+    app: {
+      orchestrationMode: app.orchestrationMode,
+      objectiveTemplate: app.objectiveTemplate,
+      workflow: {
+        nodes: app.workflow?.nodes || [],
+        edges: app.workflow?.edges || [],
+      },
+      agentIds: app.agentIds || [],
+      connectionIds: app.connectionIds || [],
+      budget: app.budget,
+    },
+    agents,
+    connections,
+  };
+  const normalized = sortObjectKeys(projection);
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(normalized))
+    .digest("hex");
+}
+
 // ---- Runs (read-only in iteration 1) ----
 function listRuns() {
   return Object.values(store.runs)
@@ -968,6 +1061,8 @@ function createRunRecord({
   resolvedConfig,
   agenticAiVersion,
   nodeExecutions,
+  scheduleId,
+  unattended,
 } = {}) {
   const ts = now();
   let seeded;
@@ -991,13 +1086,22 @@ function createRunRecord({
       parentNodeId: null,
     }));
   }
+  let frozenResolvedConfig = resolvedConfig
+    ? JSON.parse(JSON.stringify(resolvedConfig))
+    : undefined;
+  if (scheduleId !== undefined || unattended !== undefined) {
+    frozenResolvedConfig = frozenResolvedConfig || {};
+    if (scheduleId !== undefined)
+      frozenResolvedConfig.scheduleId =
+        scheduleId == null ? null : String(scheduleId);
+    if (unattended !== undefined)
+      frozenResolvedConfig.unattended = Boolean(unattended);
+  }
   const run = {
     id: newId("run"),
     agenticAiId: String(agenticAiId),
     agenticAiVersion: Number(agenticAiVersion) || 0,
-    resolvedConfig: resolvedConfig
-      ? JSON.parse(JSON.stringify(resolvedConfig))
-      : undefined,
+    resolvedConfig: frozenResolvedConfig,
     sessionId: sessionId != null ? String(sessionId) : null,
     objective: typeof objective === "string" ? objective : "",
     status: "running",
@@ -1025,6 +1129,12 @@ function listActiveRuns() {
         r.status === "waiting-approval",
     )
     .map((r) => r.id);
+}
+
+function activeRunsForSchedule(scheduleId) {
+  return listActiveRuns()
+    .map((id) => getRun(id))
+    .filter((run) => run?.resolvedConfig?.scheduleId === scheduleId);
 }
 
 // Raw node access for the server-side run driver. Internal fields such as the
@@ -1507,12 +1617,14 @@ export default {
   updateAgenticAi,
   setAgenticAiStatus,
   deleteAgenticAi,
+  fingerprintExecutableDefinition,
   // Runs (read + engine primitives)
   listRuns,
   getRun,
   // Run-engine sync primitives (iter2) — server.js composes these with tmux I/O.
   createRunRecord,
   listActiveRuns,
+  activeRunsForSchedule,
   getNode,
   recordSpawned,
   recordGuidanceTurn,
