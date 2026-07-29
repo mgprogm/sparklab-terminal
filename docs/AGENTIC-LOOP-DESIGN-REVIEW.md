@@ -383,3 +383,43 @@ state machine), R7 (explicit budget transition), and treat R8 (stream-json parse
 gating dependency. Recommended sequencing: **do R8 first** — it de-risks A2 AND
 retroactively fixes router/eval against real claude — then build A2 with the three
 corrections.
+
+---
+
+## 9. Codex review — round 3 (convergence check, 2026-07-29)
+
+Big convergence: **F-R1, F-R2, F-R3, F-R6 = GO**; F-R5, F-R8 = GO-with-conditions
+(need claude session-ID extraction); only **F-R4 and F-R7 remain NO-GO**, narrowed to
+THREE precise questions. Codex: "direction sound; one focused design round warranted
+for those three; R8 still lands first." The three:
+
+1. **F-R4 needs a TWO-part durable recovery state.** A single `neverRanPending` flag is
+   contradictory: if `recordSpawned` clears it, a recovered spawn that ALSO never-runs
+   looks fresh and gets endless recoveries; if it never clears, a restart-before-respawn
+   is indistinguishable from a genuine second observation. **Fix: persist BOTH
+   `neverRanRecoveryCount` (committed recoveries, never cleared) AND `neverRanPending`
+   (this recovery's respawn not yet performed, cleared by `recordSpawned`).** Reap
+   never-ran: if `neverRanPending` set ⇒ resume respawn (don't recount); else if
+   `neverRanRecoveryCount ≥ 1` ⇒ fail; else set pending + count=1 + respawn. Exactly one
+   recovery, restart-idempotent.
+2. **F-R7 must define what happens to CONCURRENT nodes when a loop respawn hits budget.**
+   `setRunStatus("budget_exhausted")` from the loop path while sibling nodes are still
+   `running` makes the run terminal → those nodes are no longer reaped (orphaned) — it
+   does NOT reuse the existing gate's `anyInFlight` let-finish. **Fix: the loop-hits-
+   budget path must either `killRunningJobs()` (immediate cancel) or set a deferred
+   budget-halt intent that the existing gate finalizes with its let-finish +
+   nothing-in-flight semantics** — not a unilateral terminal flip.
+3. **F-R5/R8 must define claude session-ID extraction + persistence.** The fresh→resume
+   machine needs the session ID, but `parseResult` returns only status/branch/score and
+   failed attempts bypass it. **The R8 parser contract must expose claude's session ID
+   from the stream-json (captured even on a NONZERO-exit stream, for the pre-session
+   retry case) and persist it atomically with the terminal record.**
+
+**Opus's proposed resolutions (to vet in the focused round):** (1) two-part
+`neverRanRecoveryCount`+`neverRanPending` exactly as Codex specifies; (2) a persisted
+`budgetHalt` intent set by the loop path, finalized by the existing gate (reusing its
+`anyInFlight` let-finish; no unilateral flip, no orphans) — vet that it takes priority
+over a same-tick `completed`; (3) extend the R8 parser to return `sessionId` (from the
+final result message, captured on success AND failure), stored on the node's
+`iterationInvocation`. **Net: the design is sound across 3 rounds; R8 lands first; then
+these three state-machine points are settled and A2 becomes an implementation spec.**
