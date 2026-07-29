@@ -483,6 +483,149 @@
     color: var(--mute);
   }
 
+  /* ---- Approval banner (iter3) ---- */
+  .btn-danger {
+    color: var(--danger);
+    border-color: rgba(224, 122, 106, 0.5);
+  }
+
+  .btn-danger:hover {
+    background: rgba(224, 122, 106, 0.12);
+  }
+
+  .approval-box {
+    background: var(--canvas);
+    border: 1px solid rgba(218, 210, 193, 0.55);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .approval-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+
+  .approval-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 10px;
+    align-items: baseline;
+  }
+
+  .approval-key {
+    font-size: 11px;
+    color: var(--mute);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .approval-val {
+    font-size: 12px;
+    color: var(--ink);
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .approval-args {
+    margin: 0;
+    max-height: 140px;
+    overflow: auto;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--body);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .approval-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  /* ---- Tool-call audit log (iter3) ---- */
+  .tool-log-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--body);
+    margin-bottom: 8px;
+  }
+
+  .tool-log-list {
+    max-height: 200px;
+    overflow: auto;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    background: var(--canvas-soft);
+  }
+
+  .tool-log-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 12px;
+  }
+
+  .tool-log-row:last-child {
+    border-bottom: none;
+  }
+
+  .tool-log-disp {
+    flex: 0 0 auto;
+    font-size: 11px;
+    text-transform: capitalize;
+    color: var(--body);
+    min-width: 66px;
+  }
+
+  .disp-allow,
+  .disp-approved {
+    color: var(--ok);
+  }
+
+  .disp-deny,
+  .disp-rejected {
+    color: var(--danger);
+  }
+
+  .disp-timed_out {
+    color: var(--accent);
+  }
+
+  .tool-log-tool {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--ink);
+    word-break: break-word;
+  }
+
+  .tool-log-conn {
+    flex: 0 1 auto;
+    min-width: 0;
+    color: var(--mute);
+    word-break: break-word;
+  }
+
+  .tool-log-time {
+    flex: 0 0 auto;
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
   /* Scrollbars */
   ::-webkit-scrollbar {
     width: 8px;
@@ -549,6 +692,7 @@
       </div>
       <div id="run-objective-echo" class="run-meta" style="margin-top: 8px"></div>
       <div id="node-list" class="node-list" style="margin-top: 12px"></div>
+      <div id="tool-log" class="tool-log" style="margin-top: 16px; display: none"></div>
     </div>
   </div>
 </div>
@@ -636,6 +780,7 @@
     runKillBtn: document.getElementById("run-kill-btn"),
     runNewBtn: document.getElementById("run-new-btn"),
     nodeList: document.getElementById("node-list"),
+    toolLog: document.getElementById("tool-log"),
   };
 
   // Run status buckets — mirror the gateway's RUN_TERMINAL set (agentic.js).
@@ -1058,6 +1203,8 @@
       ? "Objective: " + run.objective
       : "";
 
+    renderToolCallLog(run);
+
     el.nodeList.textContent = "";
     var nodes = run.nodeExecutions || [];
     if (nodes.length === 0) {
@@ -1086,10 +1233,132 @@
     head.appendChild(elem("span", "badge badge-" + st, st));
     card.appendChild(head);
 
+    // Iter3: a node parked on an MCP tool-call approval carries a persisted
+    // pendingToolCall. Gate on BOTH the node status AND the record's own status
+    // — once resolved, pendingToolCall stays but flips to approved/rejected, so
+    // requiring "pending" is what stops a decided call from re-showing here.
+    var ptc = ne.pendingToolCall;
+    if (ne.status === "waiting-approval" && ptc && ptc.status === "pending") {
+      card.appendChild(renderApprovalBanner(ne.nodeId, ptc));
+    }
+
     if (ne.logTail) {
       card.appendChild(elem("pre", "node-log", ne.logTail));
     }
     return card;
+  }
+
+  // Prominent per-node approval banner. All fields via textContent. The pending
+  // record carries only connectionId (no targetType — that's a toolCallLog-only
+  // field), so we surface connectionId here and never fabricate a type.
+  function renderApprovalBanner(nodeId, ptc) {
+    var box = elem("div", "approval-box");
+    box.appendChild(
+      elem("div", "approval-title", "Tool call awaiting approval"),
+    );
+
+    var grid = elem("div", "approval-grid");
+    grid.appendChild(elem("span", "approval-key", "Tool"));
+    grid.appendChild(elem("span", "approval-val", ptc.toolName || "—"));
+    grid.appendChild(elem("span", "approval-key", "Connection"));
+    grid.appendChild(elem("span", "approval-val", ptc.connectionId || "—"));
+    box.appendChild(grid);
+
+    if (ptc.argsPreview) {
+      box.appendChild(elem("div", "approval-key", "Arguments"));
+      box.appendChild(elem("pre", "approval-args", ptc.argsPreview));
+    }
+
+    var actions = elem("div", "approval-actions");
+    var approveBtn = elem("button", "btn btn-primary", "Approve");
+    approveBtn.type = "button";
+    var rejectBtn = elem("button", "btn btn-danger", "Reject");
+    rejectBtn.type = "button";
+    approveBtn.addEventListener("click", function () {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, ptc.id, "approve", null);
+    });
+    rejectBtn.addEventListener("click", function () {
+      // Host iframe carries allow-modals (verified), so prompt() is safe and
+      // blocks the poll loop while open. Cancel (null) aborts; empty = no reason.
+      var reason = window.prompt("Reason for rejecting (optional):", "");
+      if (reason === null) return;
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, ptc.id, "reject", reason.trim() || undefined);
+    });
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+    box.appendChild(actions);
+    return box;
+  }
+
+  // POST the human decision. Both routes return the fresh Run (200); we render
+  // it immediately, then keep polling so the resolution + downstream steps show.
+  async function decidePendingCall(nodeId, pendingId, decision, reason) {
+    var runId = state.activeRunId;
+    if (!runId) return;
+    clearBanner();
+    var path =
+      "/runs/" +
+      encodeURIComponent(runId) +
+      "/nodes/" +
+      encodeURIComponent(nodeId) +
+      "/" +
+      decision;
+    var body = { pendingId: pendingId };
+    if (decision === "reject" && reason) body.reason = reason;
+    var run;
+    try {
+      run = await api("POST", path, body);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    if (run) {
+      renderRun(run);
+      if (!RUN_TERMINAL[run.status]) startPolling();
+      else stopPolling();
+    }
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    return d.toLocaleTimeString();
+  }
+
+  // Run-level audit trail (iter3): allow/deny/approved/rejected/timed_out
+  // dispositions. textContent-only; bounded + scrollable via CSS.
+  function renderToolCallLog(run) {
+    var wrap = el.toolLog;
+    wrap.textContent = "";
+    var log = run.toolCallLog || [];
+    if (log.length === 0) {
+      wrap.style.display = "none";
+      return;
+    }
+    wrap.style.display = "";
+    wrap.appendChild(elem("div", "tool-log-title", "Tool call log"));
+    var list = elem("div", "tool-log-list");
+    log.forEach(function (entry) {
+      var row = elem("div", "tool-log-row");
+      var disp = entry.disposition || "";
+      row.appendChild(
+        elem("span", "tool-log-disp disp-" + disp, disp || "—"),
+      );
+      row.appendChild(elem("span", "tool-log-tool", entry.toolName || "—"));
+      var conn = entry.connectionId || "";
+      if (entry.targetType) {
+        conn = entry.targetType + " · " + (entry.connectionId || "—");
+      }
+      row.appendChild(elem("span", "tool-log-conn", conn || "—"));
+      row.appendChild(elem("span", "tool-log-time", fmtTime(entry.at)));
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
   }
 
   // ---------------------------------------------------------------------------

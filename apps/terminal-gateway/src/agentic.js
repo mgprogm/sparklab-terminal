@@ -18,6 +18,22 @@
 // ITERATION 1: the CRUD surface only. startRun/advanceRun/killRun/approveAction/
 // rejectAction are present but THROW — the run engine (tmux wrapper, the reducer
 // over nodeExecutions[], the per-run MCP proxy) lands in a later iteration.
+//
+// ITERATION 3 (this pass): the approval ledger for the per-run MCP proxy (D5).
+// A nodeExecution gains an optional, PERSISTED `pendingToolCall` record (unlike
+// `logTail`, which is display-only and injected by server.js on GET). A Run
+// gains a bounded `toolCallLog[]` audit trail (cap TOOL_CALL_LOG_CAP, oldest
+// trimmed). Status transitions: recordPendingToolCall flips the node AND the
+// run to "waiting-approval" (already a reserved enum value never produced
+// before now); resolvePendingToolCall (approve/reject/timeout) flips the node
+// back to "running" (the underlying tmux job never stopped — it's still
+// blocked inside the CLI's tool call) and flips the run back to "running" ONLY
+// if no other node in it is still waiting-approval (parallel fan-out can park
+// more than one node at once). approveAction/rejectAction stop throwing and
+// resolve "the current pending record for this node" via resolvePendingToolCall.
+// decide() is UNCHANGED — "waiting-approval" matches none of its branches, so a
+// parked run is correctly neither reaped-as-running nor completed nor
+// re-offered as ready (see decide()'s own comment for why).
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -52,6 +68,10 @@ const RUN_TERMINAL = new Set(["completed", "failed", "cancelled"]);
 // env name server.js reads for its own cap; the two share the value.
 const AGENT_MAX_PARALLEL_FANOUT =
   Number(process.env.AGENT_MAX_PARALLEL_FANOUT) || 4;
+// Bound on Run.toolCallLog[] (iter3) — oldest entries trimmed on append, same
+// "bounded" idiom as the push-notification history elsewhere in this repo.
+const TOOL_CALL_LOG_CAP = 200;
+const PENDING_DECISIONS = new Set(["approved", "rejected", "timed_out"]);
 
 // { agents:{[id]}, agenticAis:{[id]}, connections:{[id]}, runs:{[id]} }
 let store = { agents: {}, agenticAis: {}, connections: {}, runs: {} };
@@ -333,6 +353,11 @@ function shapeNodeExecution(ne) {
     ...(ne.parentNodeId != null ? { parentNodeId: ne.parentNodeId } : {}),
     ...(ne.startedAt != null ? { startedAt: ne.startedAt } : {}),
     ...(ne.finishedAt != null ? { finishedAt: ne.finishedAt } : {}),
+    // pendingToolCall IS persisted (iter3) — the current/last MCP tool-call
+    // approval record for this node, or absent if none has ever been posted.
+    ...(ne.pendingToolCall != null
+      ? { pendingToolCall: { ...ne.pendingToolCall } }
+      : {}),
     // logTail is a DISPLAY-ONLY passthrough injected by server.js on GET (a tail
     // of the step's out.log). It is NEVER persisted; the internal spawnAttempts
     // counter is likewise never shaped (it's read via getSpawnAttempts()).
@@ -352,6 +377,10 @@ function shapeRun(r) {
     objective: r.objective ?? "",
     status: r.status,
     nodeExecutions: (r.nodeExecutions || []).map(shapeNodeExecution),
+    // Bounded audit log (iter3) — allow/deny/approved/rejected/timed_out
+    // dispositions, oldest trimmed at TOOL_CALL_LOG_CAP. Always present
+    // (defaults to []), matching shared-types' RunSchema default.
+    toolCallLog: JSON.parse(JSON.stringify(r.toolCallLog || [])),
     startedAt: r.startedAt ?? null,
     finishedAt: r.finishedAt ?? null,
   };
@@ -660,9 +689,10 @@ function getRun(id) {
 // primitives with its tmux exec seam — keeping the gateway the single tmux
 // enforcement point AND agentic.js a structural clone of pm.js.
 //
-// approveAction/rejectAction remain THROWING stubs (human-approval nodes are
-// iter3). startRun/advanceRun/killRun are NO LONGER store methods — the route
-// handler calls the server.js drivers, not the store.
+// approveAction/rejectAction are now REAL (iter3, per-run MCP proxy approval
+// mediation, D5) — see the pending-tool-call section further down. startRun/
+// advanceRun/killRun are NO LONGER store methods — the route handler calls the
+// server.js drivers, not the store.
 
 function findRun(runId) {
   const r = store.runs[runId];
@@ -720,6 +750,7 @@ function createRunRecord({
     objective: typeof objective === "string" ? objective : "",
     status: "running",
     nodeExecutions: seeded,
+    toolCallLog: [],
     startedAt: ts,
     finishedAt: null,
   };
@@ -728,11 +759,19 @@ function createRunRecord({
   return shapeRun(run);
 }
 
-// Run ids whose status is still active (running|queued; iter2 never produces
-// waiting-approval). Drives the poll-loop gating and boot rediscovery. Pure read.
+// Run ids whose status is still active (running|queued|waiting-approval — iter3
+// adds waiting-approval: a run parked on an MCP tool-call approval still has a
+// live tmux job blocked inside the CLI, and MUST keep being tracked so the
+// poll-loop/boot-rediscovery/sweep machinery below can resolve it). Drives the
+// poll-loop gating and boot rediscovery. Pure read.
 function listActiveRuns() {
   return Object.values(store.runs)
-    .filter((r) => r.status === "running" || r.status === "queued")
+    .filter(
+      (r) =>
+        r.status === "running" ||
+        r.status === "queued" ||
+        r.status === "waiting-approval",
+    )
     .map((r) => r.id);
 }
 
@@ -851,12 +890,155 @@ function decide(run, resolvedConfig) {
   return { toSpawn: ready.slice(0, budget), running, terminal: null };
 }
 
-// ---- Human-approval nodes (iter3) — still THROWING stubs ----
-function approveAction() {
-  throw err("bad_request", "approveAction is iter3 (human-approval nodes)");
+// ---------------------------------------------------------------------------
+// Pending MCP tool-call approvals (iter3, D5) — the per-run proxy's ledger.
+// SYNC/ATOMIC only: no I/O, no polling/timeout logic (that's server.js's/the
+// proxy's job — see docs cited at the top of this file's iter3 comment).
+// ---------------------------------------------------------------------------
+
+// Append one entry to a run's bounded toolCallLog[] (cap TOOL_CALL_LOG_CAP,
+// oldest trimmed). Internal helper shared by appendToolCallLog (called
+// directly for allow/deny dispositions) and resolvePendingToolCall (called for
+// approved/rejected/timed_out). Does NOT persist — callers persist once.
+function pushToolCallLog(run, entry = {}) {
+  if (!Array.isArray(run.toolCallLog)) run.toolCallLog = [];
+  run.toolCallLog.push({
+    id: newId("tcl"),
+    nodeId: entry.nodeId != null ? String(entry.nodeId) : null,
+    toolName: entry.toolName != null ? String(entry.toolName) : "",
+    connectionId:
+      entry.connectionId != null ? String(entry.connectionId) : null,
+    targetType: entry.targetType != null ? String(entry.targetType) : null,
+    disposition: entry.disposition != null ? String(entry.disposition) : "",
+    argsPreview: entry.argsPreview != null ? String(entry.argsPreview) : "",
+    at: now(),
+  });
+  if (run.toolCallLog.length > TOOL_CALL_LOG_CAP) {
+    run.toolCallLog.splice(0, run.toolCallLog.length - TOOL_CALL_LOG_CAP);
+  }
 }
-function rejectAction() {
-  throw err("bad_request", "rejectAction is iter3 (human-approval nodes)");
+
+// Register a NEW pending MCP tool-call approval on a node: generates a
+// pendingId, sets node.pendingToolCall (status:"pending"), flips the node AND
+// (unless the run is already terminal — defensive; should not happen in
+// practice, the run's tmux job would already be dead) the run to
+// "waiting-approval". Called by the proxy's POST .../pending-tool-call route.
+// Persists once. Returns { pendingId }.
+function recordPendingToolCall(
+  runId,
+  nodeId,
+  { toolName, connectionId, argsPreview } = {},
+) {
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  const pendingId = newId("ptc");
+  ne.pendingToolCall = {
+    id: pendingId,
+    toolName: toolName != null ? String(toolName) : "",
+    connectionId: connectionId != null ? String(connectionId) : null,
+    argsPreview: argsPreview != null ? String(argsPreview) : "",
+    status: "pending",
+    createdAt: now(),
+    decidedAt: null,
+    reason: null,
+  };
+  ne.status = "waiting-approval";
+  if (!RUN_TERMINAL.has(run.status)) run.status = "waiting-approval";
+  persist();
+  return { pendingId };
+}
+
+// Read a pending tool-call record's current disposition. Returns undefined
+// (→ 404 at the route) if the id doesn't match the node's CURRENT pending
+// record (superseded/never existed) — matches plan §(e)'s GET route contract.
+function getPendingToolCall(runId, nodeId, pendingId) {
+  const run = store.runs[runId];
+  if (!run) return undefined;
+  const ne = (run.nodeExecutions || []).find((n) => n.nodeId === nodeId);
+  const ptc = ne && ne.pendingToolCall;
+  if (!ptc || ptc.id !== pendingId) return undefined;
+  return { status: ptc.status, reason: ptc.reason ?? null };
+}
+
+// Resolve a pending tool-call approval: approved | rejected | timed_out.
+// IDEMPOTENT — a mismatched/already-resolved pendingId is a silent no-op (this
+// protects against the proxy's best-effort timeout POST racing the gateway's
+// own reducer-side sweep, or a stale/duplicate call: hard-constraint #4's
+// guarantee lives in the sweep, not here, so a race must never double-apply or
+// throw). On a real resolution: flips the node back to "running" (the
+// underlying tmux job never stopped — it's still blocked inside the CLI's tool
+// call), flips the RUN back to "running" only if no OTHER node in it is still
+// waiting-approval (parallel fan-out can park more than one node at once), and
+// appends a toolCallLog entry. Persists once (no-op path does not persist).
+function resolvePendingToolCall(runId, nodeId, pendingId, decision, reason) {
+  if (!PENDING_DECISIONS.has(decision))
+    throw err("bad_request", "decision must be approved|rejected|timed_out");
+  const run = findRun(runId);
+  const ne = findNode(run, nodeId);
+  const ptc = ne.pendingToolCall;
+  if (!ptc || ptc.id !== pendingId || ptc.status !== "pending") {
+    return shapeRun(run); // idempotent no-op — see header comment
+  }
+  ptc.status = decision;
+  ptc.decidedAt = now();
+  ptc.reason = reason != null ? String(reason) : null;
+  // Only un-park the node if it's STILL parked. A race is reachable (e.g. a
+  // human approve/reject lands just after DELETE cancelled the run and
+  // killRunningJobs already marked this node "skipped"): the pending record
+  // must still resolve (hard-constraint #4) and get logged, but a terminal
+  // node must never be resurrected to "running" underneath it.
+  if (ne.status === "waiting-approval") ne.status = "running";
+  const stillWaiting = (run.nodeExecutions || []).some(
+    (n) => n.nodeId !== nodeId && n.status === "waiting-approval",
+  );
+  if (!stillWaiting && run.status === "waiting-approval") {
+    run.status = "running";
+  }
+  pushToolCallLog(run, {
+    nodeId,
+    toolName: ptc.toolName,
+    connectionId: ptc.connectionId,
+    targetType: null, // not tracked on the pending record; see appendToolCallLog
+    disposition: decision,
+    argsPreview: ptc.argsPreview,
+  });
+  persist();
+  return shapeRun(run);
+}
+
+// Append an allow/deny disposition straight to the audit log (no status
+// transition involved — the node was never parked for these). Used directly
+// by server.js when the proxy's fire-and-forget log POST lands. Persists once;
+// a log-append failure must never block/fail the actual tool call, so the
+// ROUTE (not this function) is responsible for swallowing errors.
+function appendToolCallLog(runId, entry = {}) {
+  const run = findRun(runId);
+  pushToolCallLog(run, entry);
+  persist();
+  return shapeRun(run);
+}
+
+// The id of the node's current PENDING record, or throw (used by
+// approveAction/rejectAction when the caller omits an explicit pendingId).
+function currentPendingId(run, nodeId) {
+  const ne = findNode(run, nodeId);
+  if (!ne.pendingToolCall || ne.pendingToolCall.status !== "pending")
+    throw err("bad_request", "no pending tool call for this node");
+  return ne.pendingToolCall.id;
+}
+
+// ---- Human-approval actions (iter3) — human (FE) decision routes ----
+// Both accept an optional explicit pendingId (defense-in-depth per plan §3);
+// when omitted, resolve against "whatever's current" for the node.
+function approveAction(runId, nodeId, { pendingId } = {}) {
+  const run = findRun(runId);
+  const pid = pendingId || currentPendingId(run, nodeId);
+  return resolvePendingToolCall(runId, nodeId, pid, "approved", null);
+}
+function rejectAction(runId, nodeId, { pendingId, reason } = {}) {
+  const run = findRun(runId);
+  const pid = pendingId || currentPendingId(run, nodeId);
+  return resolvePendingToolCall(runId, nodeId, pid, "rejected", reason);
 }
 
 load();
@@ -892,7 +1074,12 @@ export default {
   recordNodeResult,
   setRunStatus,
   decide,
-  // Human-approval nodes (iter3) — throwing stubs.
+  // Pending MCP tool-call approvals (iter3, D5) — server.js's proxy-facing and
+  // human-facing routes compose these sync/atomic primitives.
+  recordPendingToolCall,
+  getPendingToolCall,
+  resolvePendingToolCall,
+  appendToolCallLog,
   approveAction,
   rejectAction,
 };

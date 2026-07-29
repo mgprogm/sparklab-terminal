@@ -18,11 +18,24 @@
 // tmux/marker I/O and calls buildInvocation() to get the files + command. Keeping
 // it import-free also keeps agentic.js a pure sync store (constraint #3).
 //
-// iter2 SCOPE: providers just run the CLI in the target session's cwd. NO MCP
-// servers are wired to the run yet (that per-run proxy is iter3), so an agent's
-// toolPolicies/connections do not affect the invocation here.
+// iter3 SCOPE (D5): claude-cli, LOCAL sessions only, is now wired through the
+// per-run MCP proxy (tools/agentic-proxy/server.mjs) — see the claude-cli
+// builder + buildMcpPolicyManifest below. codex-cli is DELIBERATELY left
+// unwired; see the rationale comment on the codex-cli provider entry. Remote
+// (ssh) sessions get NO MCP config for EITHER provider — see isLocalServer.
 
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Absolute path to the per-run MCP proxy this repo ships alongside
+// tools/kanban-mcp, tools/pm-mcp. Resolved via import.meta.url (matches this
+// repo's other `tools/`-relative resolution, e.g. kanban.js/pm.js's own
+// __dirname pattern) so it is correct regardless of process.cwd().
+const AGENTIC_PROXY_PATH = path.resolve(
+  __dirname,
+  "../../../tools/agentic-proxy/server.mjs",
+);
 
 // ---- Command resolution (mirror server.js CODEX_COMMAND exactly) -----------
 // JSON-array (e.g. ["codex","--foo"]) or a plain binary path; falls back to the
@@ -104,6 +117,20 @@ const CODEX_AZURE_HEADERS = {
   "x-sparklab-codex-azure-deployment": "GPT56SOL_DEPLOYMENT",
 };
 
+// A session's target server is "local" when unset or explicitly type:"local"
+// (matches registry.js's implicit `local` entry). Extracted to a named helper
+// (iter3) because it now gates TWO independent things, for BOTH providers:
+//   - agentChildEnv: whether the provider's own credential namespace is safe
+//     to write to the target's disk (iter2 stance, unchanged);
+//   - the claude-cli builder: whether the per-run MCP proxy is wired in at
+//     all (iter3, D5) — a remote target gets NO MCP config, matching the
+//     iter2 fail-closed posture now applied uniformly regardless of provider
+//     (HARD CONSTRAINT #3: this repo's tools/ dir, and the proxy it runs,
+//     likely doesn't exist on an arbitrary remote host).
+function isLocalServer(server) {
+  return !server || server.type === "local";
+}
+
 /**
  * Build the curated env for a provider child on `server`.
  * @param {object|null} server - registry server record (null/`local` = local).
@@ -112,7 +139,7 @@ const CODEX_AZURE_HEADERS = {
  * @returns {Record<string,string>} env map (rendered into wrapper.sh exports).
  */
 function agentChildEnv(server, provider, { azureHeaders } = {}) {
-  const isLocal = !server || server.type === "local";
+  const isLocal = isLocalServer(server);
   const env = {};
   for (const k of BASE_ENV_ALLOWLIST) {
     if (process.env[k] != null) env[k] = process.env[k];
@@ -210,6 +237,14 @@ function wrapperScript({ envExports, cwd, scratchDir, invocationLine }) {
  * @property {string} scratchDir  - absolute AGENT_RUNS_DIR/<runId>/<nodeId> on the TARGET server
  * @property {object|null} server - registry server record (local | ssh)
  * @property {object} [azureHeaders] - codex-only Azure passthrough headers
+ * @property {Record<string,{targetType:string}>} [connections] - iter3 (D5):
+ *   frozen resolvedConfig.connections; used only by claude-cli/local to build
+ *   the MCP policy manifest.
+ * @property {string} [gatewayApiToken] - iter3 (D5): the gateway's own bearer
+ *   (GATEWAY_API_TOKEN||KANBAN_API_TOKEN); reaches the proxy ONLY via its
+ *   mcp.json env block, never via the manifest file (see the claude-cli
+ *   builder + buildMcpPolicyManifest).
+ * @property {string} [gatewayBaseUrl] - iter3 (D5): e.g. http://127.0.0.1:3007.
  */
 
 /**
@@ -254,6 +289,14 @@ function buildInvocation(input) {
     scratchDir,
     server,
     azureHeaders,
+    // iter3 (D5): frozen resolvedConfig.connections ({connId:{targetType}})
+    // + the gateway's own base URL/bearer, needed ONLY by the claude-cli/local
+    // branch to build the MCP policy manifest + point --mcp-config at the
+    // proxy. Optional/undefined is fine for codex-cli and for remote targets
+    // (neither ever reads them).
+    connections,
+    gatewayApiToken,
+    gatewayBaseUrl,
   } = input;
 
   const provider = agent && agent.runtimeProvider;
@@ -281,6 +324,9 @@ function buildInvocation(input) {
     scratchDir,
     server,
     azureHeaders,
+    connections,
+    gatewayApiToken,
+    gatewayBaseUrl,
   });
 }
 
@@ -333,11 +379,112 @@ function assembleInvocation(ctx, { invocationLine, sandboxMode, extraFiles }) {
   };
 }
 
+// ---- Per-run MCP policy manifest (iter3, D5) --------------------------------
+// Pure function of already-frozen data (D9): `connections` is the
+// resolvedConfig.connections map ({connId: {targetType}}, frozen by
+// server.js's startRun at run-start) and `agent.toolPolicies` is the agent's
+// OWN frozen policy list (already part of the resolved agent snapshot — no
+// new field needed there). No live store lookup happens here, so a connection
+// deleted mid-run can never affect an in-flight node's manifest.
+//
+// Shape MUST match tools/agentic-proxy/server.mjs's documented contract
+// byte-for-byte (connections[].{connectionId, targetType,
+// toolPolicies[].{tools, policy}}, gatewayBaseUrl, runId, nodeId) — the proxy
+// fails CLOSED on a shape mismatch (silently empty tools/list), not loudly.
+// Deliberately absent: any gateway token. The token reaches the proxy only
+// via its own MCP-launch env block (see the claude-cli builder below); this
+// avoids duplicating a secret across both channels for no benefit.
+function buildMcpPolicyManifest({
+  connections,
+  agent,
+  runId,
+  nodeId,
+  gatewayBaseUrl,
+}) {
+  const conns = connections || {};
+  const toolPolicies =
+    agent && Array.isArray(agent.toolPolicies) ? agent.toolPolicies : [];
+  const outConnections = Object.keys(conns).map((connectionId) => ({
+    connectionId,
+    targetType: conns[connectionId] && conns[connectionId].targetType,
+    toolPolicies: toolPolicies
+      .filter((p) => p.connectionId === connectionId)
+      .map((p) => ({ tools: p.tools, policy: p.policy })),
+  }));
+  return {
+    connections: outConnections,
+    gatewayBaseUrl: gatewayBaseUrl || "",
+    runId,
+    nodeId,
+  };
+}
+
+// Precondition (build spec §a): if the gateway has no bearer token configured
+// (neither GATEWAY_API_TOKEN nor legacy KANBAN_API_TOKEN — server.js resolves
+// that and passes the result as `gatewayApiToken`), the proxy's own children
+// and its callback POSTs can't authenticate either. Degrade gracefully: build
+// the manifest with ZERO connections (tools/list ends up empty — deny by
+// omission) instead of spawning a guaranteed-broken proxy silently. Warn ONCE
+// per process, not per node/run (this would otherwise spam on every spawn).
+let warnedMissingGatewayToken = false;
+function connectionsForManifest(connections, gatewayApiToken) {
+  const conns = connections || {};
+  if (!gatewayApiToken && Object.keys(conns).length > 0) {
+    if (!warnedMissingGatewayToken) {
+      console.warn(
+        "[agent-runtime] GATEWAY_API_TOKEN/KANBAN_API_TOKEN is not configured — " +
+          "agentic-run MCP connections will be unreachable (proxy manifest built " +
+          "with zero connections; deny-by-omission, not a thrown error).",
+      );
+      warnedMissingGatewayToken = true;
+    }
+    return {};
+  }
+  return conns;
+}
+
 // ---- Provider registry -----------------------------------------------------
 const PROVIDERS = {
   // codex exec -C <cwd> --sandbox <mode> --skip-git-repo-check --color never -
   // Prompt on STDIN (`-`), redirected from the 0600 prompt file. Verbatim form
   // of the working run_codex route.
+  //
+  // iter3 (D5) MCP-proxy wiring — DELIBERATELY NOT DONE for codex-cli. This is
+  // the plan's explicitly pre-approved acceptable outcome, evaluated with a
+  // real, bounded (one `timeout 30 codex exec ...` run, RUST_LOG=debug) live
+  // check during this pass, not just reasoned about:
+  //   1. `-c mcp_servers.<name>...=...` MERGES with the ambient
+  //      ~/.codex/config.toml mcp_servers table, it does NOT replace it —
+  //      confirmed live: a run with `-c mcp_servers.testproxy.command=...`
+  //      still initialized BOTH the injected proxy AND the ambient
+  //      `openaiDeveloperDocs` server in the same session
+  //      (`mcp_servers="openaiDeveloperDocs, testproxy"`,
+  //      `mcp_server_count=2` in the debug log). Wiring the proxy in via bare
+  //      `-c` would therefore add a MEDIATED path ALONGSIDE whatever
+  //      unmediated servers the ambient config already declares — it would
+  //      not close the D5 fail-open this iteration exists to close, and would
+  //      look like mediation was added when the real gap (ambient servers
+  //      reachable unmediated) is untouched.
+  //   2. `--ignore-user-config` DOES achieve exclusive scoping, but drops the
+  //      ENTIRE config file — including `model`/`model_provider`/
+  //      `model_providers.azure.*` — so the provider silently reverts to
+  //      built-in `openai` (401) unless every one of those is replicated via
+  //      more `-c` flags. The gateway doesn't own or track an operator's
+  //      codex provider config, so this is fragile in a way specific to this
+  //      deployment: a version bump or a different operator account could
+  //      silently break auth or isolation with no local signal.
+  //   3. Independent of both of the above, `codex exec`'s non-interactive
+  //      harness cannot execute ANY MCP tool call without a `readOnlyHint:true`
+  //      tool annotation (it raises an elicitation only an interactive TUI can
+  //      answer, and auto-resolves it as Cancel) — a real fix would need the
+  //      proxy's annotation-injection trick AND one of the two scoping
+  //      mechanisms above, compounding the fragility rather than resolving it.
+  // Net: codex-cli's invocation is UNCHANGED from iter2 for both local and
+  // remote targets (ambient ~/.codex/config.toml MCP, already-reviewed
+  // run_codex posture). Residual exposure is low-but-nonzero and specific to
+  // whatever the ambient config on the target host happens to declare — not
+  // something this iteration controls. Re-evaluate only if the deployment
+  // model changes (e.g. a gateway-owned CODEX_HOME per run).
   "codex-cli": {
     build(_input, ctx) {
       const sandboxMode = clampSandbox(ctx.agent.sandboxMode);
@@ -362,16 +509,35 @@ const PROVIDERS = {
   // (verified) — nothing sensitive on argv. stream-json REQUIRES --verbose in
   // -p mode (verified CLI constraint).
   //
-  // FAIL-CLOSED MCP ISOLATION (iter2): claude -p otherwise performs AMBIENT MCP
-  // discovery from ~/.claude.json / project scope. Because a run executes in the
-  // target session's cwd, an unhardened claude-cli agent would silently inherit
-  // whatever MCP servers that cwd is scoped to (e.g. this repo's own pm/kanban),
-  // UNMEDIATED — violating D5 before the iter3 proxy even exists. We pin an EMPTY
-  // per-run --mcp-config and pass --strict-mcp-config ("only use servers from
-  // --mcp-config, ignore all other MCP config"), so an iter2 run reaches ZERO MCP
-  // servers. iter3 swaps the empty file for one pointing at the per-run proxy.
-  // (Codex's ambient ~/.codex/config.toml MCP is the pre-existing, already-reviewed
-  // run_codex template posture and is intentionally left as-is until iter3.)
+  // FAIL-CLOSED MCP ISOLATION (iter2, still the REMOTE posture in iter3):
+  // claude -p otherwise performs AMBIENT MCP discovery from ~/.claude.json /
+  // project scope. Because a run executes in the target session's cwd, an
+  // unhardened claude-cli agent would silently inherit whatever MCP servers
+  // that cwd is scoped to (e.g. this repo's own pm/kanban), UNMEDIATED —
+  // violating D5. We always pass --strict-mcp-config ("only use servers from
+  // --mcp-config, ignore all other MCP config") so ambient discovery is
+  // NEVER reachable, on local OR remote.
+  //
+  // iter3 (D5) LOCAL branch: --mcp-config now points at a real MCP server
+  // entry that spawns the per-run proxy (tools/agentic-proxy/server.mjs) —
+  // the CLI's OWN mcp.json is the launch mechanism that hands the proxy its
+  // env (gateway bearer + base URL + run/node ids + the manifest file path).
+  // `--allowedTools mcp__agentic-proxy` is REQUIRED alongside this — verified
+  // live: without it, claude -p flatly denies every MCP call ("...but you
+  // haven't granted it yet"), and under --permission-mode plan specifically
+  // a tool call is additionally blocked unless the proxy's tools/list tagged
+  // it readOnlyHint:true (which it always does — see the proxy's own header
+  // comment; this governs the CLI's local harness gate, not the proxy's real
+  // allow/deny/approval enforcement, which is unaffected).
+  //
+  // iter3 REMOTE branch (HARD CONSTRAINT #3): byte-identical to iter2 — an
+  // empty --mcp-config, NO --allowedTools flag. This repo's tools/ dir (and
+  // the proxy script it would need to spawn) likely doesn't exist on an
+  // arbitrary remote host, and per-run MCP-proxy distribution to remote hosts
+  // is explicitly out of iter3 scope. Applies to EITHER provider uniformly —
+  // codex-cli never wires MCP in the first place (see its own comment above),
+  // so this branch only has visible effect for claude-cli, but the gate
+  // itself (isLocalServer) is provider-agnostic by construction.
   "claude-cli": {
     build(_input, ctx) {
       const sandboxMode = clampSandbox(ctx.agent.sandboxMode);
@@ -387,20 +553,75 @@ const PROVIDERS = {
         path.posix.join(ctx.scratchDir, "mcp.json"),
       );
       const outLog = shSingleQuote(path.posix.join(ctx.scratchDir, "out.log"));
+
+      const isLocal = isLocalServer(ctx.server);
+      let extraFiles;
+      let allowedToolsFlag = "";
+      if (isLocal) {
+        const proxyServerName = "agentic-proxy"; // fixed — claude namespaces
+        // tools as mcp__agentic-proxy__<tool>; --allowedTools below must match.
+        const policyPath = path.posix.join(ctx.scratchDir, "mcp-policy.json");
+        const manifest = buildMcpPolicyManifest({
+          connections: connectionsForManifest(
+            ctx.connections,
+            ctx.gatewayApiToken,
+          ),
+          agent: ctx.agent,
+          runId: ctx.runId,
+          nodeId: ctx.nodeId,
+          gatewayBaseUrl: ctx.gatewayBaseUrl,
+        });
+        const mcpConfig = {
+          mcpServers: {
+            [proxyServerName]: {
+              command: "node",
+              args: [AGENTIC_PROXY_PATH],
+              env: {
+                // ONLY here, never in the manifest file (see
+                // buildMcpPolicyManifest's own comment) — this is the CLI's
+                // own MCP-server-launch env block, the intended channel per
+                // the proxy's documented wire contract.
+                GATEWAY_API_TOKEN: ctx.gatewayApiToken || "",
+                GATEWAY_BASE_URL: ctx.gatewayBaseUrl || "",
+                AGENTIC_RUN_ID: ctx.runId,
+                AGENTIC_NODE_ID: ctx.nodeId,
+                AGENTIC_POLICY_FILE: policyPath,
+              },
+            },
+          },
+        };
+        extraFiles = [
+          {
+            relPath: "mcp-policy.json",
+            mode: "600",
+            content: `${JSON.stringify(manifest, null, 2)}\n`,
+          },
+          {
+            relPath: "mcp.json",
+            mode: "600",
+            content: `${JSON.stringify(mcpConfig, null, 2)}\n`,
+          },
+        ];
+        allowedToolsFlag = `--allowedTools ${shSingleQuote(`mcp__${proxyServerName}`)} `;
+      } else {
+        // Remote: empty MCP config, byte-identical to iter2. NO --allowedTools.
+        extraFiles = [
+          { relPath: "mcp.json", mode: "600", content: '{"mcpServers":{}}\n' },
+        ];
+      }
+
       const invocationLine =
         `cat ${promptPath} | ${cmd} -p ` +
         `--output-format stream-json --verbose ` +
         `--permission-mode ${shSingleQuote(permissionMode)} ` +
         `--append-system-prompt-file ${systemPath} ` +
         `--mcp-config ${mcpPath} --strict-mcp-config ` +
+        `${allowedToolsFlag}` +
         `> ${outLog} 2>&1`;
       return assembleInvocation(ctx, {
         invocationLine,
         sandboxMode,
-        // Empty MCP config: with --strict-mcp-config this yields zero MCP servers.
-        extraFiles: [
-          { relPath: "mcp.json", mode: "600", content: '{"mcpServers":{}}\n' },
-        ],
+        extraFiles,
       });
     },
   },
@@ -422,6 +643,8 @@ export default {
   buildInvocation,
   parseResult,
   agentChildEnv,
+  isLocalServer,
+  buildMcpPolicyManifest,
   // Exposed for server.js caps + tests.
   CODEX_COMMAND,
   CLAUDE_COMMAND,
@@ -429,4 +652,5 @@ export default {
   AGENT_OUTPUT_MAX_BYTES,
   CLAUDE_DEFAULT_PERMISSION_MODE,
   SANDBOX_MODES,
+  AGENTIC_PROXY_PATH,
 };

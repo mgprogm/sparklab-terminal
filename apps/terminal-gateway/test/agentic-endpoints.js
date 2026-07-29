@@ -37,6 +37,16 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
+// The per-run MCP proxy under test (iter3). Repo-root/tools/agentic-proxy.
+const PROXY_PATH = path.join(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "tools",
+  "agentic-proxy",
+  "server.mjs",
+);
 const PORT = 3994;
 const BASE = `http://localhost:${PORT}`;
 const AUTH_USER = "agenticuser";
@@ -55,6 +65,8 @@ let agenticFile = "";
 let runsDir = "";
 let stubPath = "";
 let sessDir = "";
+let kanbanFile = ""; // temp KANBAN_FILE store (iter3 proxy tests — never the repo's)
+let pmFile = ""; // temp PM_FILE store (iter3 — keeps pm.json isolated too)
 let checks = 0;
 let tmuxBefore = new Set();
 
@@ -127,6 +139,10 @@ function startServer(extraEnv = {}) {
         AGENTIC_FILE: agenticFile,
         GATEWAY_API_TOKEN: API_TOKEN,
         KANBAN_API_TOKEN: "",
+        // Isolate the artifact stores so the iter3 proxy tests (real kanban-mcp)
+        // never touch the repo's real data/kanban.json / data/pm.json.
+        KANBAN_FILE: kanbanFile,
+        PM_FILE: pmFile,
         // ---- Run engine ----
         CODEX_COMMAND: stubPath,
         CLAUDE_COMMAND: stubPath,
@@ -160,7 +176,105 @@ function stopServer(signal = "SIGTERM") {
   });
 }
 
+// A tiny in-test MCP client that drives tools/agentic-proxy/server.mjs DIRECTLY
+// over its own stdin/stdout with newline-delimited JSON-RPC 2.0 — standing in
+// for the CLI that normally spawns the proxy, WITHOUT running any real
+// claude/codex binary. `request()` returns { id, promise } so an approval-tier
+// tools/call (which the proxy holds open until the gateway decides) can be
+// awaited AFTER the test drives the approve/reject/timeout route. The proxy
+// reaps its own kanban-mcp/pm-mcp children only on stdin `end` (no signal
+// handler), so `close()` ends stdin and awaits a clean exit — killing it would
+// orphan the node grandchildren, which the tmux-only leak check can't catch.
+const activeProxies = new Set();
+class ProxyClient {
+  constructor(env) {
+    this.buf = "";
+    this.nextId = 1;
+    this.pending = new Map();
+    this.stderr = "";
+    this._readyResolve = null;
+    this.ready = new Promise((r) => (this._readyResolve = r));
+    this.proc = spawn("node", [PROXY_PATH], {
+      cwd: ROOT,
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    activeProxies.add(this);
+    this.proc.stdout.setEncoding("utf8");
+    this.proc.stdout.on("data", (chunk) => this._onData(chunk));
+    this.proc.stderr.setEncoding("utf8");
+    this.proc.stderr.on("data", (d) => {
+      this.stderr += d;
+      if (this._readyResolve && this.stderr.includes("[agentic-proxy] ready")) {
+        this._readyResolve();
+        this._readyResolve = null;
+      }
+    });
+    this.exited = new Promise((r) =>
+      this.proc.on("exit", (code) => {
+        activeProxies.delete(this);
+        r(code);
+      }),
+    );
+  }
+  _onData(chunk) {
+    this.buf += chunk;
+    let nl;
+    while ((nl = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, nl).trim();
+      this.buf = this.buf.slice(nl + 1);
+      if (!line) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (msg.id != null && this.pending.has(msg.id)) {
+        const { resolve } = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
+        resolve(msg);
+      }
+    }
+  }
+  // Returns { id, promise } — promise resolves with the full JSON-RPC message.
+  request(method, params) {
+    const id = this.nextId++;
+    const promise = new Promise((resolve) => this.pending.set(id, { resolve }));
+    this.proc.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
+    );
+    return { id, promise };
+  }
+  // Await a request and return its `result` (or throw on a JSON-RPC error).
+  async call(method, params) {
+    const msg = await this.request(method, params).promise;
+    if (msg.error)
+      throw new Error(`proxy ${method} error: ${msg.error.message}`);
+    return msg.result;
+  }
+  // End stdin (the proxy's ONLY child-reaping path) and await a clean exit.
+  async close() {
+    try {
+      this.proc.stdin.end();
+    } catch {
+      /* already gone */
+    }
+    return this.exited;
+  }
+}
+
 function cleanup() {
+  // Best-effort: end any still-open proxy's stdin so it reaps its MCP children
+  // (they are node grandchildren the tmux-only sweep below would otherwise miss).
+  for (const p of activeProxies) {
+    try {
+      p.proc.stdin.end();
+    } catch {}
+    try {
+      p.proc.kill("SIGKILL");
+    } catch {}
+  }
   // Kill any tmux session this test created (agrun- run jobs + web- targets),
   // diffed against the pre-test snapshot so unrelated dev sessions are untouched.
   const after = tmuxSessions();
@@ -269,44 +383,115 @@ async function createRunnerApp({
 }
 
 async function main() {
-  // ---- Unit check: claude-cli agent-task is MCP fail-closed (iter2) ----------
+  // ---- Unit check: claude-cli agent-task MCP routing (iter3, D5) -------------
   // claude -p otherwise does ambient MCP discovery from the run cwd's ~/.claude.json
   // project scope; an unhardened run would silently inherit that cwd's MCP servers
-  // UNMEDIATED. The builder must pin an empty --mcp-config + --strict-mcp-config so
-  // an iter2 run reaches ZERO MCP servers. This asserts that at the source (no
-  // gateway needed) so it can never silently regress before the iter3 proxy lands.
+  // UNMEDIATED. iter3 pins --strict-mcp-config so ONLY the servers in the per-run
+  // --mcp-config file are ever reachable, and:
+  //   - LOCAL target  -> the file lists EXACTLY the agentic-proxy server (and no
+  //     pm/kanban directly); all scoping/allow-deny-approval happens INSIDE the
+  //     proxy via the policy manifest, so even a zero-connection agent reaches
+  //     zero tools (deny-by-empty-manifest), never an ambient server.
+  //   - REMOTE (ssh)  -> the proxy can't run on an arbitrary remote host, so the
+  //     file is an EMPTY {"mcpServers":{}} (fail-closed, zero MCP) — matching
+  //     iter2's posture, now uniform across providers.
+  // Asserted at the source (no gateway needed) so it can never silently regress.
   {
     const rt = (await import("../src/agent-runtime.js")).default;
-    const inv = rt.buildInvocation({
+    const mkArgs = (server) => ({
       runId: "utR",
       nodeId: "utN",
       agent: {
         runtimeProvider: "claude-cli",
         sandboxMode: "workspace-write",
         systemPrompt: "SYS",
+        toolPolicies: [],
       },
       cwd: "/tmp/ut-cwd",
       promptText: "UNIT-PROMPT-SENTINEL",
       scratchDir: "/tmp/ut-scratch/utR/utN",
-      server: { type: "local" },
+      server,
+      resolvedConnections: [],
     });
-    const wrapper = inv.files.find((f) => f.relPath === "wrapper.sh").content;
-    const mcp = inv.files.find((f) => f.relPath === "mcp.json");
+
+    // LOCAL: --mcp-config points at the proxy, nothing else.
+    const local = rt.buildInvocation(mkArgs({ type: "local" }));
+    const localWrap = local.files.find(
+      (f) => f.relPath === "wrapper.sh",
+    ).content;
+    const localMcp = local.files.find((f) => f.relPath === "mcp.json");
     assert(
-      wrapper.includes("--strict-mcp-config") &&
-        wrapper.includes("--mcp-config"),
-      "claude-cli invocation must pass --mcp-config + --strict-mcp-config (MCP fail-closed)",
+      localWrap.includes("--strict-mcp-config") &&
+        localWrap.includes("--mcp-config"),
+      "claude/local must pass --mcp-config + --strict-mcp-config",
+    );
+    let localCfg;
+    assert(
+      !!localMcp && (localCfg = JSON.parse(localMcp.content)) != null,
+      "claude/local must ship a parseable mcp.json",
+    );
+    const localServers = Object.keys(localCfg.mcpServers || {});
+    assert(
+      localServers.length === 1 && localServers[0] === "agentic-proxy",
+      "claude/local mcp.json must list EXACTLY the agentic-proxy server (no direct pm/kanban)",
     );
     assert(
-      !!mcp && /\{\s*"mcpServers"\s*:\s*\{\s*\}\s*\}/.test(mcp.content),
-      "claude-cli must ship an EMPTY per-run mcp.json (zero MCP servers under --strict-mcp-config)",
+      !/mcpServers[\s\S]*\b(pm|kanban)\b/.test(localMcp.content),
+      "claude/local mcp.json must NOT reference pm/kanban servers directly (only via the proxy)",
     );
     assert(
-      !inv.tmuxArg.includes("UNIT-PROMPT-SENTINEL"),
+      !local.tmuxArg.includes("UNIT-PROMPT-SENTINEL"),
       "prompt text must never appear on the tmux/argv command line",
     );
+
+    // REMOTE: fail-closed empty config (no proxy reachable on the remote host).
+    const remote = rt.buildInvocation(mkArgs({ type: "ssh" }));
+    const remoteWrap = remote.files.find(
+      (f) => f.relPath === "wrapper.sh",
+    ).content;
+    const remoteMcp = remote.files.find((f) => f.relPath === "mcp.json");
+    assert(
+      remoteWrap.includes("--strict-mcp-config"),
+      "claude/remote must still pass --strict-mcp-config (fail-closed)",
+    );
+    assert(
+      !!remoteMcp &&
+        Object.keys(JSON.parse(remoteMcp.content).mcpServers || {}).length ===
+          0,
+      "claude/remote must ship an EMPTY mcp.json (zero MCP servers)",
+    );
+    // The remote mcp.json must not name the proxy either (no reachable MCP at all).
+    assert(
+      !/agentic-proxy/.test(remoteMcp.content),
+      "claude/remote mcp.json must NOT reference the agentic-proxy (no proxy on a remote host)",
+    );
+
+    // codex-cli: iter3 leaves its invocation UNCHANGED — no proxy wiring on
+    // EITHER target. It must ship no mcp.json and never name the proxy anywhere.
+    const codexArgs = (server) => ({
+      ...mkArgs(server),
+      agent: {
+        runtimeProvider: "codex-cli",
+        sandboxMode: "read-only",
+        systemPrompt: "SYS",
+        toolPolicies: [],
+      },
+    });
+    for (const t of ["local", "ssh"]) {
+      const cx = rt.buildInvocation(codexArgs({ type: t }));
+      assert(
+        !cx.files.some((f) => f.relPath === "mcp.json"),
+        `codex-cli/${t} must ship NO mcp.json (no proxy wiring)`,
+      );
+      const cxWrap = cx.files.find((f) => f.relPath === "wrapper.sh").content;
+      assert(
+        !/agentic-proxy/.test(cxWrap) && !cx.tmuxArg.includes("agentic-proxy"),
+        `codex-cli/${t} wrapper must never reference the agentic-proxy`,
+      );
+    }
+
     console.log(
-      `  ok: claude-cli agent-task is MCP fail-closed (empty --mcp-config + --strict-mcp-config; prompt off-argv)`,
+      `  ok: MCP routing (iter3 D5) — claude local->proxy-only+strict, claude remote->empty (no proxy), codex local+remote->no mcp/no proxy, prompt off-argv`,
     );
   }
 
@@ -315,6 +500,8 @@ async function main() {
   runsDir = path.join(tmpDir, "agentic-runs"); // absolute — required
   sessDir = path.join(tmpDir, "sess");
   stubPath = path.join(tmpDir, "provider-stub.sh");
+  kanbanFile = path.join(tmpDir, "kanban.json"); // isolated artifact stores
+  pmFile = path.join(tmpDir, "pm.json");
   fs.mkdirSync(runsDir, { recursive: true });
   fs.mkdirSync(sessDir, { recursive: true });
   fs.writeFileSync(stubPath, STUB, { mode: 0o755 });
@@ -1129,6 +1316,316 @@ async function main() {
 
   // Stop the restarted gateway before spinning dedicated-config gateways.
   await stopServer("SIGTERM");
+
+  // ======================================================================
+  // ITERATION 3 — PER-RUN MCP PROXY + APPROVAL MEDIATION (real kanban-mcp)
+  // ======================================================================
+  // Drives tools/agentic-proxy/server.mjs DIRECTLY over its own stdin/stdout
+  // with JSON-RPC (NEVER a real claude/codex CLI). The proxy spawns the REAL
+  // tools/kanban-mcp child, which hits the REAL gateway. Proves, against a real
+  // MCP server (not a mock): deny-tier omitted from tools/list AND rejected
+  // by-name (defense-in-depth, call-time enforcement), allow-tier forwarded to
+  // the real server, approval-tier blocked until the gateway's
+  // approve/reject/timeout routes resolve it, and the run's toolCallLog[]
+  // records every disposition. A long-lived SLEEP-stub run supplies a real
+  // run+node (n0) whose pending-tool-call/approve routes back the proxy.
+  {
+    // Fresh gateway with the DEFAULT per-step timeout (30m) so the SLEEP=300
+    // borrow-run's node n0 is never reaped mid-test. Isolated KANBAN_FILE.
+    await startServer();
+    await login();
+
+    // A real target session for the borrow-run.
+    const sres = await req("POST", "/api/sessions", {
+      body: { name: "iter3-proxy-target", cwd: sessDir },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(sres.status === 201, `iter3 target session -> ${sres.status}`);
+    const iter3Session = (await sres.json()).id;
+    await sleep(700); // let the shell settle so pane_current_path resolves
+
+    // A REAL Kanban board (through the gateway, bearer) — the proxy's live tool
+    // target, isolated in the temp KANBAN_FILE store.
+    const bres = await req("POST", "/api/kanban/boards", {
+      cookie: false,
+      headers: { authorization: `Bearer ${API_TOKEN}` },
+      body: { name: "iter3-proxy-board" },
+    });
+    assert(bres.status === 201, `iter3 create board -> ${bres.status}`);
+    const boardId = (await bres.json()).id;
+
+    // A long-lived run so node n0 stays alive while we mediate MCP tool calls.
+    const { appId } = await createRunnerApp({
+      mode: "single",
+      providers: ["codex-cli"],
+    });
+    const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+      body: {
+        sessionId: iter3Session,
+        objective: "hold for proxy mediation SLEEP=300",
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(rres.status === 202, `iter3 borrow-run -> ${rres.status}`);
+    const runId = (await rres.json()).id;
+    {
+      const r = await (
+        await req("GET", `/api/agentic/runs/${enc(runId)}`)
+      ).json();
+      assert(nodeOf(r, "n0").status === "running", "iter3 n0 running at 202");
+    }
+
+    // Hand-written policy manifest: one allow-tier, one deny-tier, one
+    // approval-tier tool on the kanban target (a throwaway file the test writes).
+    const manifestPath = path.join(tmpDir, "iter3-policy.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        connections: [
+          {
+            connectionId: "conn-k",
+            targetType: "kanban",
+            toolPolicies: [
+              { tools: ["kanban_get_board"], policy: "allow" },
+              { tools: ["kanban_delete_board"], policy: "deny" },
+              { tools: ["kanban_add_card"], policy: "approval" },
+            ],
+          },
+        ],
+        gatewayBaseUrl: BASE,
+        runId,
+        nodeId: "n0",
+      }),
+    );
+
+    const proxyEnv = (timeoutMs) => ({
+      GATEWAY_API_TOKEN: API_TOKEN,
+      GATEWAY_BASE_URL: BASE,
+      AGENTIC_RUN_ID: runId,
+      AGENTIC_NODE_ID: "n0",
+      AGENTIC_POLICY_FILE: manifestPath,
+      AGENT_MCP_APPROVAL_TIMEOUT_MS: String(timeoutMs),
+      KANBAN_API_TOKEN: "",
+    });
+    const textOf = (r) =>
+      (r && r.content && r.content[0] && r.content[0].text) || "";
+    const parkPred = (r) => {
+      const n = nodeOf(r, "n0");
+      return !!(n && n.status === "waiting-approval" && n.pendingToolCall);
+    };
+
+    // ---- Proxy A: long approval hold — initialize/list/allow/deny/approve/reject
+    const proxyA = new ProxyClient(proxyEnv(60000));
+    await proxyA.ready;
+
+    const initR = await proxyA.call("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "iter3-test", version: "1" },
+    });
+    assert(
+      initR && initR.serverInfo && initR.serverInfo.name === "agentic-proxy",
+      "proxy initialize -> ok (serverInfo agentic-proxy)",
+    );
+
+    // tools/list — deny EXCLUDED entirely; allow + approval present + annotated.
+    const listR = await proxyA.call("tools/list", {});
+    const listed = (listR.tools || []).map((t) => t.name);
+    assert(
+      listed.includes("kanban_get_board") && listed.includes("kanban_add_card"),
+      "tools/list includes the allow + approval tiers",
+    );
+    assert(
+      !listed.includes("kanban_delete_board"),
+      "tools/list EXCLUDES the deny-tier tool entirely",
+    );
+    assert(
+      (listR.tools || []).every(
+        (t) => t.annotations && t.annotations.readOnlyHint === true,
+      ),
+      "listed tools carry the injected readOnlyHint:true annotation",
+    );
+
+    // allow-tier: forwarded to the REAL kanban server, real result returned.
+    const getR = await proxyA.call("tools/call", {
+      name: "kanban_get_board",
+      arguments: { board_id: boardId },
+    });
+    assert(!getR.isError, "allow-tier kanban_get_board is not isError");
+    assert(
+      textOf(getR).includes(boardId) &&
+        textOf(getR).includes("iter3-proxy-board"),
+      "allow-tier returned the REAL board from the kanban server (forwarded)",
+    );
+
+    // deny-by-name (MANDATORY): call the deny-tier tool BY NAME anyway. It must
+    // be rejected at call time (never forwarded) — proving defense in depth,
+    // not mere list-omission. The board must still exist afterward.
+    const denyR = await proxyA.call("tools/call", {
+      name: "kanban_delete_board",
+      arguments: { board_id: boardId },
+    });
+    assert(
+      denyR.isError === true,
+      "deny-by-name kanban_delete_board -> isError (call-time enforcement)",
+    );
+    assert(
+      /not permitted/i.test(textOf(denyR)),
+      "deny-by-name message names the block",
+    );
+    const stillThere = await req("GET", `/api/kanban/boards/${enc(boardId)}`, {
+      cookie: false,
+      headers: { authorization: `Bearer ${API_TOKEN}` },
+    });
+    assert(
+      stillThere.status === 200,
+      "deny-tier call was NOT forwarded — board still exists (defense in depth)",
+    );
+    console.log(
+      `  ok: (iter3) proxy initialize + tools/list (deny excluded, allow/approval annotated) + allow forwards real board + DENY-BY-NAME rejected, board intact`,
+    );
+
+    // approval-tier: APPROVE path — the call blocks until the gateway approves.
+    {
+      const { promise } = proxyA.request("tools/call", {
+        name: "kanban_add_card",
+        arguments: { board_id: boardId, title: "approved-card" },
+      });
+      await pollRun(runId, parkPred, { label: "approve-park" });
+      const ap = await req(
+        "POST",
+        `/api/agentic/runs/${enc(runId)}/nodes/n0/approve`,
+        { body: {}, origin: ALLOWED_ORIGIN },
+      );
+      assert(ap.status === 200, `approve route -> ${ap.status}`);
+      const res = (await promise).result;
+      assert(!res.isError, "approved kanban_add_card completed (not isError)");
+      assert(
+        /approved-card/.test(textOf(res)),
+        "approved card really created on the real board (forwarded post-approval)",
+      );
+    }
+
+    // approval-tier: REJECT path — the call blocks until the gateway rejects.
+    {
+      const { promise } = proxyA.request("tools/call", {
+        name: "kanban_add_card",
+        arguments: { board_id: boardId, title: "rejected-card" },
+      });
+      await pollRun(runId, parkPred, { label: "reject-park" });
+      const rj = await req(
+        "POST",
+        `/api/agentic/runs/${enc(runId)}/nodes/n0/reject`,
+        { body: { reason: "nope" }, origin: ALLOWED_ORIGIN },
+      );
+      assert(rj.status === 200, `reject route -> ${rj.status}`);
+      const res = (await promise).result;
+      assert(res.isError === true, "rejected kanban_add_card -> isError");
+      assert(
+        /rejected by human/i.test(textOf(res)),
+        "reject message surfaced to the caller",
+      );
+    }
+    console.log(
+      `  ok: (iter3) approval mediation — APPROVE completes the real forwarded call, REJECT -> isError`,
+    );
+
+    await proxyA.close();
+    assert(
+      (await proxyA.exited) === 0,
+      "proxy A exited cleanly on stdin end (kanban-mcp child reaped)",
+    );
+
+    // ---- Proxy B: short local timeout -> approval_pending_timeout ----
+    const proxyB = new ProxyClient(proxyEnv(2500));
+    await proxyB.ready;
+    await proxyB.call("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "iter3-timeout", version: "1" },
+    });
+    {
+      const { promise } = proxyB.request("tools/call", {
+        name: "kanban_add_card",
+        arguments: { board_id: boardId, title: "timeout-card" },
+      });
+      // Deliberately do NOT approve/reject — let the proxy's own ~2.5s hold lapse.
+      const res = (await promise).result;
+      assert(
+        res.isError === true,
+        "un-decided approval-tier call -> isError after the proxy timeout",
+      );
+      assert(
+        /approval_pending_timeout/.test(textOf(res)),
+        "proxy returns approval_pending_timeout on its local hold timeout",
+      );
+      // The disposition log + the best-effort timeout POST are BOTH
+      // fire-and-forget — observe the timed_out entry BEFORE tearing the proxy
+      // down (killing it first could race the POST out).
+      await pollRun(
+        runId,
+        (r) => (r.toolCallLog || []).some((e) => e.disposition === "timed_out"),
+        { label: "timeout-log" },
+      );
+    }
+    await proxyB.close();
+    assert((await proxyB.exited) === 0, "proxy B exited cleanly on stdin end");
+    console.log(
+      `  ok: (iter3) approval TIMEOUT -> approval_pending_timeout + timed_out logged`,
+    );
+
+    // ---- toolCallLog[] recorded EVERY disposition (allow/deny/approved/rejected/timed_out)
+    const finalRun = await pollRun(
+      runId,
+      (r) => {
+        const d = new Set((r.toolCallLog || []).map((e) => e.disposition));
+        return ["allow", "deny", "approved", "rejected", "timed_out"].every(
+          (x) => d.has(x),
+        );
+      },
+      { label: "toolCallLog dispositions" },
+    );
+    const dispositions = new Set(
+      (finalRun.toolCallLog || []).map((e) => e.disposition),
+    );
+    for (const d of ["allow", "deny", "approved", "rejected", "timed_out"]) {
+      assert(
+        dispositions.has(d),
+        `run.toolCallLog recorded the '${d}' disposition`,
+      );
+    }
+    console.log(
+      `  ok: (iter3) run.toolCallLog recorded allow/deny/approved/rejected/timed_out (${finalRun.toolCallLog.length} entries)`,
+    );
+
+    // Tear down the borrow-run — it MUST reach a terminal state, else block (d)'s
+    // boot-rediscovery sees an active run against AGENT_MAX_CONCURRENT_RUNS=1 and
+    // run A trips 429 instead of 202 (killRun treats waiting-approval as active).
+    const del = await req("DELETE", `/api/agentic/runs/${enc(runId)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(del.status === 204, `iter3 delete borrow-run -> ${del.status}`);
+    await sleep(300);
+    const gone = await (
+      await req("GET", `/api/agentic/runs/${enc(runId)}`)
+    ).json();
+    assert(
+      gone.status === "cancelled",
+      `iter3 borrow-run cancelled (got ${gone.status})`,
+    );
+    const dsess = await req("DELETE", `/api/sessions/${enc(iter3Session)}`, {
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(
+      dsess.status === 204,
+      `iter3 delete target session -> ${dsess.status}`,
+    );
+    await sleep(400);
+    await stopServer("SIGTERM");
+    console.log(
+      `  ok: (iter3) borrow-run cancelled + target session removed (block-d rediscovery stays clean)`,
+    );
+  }
 
   // ---- (d) AGENT_MAX_CONCURRENT_RUNS exceeded -> 429 --------------------
   {

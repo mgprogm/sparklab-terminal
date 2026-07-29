@@ -1248,6 +1248,34 @@ export const AgenticAiSummarySchema = z.object({
 });
 export type AgenticAiSummary = z.infer<typeof AgenticAiSummarySchema>;
 
+/** A node's current/last MCP tool-call approval record (D5, iter3). PERSISTED
+ *  (unlike `logTail`) — it is the durable half of the per-run proxy's
+ *  approval-mediation ledger. */
+export const PendingToolCallSchema = z.object({
+  id: z.string(),
+  toolName: z.string(),
+  connectionId: z.string().nullable(),
+  argsPreview: z.string(),
+  status: z.enum(["pending", "approved", "rejected", "timed_out"]),
+  createdAt: z.number(),
+  decidedAt: z.number().nullable(),
+  reason: z.string().nullable(),
+});
+export type PendingToolCall = z.infer<typeof PendingToolCallSchema>;
+
+/** One entry in a run's bounded MCP tool-call audit log (D5, iter3). */
+export const ToolCallLogEntrySchema = z.object({
+  id: z.string(),
+  nodeId: z.string().nullable(),
+  toolName: z.string(),
+  connectionId: z.string().nullable(),
+  targetType: z.string().nullable(),
+  disposition: z.enum(["allow", "deny", "approved", "rejected", "timed_out"]),
+  argsPreview: z.string(),
+  at: z.number(),
+});
+export type ToolCallLogEntry = z.infer<typeof ToolCallLogEntrySchema>;
+
 /** One workflow step's durable execution record (D3 — the run's position). */
 export const NodeExecutionSchema = z.object({
   nodeId: z.string(),
@@ -1265,6 +1293,8 @@ export const NodeExecutionSchema = z.object({
   parentNodeId: z.string().nullable().optional(),
   startedAt: z.number().nullable().optional(),
   finishedAt: z.number().nullable().optional(),
+  /** The node's current/last MCP tool-call approval record, if any (D5, iter3). */
+  pendingToolCall: PendingToolCallSchema.nullable().optional(),
   /** Derived on GET (tailed step log); never persisted. */
   logTail: z.string().optional(),
 });
@@ -1290,6 +1320,8 @@ export const RunSchema = z.object({
   ]),
   /** The durable workflow ledger — this array IS the run's position (D3). */
   nodeExecutions: z.array(NodeExecutionSchema).default([]),
+  /** Bounded MCP tool-call audit log (D5, iter3) — oldest entries trimmed. */
+  toolCallLog: z.array(ToolCallLogEntrySchema).default([]),
   startedAt: z.number().nullable().default(null),
   finishedAt: z.number().nullable().default(null),
 });
@@ -1411,3 +1443,27 @@ export const UpdateAgenticAiStatusRequestSchema = z.object({
 export type UpdateAgenticAiStatusRequest = z.infer<
   typeof UpdateAgenticAiStatusRequestSchema
 >;
+
+/** Request body for POST .../nodes/:nodeId/pending-tool-call (proxy -> gateway,
+ *  D5 iter3). */
+export const PendingToolCallRequestSchema = z.object({
+  toolName: z.string().min(1).max(256),
+  connectionId: z.string().nullable().optional(),
+  argsPreview: z.string().max(1024).optional(),
+});
+export type PendingToolCallRequest = z.infer<
+  typeof PendingToolCallRequestSchema
+>;
+
+/** Request body for POST .../nodes/:nodeId/approve (human, D5 iter3 plan §3). */
+export const ApproveNodeRequestSchema = z.object({
+  pendingId: z.string().optional(),
+});
+export type ApproveNodeRequest = z.infer<typeof ApproveNodeRequestSchema>;
+
+/** Request body for POST .../nodes/:nodeId/reject (human, D5 iter3 plan §3). */
+export const RejectNodeRequestSchema = z.object({
+  pendingId: z.string().optional(),
+  reason: z.string().max(2048).optional(),
+});
+export type RejectNodeRequest = z.infer<typeof RejectNodeRequestSchema>;

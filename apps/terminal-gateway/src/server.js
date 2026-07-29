@@ -2230,6 +2230,13 @@ const AGENTIC_POLL_INTERVAL_MS =
   Number(process.env.AGENTIC_POLL_INTERVAL_MS) || 4000;
 const AGENT_OUTPUT_MAX_BYTES =
   Number(process.env.AGENT_OUTPUT_MAX_BYTES) || 128 * 1024;
+// Per-MCP-tool-call approval hold window (iter3, D5). Read here (not just by
+// the proxy) so sweepStalePendingApprovals uses the SAME cutoff the proxy's own
+// poll loop gives up at. Default 170000 — empirically confirmed safe up to
+// 170s for both claude -p and codex exec (see AGENTIC-AI-CREATOR-PLAN.md /
+// iter3 build spec §0 Finding B); do not raise past a tested boundary.
+const AGENT_MCP_APPROVAL_TIMEOUT_MS =
+  Number(process.env.AGENT_MCP_APPROVAL_TIMEOUT_MS) || 170_000;
 
 // ---- In-memory concurrency control (NOT run progress; see header) ----
 // advanceRun re-entrancy guard: a run advances one driver-invocation at a time.
@@ -2408,6 +2415,13 @@ async function spawnNode(run, cfg, nodeId) {
       promptText: composePromptText(run, cfg),
       scratchDir,
       server,
+      // iter3 (D5): frozen resolvedConfig.connections + this gateway's own
+      // bearer/base URL, so the claude-cli/local builder can wire the per-run
+      // MCP proxy in (codex-cli and remote targets never read these — see
+      // agent-runtime.js's own gating).
+      connections: cfg.connections,
+      gatewayApiToken: GATEWAY_API_TOKEN,
+      gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
     });
   } catch (e) {
     console.warn(`[agentic] buildInvocation failed (${nodeId}): ${e.message}`);
@@ -2450,12 +2464,15 @@ async function spawnNode(run, cfg, nodeId) {
   }
 }
 
-// Kill every RUNNING node's agrun- session and mark it skipped (fail-fast /
-// cancel path). Only ever kills agrun- names derived from the run.
+// Kill every RUNNING (or waiting-approval — iter3: a parked node's underlying
+// tmux job is still alive, blocked inside the CLI's MCP tool call, so a cancel
+// must kill it too or the job leaks) node's agrun- session and mark it
+// skipped (fail-fast / cancel path). Only ever kills agrun- names derived from
+// the run.
 async function killRunningJobs(run) {
   const server = runServer(run);
   for (const ne of run.nodeExecutions || []) {
-    if (ne.status !== "running") continue;
+    if (ne.status !== "running" && ne.status !== "waiting-approval") continue;
     if (server) await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
     agentic.recordNodeResult(run.id, ne.nodeId, {
       status: "skipped",
@@ -2561,6 +2578,28 @@ async function reapRunningNodes(run, cfg) {
     }
     await spawnNode(run, cfg, nodeId);
     changed = true;
+  }
+  return changed;
+}
+
+// Reducer-side guarantee behind hard-constraint #4 ("a pending approval must
+// always resolve"): resolve any node's pending MCP tool-call approval that has
+// sat past AGENT_MCP_APPROVAL_TIMEOUT_MS (+ a grace window) — even if the
+// proxy's own best-effort timeout POST never arrives (the proxy process died
+// mid-hold, or a gateway restart happened during the hold). Runs on every
+// advance/poll tick AND at boot rediscovery (both funnel through advanceRun),
+// so a parked node can never be stuck with no path forward. Returns true if
+// any node changed (so advanceRun's while-loop re-reads the ledger).
+function sweepStalePendingApprovals(run) {
+  let changed = false;
+  for (const ne of run.nodeExecutions || []) {
+    if (ne.status !== "waiting-approval") continue;
+    const ptc = ne.pendingToolCall;
+    if (!ptc || ptc.status !== "pending") continue;
+    if (Date.now() - ptc.createdAt > AGENT_MCP_APPROVAL_TIMEOUT_MS + 5000) {
+      agentic.resolvePendingToolCall(run.id, ne.nodeId, ptc.id, "timed_out");
+      changed = true;
+    }
   }
   return changed;
 }
@@ -2672,9 +2711,23 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
       `prompt exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
     );
 
+  // D9 freeze (iter3): connection targetTypes, frozen alongside the rest of
+  // resolvedConfig so a boot re-spawn or a later connection edit/delete can
+  // never change what an in-flight node's MCP proxy manifest was built from.
+  // Only targetType is needed here — the per-node manifest's toolPolicies come
+  // from each agent's OWN toolPolicies[] (already frozen verbatim in
+  // resolvedAgents above); this map exists so the manifest-builder can resolve
+  // a connectionId -> targetType without a live store lookup at spawn time.
+  const connections = {};
+  for (const connId of app.connectionIds || []) {
+    const c = agentic.getConnection(connId);
+    if (c) connections[connId] = { targetType: c.targetType };
+  }
+
   const resolvedConfig = {
     agents: resolvedAgents,
     workflow,
+    connections,
     // toolPolicies are DEFINED-but-UNUSED at runtime in iter2 (the per-run MCP
     // proxy is iter3); copied for provenance only.
     toolPolicies: {},
@@ -2716,7 +2769,11 @@ async function advanceRun(runId) {
     // always ok, so this never affects the local path.
     const first = agentic.getRun(runId);
     if (!first) return;
-    if (first.status === "running" || first.status === "queued") {
+    if (
+      first.status === "running" ||
+      first.status === "queued" ||
+      first.status === "waiting-approval"
+    ) {
       const srv = runServer(first);
       // Server removed from the registry mid-run: we cannot safely act (running
       // tmux commands "locally" for a remote run could mis-spawn). Leave the
@@ -2731,9 +2788,23 @@ async function advanceRun(runId) {
       changed = false;
       const run = agentic.getRun(runId);
       if (!run) break;
-      if (run.status !== "running" && run.status !== "queued") break;
+      if (
+        run.status !== "running" &&
+        run.status !== "queued" &&
+        run.status !== "waiting-approval"
+      )
+        break;
       const cfg = run.resolvedConfig || {};
       try {
+        // 0) sweep stale pending MCP tool-call approvals (iter3, hard-constraint
+        //    #4's actual guarantee — see sweepStalePendingApprovals' own
+        //    comment). Runs before reap so a just-timed-out node's tmux job
+        //    (now back to "running") gets reaped in the SAME tick if it also
+        //    happens to have already finished.
+        if (sweepStalePendingApprovals(run)) {
+          changed = true;
+          continue;
+        }
         // 1) reap running nodes (finished/died/timed-out/never-ran).
         if (await reapRunningNodes(run, cfg)) {
           changed = true;
@@ -2795,7 +2866,16 @@ async function waitForAdvanceIdle(runId, tries = 100) {
 async function killRun(runId) {
   const run = agentic.getRun(runId);
   if (!run) throw agenticErr("not_found", "run not found");
-  if (run.status !== "running" && run.status !== "queued") {
+  // "waiting-approval" (iter3) is an ACTIVE status too — a node parked on an
+  // MCP tool-call approval still has a live tmux job blocked inside the CLI,
+  // so it must go through the real cancel path below, not the idempotent
+  // already-terminal sweep (otherwise DELETE on a parked run would leave that
+  // job orphaned forever).
+  if (
+    run.status !== "running" &&
+    run.status !== "queued" &&
+    run.status !== "waiting-approval"
+  ) {
     await killAllRunSessions(run); // idempotent sweep; DO NOT touch status
     return agentic.getRun(runId);
   }
@@ -3065,8 +3145,163 @@ async function handleAgentic(req, res, url) {
       return true;
     }
 
-    // approve/reject/guidance (human-approval workflow nodes) are iteration 3 —
-    // deliberately left to fall through to the 404 below.
+    // ---- MCP tool-call approval mediation (iteration 3, D5) ----
+    // Called by the per-run MCP proxy (tools/agentic-proxy/server.mjs) as a
+    // bearer client, and by the human (FE) approve/reject actions over the
+    // cookie session. Both auth channels already flow through the SAME
+    // bearer-or-cookie gate as every other /api/agentic/* route, enforced
+    // upstream in handleApi/isArtifactBearerAuthorized — no new auth path here.
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/pending-tool-call — the proxy
+    // registers a NEW approval-tier tool call. Flips the node (and the run,
+    // unless already terminal) to "waiting-approval". 201 {pendingId}.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "pending-tool-call"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const result = agentic.recordPendingToolCall(seg[1], seg[3], {
+        toolName: r.body.toolName,
+        connectionId: r.body.connectionId,
+        argsPreview: r.body.argsPreview,
+      });
+      return sendJson(res, 201, result);
+    }
+
+    // GET /api/agentic/runs/:id/nodes/:nodeId/pending-tool-call/:pendingId —
+    // the proxy polls this for a decision (~1s interval, up to
+    // AGENT_MCP_APPROVAL_TIMEOUT_MS). 200 {status, reason?}; 404 if the id
+    // doesn't match the node's CURRENT pending record (superseded/never
+    // existed — the proxy treats a 404 the same as "not yet decided", per its
+    // own network-error tolerance).
+    if (
+      req.method === "GET" &&
+      seg.length === 6 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "pending-tool-call"
+    ) {
+      const found = agentic.getPendingToolCall(seg[1], seg[3], seg[5]);
+      if (!found)
+        return sendJson(res, 404, { error: "pending tool call not found" });
+      return sendJson(res, 200, found);
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/pending-tool-call/:pendingId
+    // {decision:"timed_out"} — the proxy's OWN best-effort timeout notice,
+    // sent (fire-and-forget, errors swallowed on ITS end) when its local
+    // AGENT_MCP_APPROVAL_TIMEOUT_MS hold elapses with no decision. This is a
+    // FASTER PATH only — the actual guarantee behind hard-constraint #4 ("a
+    // pending approval must always resolve") is sweepStalePendingApprovals in
+    // the advanceRun loop, which resolves the SAME pending record even if this
+    // notice never arrives (proxy crash, network partition). Idempotent via
+    // resolvePendingToolCall; always 204 (a store error here — e.g. the
+    // record was already resolved by the sweep first — must never surface as
+    // a failure to an already-timed-out, best-effort caller).
+    if (
+      req.method === "POST" &&
+      seg.length === 6 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "pending-tool-call"
+    ) {
+      const r = await readJsonObject(req);
+      if (r.ok && r.body.decision === "timed_out") {
+        try {
+          agentic.resolvePendingToolCall(
+            seg[1],
+            seg[3],
+            seg[5],
+            "timed_out",
+            null,
+          );
+        } catch (e) {
+          console.warn(`[agentic] proxy timeout notice failed: ${e.message}`);
+        }
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/tool-call-log — fire-and-forget
+    // audit-log append for allow/deny dispositions (the approval-tier
+    // approved/rejected/timed_out dispositions are appended internally by
+    // resolvePendingToolCall instead). A log-append failure must NEVER surface
+    // as a broken tool call to the CLI — the proxy does not even await this
+    // POST — so any store error is swallowed here too; always 204.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "tool-call-log"
+    ) {
+      const r = await readJsonObject(req);
+      if (r.ok) {
+        try {
+          agentic.appendToolCallLog(seg[1], {
+            nodeId: seg[3],
+            toolName: r.body.toolName,
+            connectionId: r.body.connectionId,
+            targetType: r.body.targetType,
+            disposition: r.body.disposition,
+            argsPreview: r.body.argsPreview,
+          });
+        } catch (e) {
+          console.warn(`[agentic] tool-call-log append failed: ${e.message}`);
+        }
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/approve {pendingId?} — human
+    // (FE) decision. Resolves the node's current pending call (or an explicit
+    // pendingId, defense-in-depth) as approved, kicks advanceRun in the
+    // background (the node's tmux job is already running — advanceRun's next
+    // tick just re-reads a ledger that's no longer parked), and returns the
+    // Run as it stands right now (200), matching plan §3's documented shape.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "approve"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      agentic.approveAction(seg[1], seg[3], { pendingId: r.body.pendingId });
+      void advanceRun(seg[1]);
+      return sendJson(res, 200, agentic.getRun(seg[1]));
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/reject {pendingId?, reason?} —
+    // human (FE) decision. Same shape as approve.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "reject"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      agentic.rejectAction(seg[1], seg[3], {
+        pendingId: r.body.pendingId,
+        reason: r.body.reason,
+      });
+      void advanceRun(seg[1]);
+      return sendJson(res, 200, agentic.getRun(seg[1]));
+    }
+
+    // "guidance" (interactive CLI mode / a dedicated human-approval NODE type)
+    // is iteration 4+ — deliberately left to fall through to the 404 below.
     return sendJson(res, 404, { error: "not found" });
   } catch (e) {
     if (e && e.code) {
