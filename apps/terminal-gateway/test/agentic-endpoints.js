@@ -2271,6 +2271,70 @@ async function main() {
         `  ok: (iter10) retry — LOAD-BEARING crash mid-retry, fresh gateway completes attempt 2 (no double-count)`,
       );
     }
+
+    // (5) LOAD-BEARING: crash in the RETRY attempt's spawn window must RECOVER,
+    // not fail. recordSpawned bumps spawnAttempts AND clears retryPending before
+    // tmux exists, so a crash there leaves {no session, no markers, retryPending
+    // absent, spawnAttempts=2, retryCount=1}. The crash-recovery cap must count
+    // ONLY crash respawns (spawnAttempts - retryCount), else it wrongly fails a
+    // node that still has retry budget and never ran that attempt. This exact
+    // window is sub-microsecond in vivo, so we drive a real run to a live node,
+    // SIGKILL, then reconstruct that persisted state on disk before reboot.
+    {
+      const appId = await mkRetryApp({ maxAttempts: 3, backoffMs: 0 });
+      const rres = await req("POST", `/api/agentic/apps/${enc(appId)}/run`, {
+        body: { sessionId: targetSessionId, objective: "hold alive SLEEP=300" },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(rres.status === 202, `retry(5): start -> ${rres.status}`);
+      const runId = (await rres.json()).id;
+      const sess = `agrun-${runId}-n0`;
+      assert(tmuxHasSession(sess), "retry(5): n0 live before crash");
+
+      await stopServer("SIGKILL");
+      // Reconstruct the post-crash-in-retry-spawn state: kill the session and
+      // wipe the scratch dir (no session, no markers), then rewrite the ledger
+      // to spawnAttempts=2 / retryCount=1 with retryPending cleared.
+      tmuxKill(sess);
+      fs.rmSync(path.join(runsDir, runId, "n0"), {
+        recursive: true,
+        force: true,
+      });
+      const store = JSON.parse(fs.readFileSync(agenticFile, "utf8"));
+      const ne = store.runs[runId].nodeExecutions.find(
+        (n) => n.nodeId === "n0",
+      );
+      ne.spawnAttempts = 2;
+      ne.retryCount = 1;
+      delete ne.retryPending;
+      ne.status = "running";
+      fs.writeFileSync(agenticFile, JSON.stringify(store, null, 2), "utf8");
+      assert(!tmuxHasSession(sess), "retry(5): no session in crafted state");
+
+      await startServer();
+      await login();
+      // The fresh gateway must RESPAWN (a new session reappears) rather than fail
+      // the run. With the pre-fix cap (spawnAttempts>=2) it would record failed.
+      const t0 = Date.now();
+      while (!tmuxHasSession(sess) && Date.now() - t0 < 20000) await sleep(150);
+      const after = await (
+        await req("GET", `/api/agentic/runs/${enc(runId)}`)
+      ).json();
+      assert(
+        tmuxHasSession(sess) &&
+          after.status !== "failed" &&
+          nodeOf(after, "n0").status !== "failed",
+        `retry(5): crash-in-retry-spawn RECOVERED (respawned), not failed (status ${after.status}/${nodeOf(after, "n0").status}, session ${tmuxHasSession(sess)})`,
+      );
+      // Clean up the 300s sleeper.
+      await req("DELETE", `/api/agentic/runs/${enc(runId)}`, {
+        origin: ALLOWED_ORIGIN,
+      });
+      tmuxKill(sess);
+      console.log(
+        `  ok: (iter10) retry — LOAD-BEARING crash in retry-spawn window recovers (crash cap excludes retry respawns)`,
+      );
+    }
   }
 
   // Server was restarted inside retry(4); the load-bearing test below assumes a
@@ -2838,6 +2902,81 @@ async function main() {
     console.log(
       `  ok: (e) per-step AGENT_RUN_TIMEOUT_MS -> step killed + reaped as failed`,
     );
+
+    // (iter10) TIMEOUT is a retryable failure (D-Retry-1). A retryPolicy node
+    // that keeps timing out must burn its attempts, so the run only fails after
+    // ~maxAttempts * timeout — NOT after the first timeout. Behavioral proof (no
+    // counter: the stub increments FAILFILE only after its sleep, which never
+    // completes here): time-to-fail must exceed a single timeout cycle.
+    {
+      const ta = (
+        await (
+          await req("POST", "/api/agentic/agents", {
+            body: {
+              name: `timeout-retry-agent-${Date.now()}`,
+              runtimeProvider: "codex-cli",
+              sandboxMode: "read-only",
+              systemPrompt: "",
+            },
+            origin: ALLOWED_ORIGIN,
+          })
+        ).json()
+      ).id;
+      const appRes = await req("POST", "/api/agentic/apps", {
+        body: {
+          name: `timeout-retry-app-${Date.now()}`,
+          orchestrationMode: "custom",
+          agentIds: [ta],
+          workflow: {
+            nodes: [
+              {
+                id: "n0",
+                type: "agent-task",
+                agentId: ta,
+                retryPolicy: { maxAttempts: 2, backoffMs: 0 },
+              },
+            ],
+            edges: [],
+            entryNodeId: "n0",
+          },
+        },
+        origin: ALLOWED_ORIGIN,
+      });
+      assert(appRes.status === 201, `timeout-retry: app -> ${appRes.status}`);
+      const rres = await req(
+        "POST",
+        `/api/agentic/apps/${enc((await appRes.json()).id)}/run`,
+        {
+          body: {
+            sessionId: targetSessionId,
+            objective: "hang again SLEEP=3600",
+          },
+          origin: ALLOWED_ORIGIN,
+        },
+      );
+      assert(rres.status === 202, `timeout-retry: start -> ${rres.status}`);
+      const t0 = Date.now();
+      const done = await pollRun(
+        (await rres.json()).id,
+        (r) => r.status === "failed" || r.status === "completed",
+        { deadlineMs: 20000, label: "timeout-retry" },
+      );
+      const elapsed = Date.now() - t0;
+      assert(
+        done.status === "failed" && nodeOf(done, "n0").status === "failed",
+        `timeout-retry: run failed after exhausting (got ${done.status})`,
+      );
+      // One timeout cycle is 1500ms; with maxAttempts=2 the run cannot fail
+      // before the SECOND cycle. 2600ms leaves generous slack over 1×1500 while
+      // staying well under 2×1500.
+      assert(
+        elapsed > 2600,
+        `timeout-retry: failed only after 2 timeout cycles, proving the first timeout RETRIED (elapsed ${elapsed}ms)`,
+      );
+      console.log(
+        `  ok: (iter10) retry — a per-step TIMEOUT is retried (run failed only after ~2 cycles, ${elapsed}ms)`,
+      );
+    }
 
     // Teardown the reusable target session via the (still-running) gateway, then
     // stop it — so the leak check below sees a truly clean tmux state.

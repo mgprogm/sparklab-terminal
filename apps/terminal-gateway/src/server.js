@@ -3036,14 +3036,21 @@ async function reapRunningNodes(run, cfg) {
     }
     // No session, no markers => the node NEVER actually ran (crash between
     // persist-running and spawn). Re-spawn idempotently, unless we've already
-    // tried twice (cap) -> fail.
+    // burned this CRASH-recovery budget (cap) -> fail.
     const retryState = agentic.getRetryState(run.id, nodeId);
     if (retryState.retryPending) {
       await retryOrFailNode(run, cfg, nodeId);
       changed = true;
       continue;
     }
-    if (agentic.getSpawnAttempts(run.id, nodeId) >= 2) {
+    // The cap bounds CRASH-in-spawn respawns only. spawnAttempts counts every
+    // recordSpawned — including failure-retry respawns (D-Retry-3) — so subtract
+    // retryCount to isolate the crash-recovery count; otherwise a node that
+    // crashed in the retry's spawn window (retryPending already cleared by
+    // recordSpawned, no markers yet) would be wrongly failed instead of
+    // recovered while retry budget remains. retryCount is 0 for non-retry nodes,
+    // so this is identical to the original `>= 2` there.
+    if (agentic.getSpawnAttempts(run.id, nodeId) - retryState.retryCount >= 2) {
       agentic.recordNodeResult(run.id, nodeId, {
         status: "failed",
         finishedAt: Date.now(),
