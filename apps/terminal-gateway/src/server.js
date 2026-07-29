@@ -2396,12 +2396,29 @@ async function readMarker(server, p) {
   }
 }
 
-// The frozen resolved config + workflow for a start. iter2 mode->workflow mapping
-// is the authority (no DAG editor ships in iter2, so a hand-authored workflow is
-// ignored). All nodes type:"agent-task". supervisor COLLAPSES to sequential in
-// iter2 (true delegation needs the deferred agent-to-agent protocol — FLAGGED).
+// The frozen resolved config + workflow for a start. Custom mode uses its stored
+// DAG; built-in modes derive one here. All nodes type:"agent-task". supervisor
+// COLLAPSES to sequential in iter2 (true delegation needs the deferred
+// agent-to-agent protocol — FLAGGED).
 function buildResolvedWorkflow(app) {
   const agentIds = (app.agentIds || []).filter(Boolean);
+  if (
+    app.orchestrationMode === "custom" &&
+    Array.isArray(app.workflow?.nodes) &&
+    app.workflow.nodes.length > 0
+  ) {
+    const workflow = {
+      nodes: app.workflow.nodes,
+      edges: app.workflow.edges,
+      entryNodeId: app.workflow.entryNodeId,
+    };
+    const resolvedAgents = {};
+    for (const id of new Set(workflow.nodes.map((node) => node.agentId))) {
+      const agent = agentic.getAgent(id);
+      if (agent) resolvedAgents[id] = agent;
+    }
+    return { workflow, resolvedAgents };
+  }
   const resolvedAgents = {};
   for (const id of agentIds) {
     const a = agentic.getAgent(id);
@@ -3100,6 +3117,29 @@ async function startRun({ agenticAiId, sessionId, objective } = {}) {
           "parallel mode forbids workspace-write agents",
           { node: n.id },
         );
+    }
+  }
+  if (app.orchestrationMode === "custom") {
+    const inDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+    const outDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+    for (const edge of workflow.edges) {
+      outDegree.set(edge.from, (outDegree.get(edge.from) || 0) + 1);
+      inDegree.set(edge.to, (inDegree.get(edge.to) || 0) + 1);
+    }
+    const isBranching =
+      [...outDegree.values()].some((degree) => degree > 1) ||
+      [...inDegree.values()].some((degree) => degree > 1) ||
+      [...inDegree.values()].filter((degree) => degree === 0).length > 1;
+    if (isBranching) {
+      for (const n of workflow.nodes) {
+        const ag = resolvedAgents[n.agentId];
+        if (ag && ag.sandboxMode === "workspace-write")
+          throw agenticErr(
+            "parallel_write_forbidden",
+            "a branching custom workflow forbids workspace-write agents (they could run concurrently on the same cwd) — make the graph a linear chain or use read-only agents",
+            { node: n.id },
+          );
+      }
     }
   }
 

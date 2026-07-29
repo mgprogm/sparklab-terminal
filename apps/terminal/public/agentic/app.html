@@ -13,7 +13,7 @@
       (POST /api/agentic/apps), a publish/unpublish toggle
       (PATCH /api/agentic/apps/:id/status), and a per-app TEAM editor (a modal
       that GETs /api/agentic/apps/:id and PATCHes {agentIds, connectionIds,
-      orchestrationMode}). The team editor is what lets an app actually run —
+      orchestrationMode, workflow}). The team editor is what lets an app actually run —
       without ≥1 agent, POST /apps/:id/run rejects with "agentic AI has no
       agents".
     · Agents — the reusable agent library. Lists GET /api/agentic/agents,
@@ -26,9 +26,10 @@
   polls GET /runs/:id to render per-node status + tailed logs + tool-call
   approvals, and can Kill (DELETE /runs/:id).
 
-  The workflow/DAG is AUTO-DERIVED by the backend from agentIds + orchestrationMode
-  (D9) — this artifact never sends a `workflow` object and builds no DAG editor.
-  Team order matters (supervisor/pipeline order), so agentIds preserve list order.
+  Built-in workflow/DAG modes are derived by the backend from agentIds +
+  orchestrationMode. Custom mode uses the Team editor's form-based DAG builder.
+  Team order matters for built-in supervisor/pipeline modes, so agentIds preserve
+  list order.
 
   A SINGLE self-contained document — inline <style> + inline <script>, ZERO
   external requests (no CDN, no fetched web fonts, no imports). Loaded into a
@@ -420,6 +421,29 @@
 
   .picker-row .field {
     flex: 1 1 auto;
+  }
+
+  .workflow-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .workflow-row select.field {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+  }
+
+  .workflow-node-id {
+    min-width: 28px;
+    color: var(--body);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+
+  .workflow-arrow {
+    color: var(--mute);
   }
 
   .check-row {
@@ -1155,6 +1179,7 @@
           <option value="supervisor">supervisor</option>
           <option value="sequential">sequential</option>
           <option value="parallel">parallel</option>
+          <option value="custom">custom</option>
         </select>
         <div id="team-mode-hint" class="hint">
           How the team coordinates. Order below is the supervisor / pipeline order.
@@ -1166,6 +1191,31 @@
         <div class="picker-row" style="margin-top: 8px">
           <select id="team-add-select" class="field"></select>
           <button id="team-add-btn" class="btn" type="button">Add</button>
+        </div>
+      </div>
+      <div id="team-workflow" style="display: none">
+        <div class="section-label">Workflow</div>
+        <div class="hint" style="margin-bottom: 8px">
+          A dependency from one node to another makes the second wait for the first.
+        </div>
+        <div class="section-label">Nodes</div>
+        <div id="workflow-nodes" class="workflow-list"></div>
+        <button id="workflow-add-node" class="btn" type="button" style="margin-top: 8px">
+          Add node
+        </button>
+        <div class="section-label" style="margin-top: 14px">Edges</div>
+        <div id="workflow-edges" class="workflow-list"></div>
+        <button id="workflow-add-edge" class="btn" type="button" style="margin-top: 8px">
+          Add edge
+        </button>
+        <div style="margin-top: 14px">
+          <label for="workflow-entry">Entry node <span style="opacity: 0.6">(optional)</span></label>
+          <select id="workflow-entry" class="field"></select>
+        </div>
+        <div class="row-end" style="margin-top: 14px">
+          <button id="workflow-save" class="btn btn-primary" type="button">
+            Save workflow
+          </button>
         </div>
       </div>
       <div>
@@ -1315,6 +1365,8 @@
     pollToken: 0, // bumped to invalidate in-flight poll ticks
     pollTimer: null, // the setTimeout handle for the poll loop
     cwdToken: 0, // bumped to invalidate stale session-cwd fetches (Run view)
+    teamWorkflowDraft: null, // local custom-DAG form state; saved explicitly
+    nextWorkflowNodeNumber: 0,
   };
 
   var el = {
@@ -1348,6 +1400,13 @@
     teamAgents: document.getElementById("team-agents"),
     teamAddSelect: document.getElementById("team-add-select"),
     teamAddBtn: document.getElementById("team-add-btn"),
+    teamWorkflow: document.getElementById("team-workflow"),
+    workflowNodes: document.getElementById("workflow-nodes"),
+    workflowAddNode: document.getElementById("workflow-add-node"),
+    workflowEdges: document.getElementById("workflow-edges"),
+    workflowAddEdge: document.getElementById("workflow-add-edge"),
+    workflowEntry: document.getElementById("workflow-entry"),
+    workflowSave: document.getElementById("workflow-save"),
     teamConnections: document.getElementById("team-connections"),
     // Agent modal
     agentOverlay: document.getElementById("agent-overlay"),
@@ -2030,6 +2089,185 @@
     );
   }
 
+  function seedTeamWorkflow(app) {
+    var workflow =
+      app && app.orchestrationMode === "custom" && app.workflow
+        ? app.workflow
+        : null;
+    var sourceNodes = workflow && Array.isArray(workflow.nodes) ? workflow.nodes : [];
+    var sourceEdges = workflow && Array.isArray(workflow.edges) ? workflow.edges : [];
+    state.teamWorkflowDraft = {
+      nodes: sourceNodes.map(function (node) {
+        return {
+          id: String(node.id || ""),
+          type: "agent-task",
+          agentId: String(node.agentId || ""),
+        };
+      }),
+      edges: sourceEdges.map(function (edge) {
+        return { from: String(edge.from || ""), to: String(edge.to || "") };
+      }),
+      entryNodeId:
+        workflow && workflow.entryNodeId != null
+          ? String(workflow.entryNodeId)
+          : null,
+    };
+    var maxNodeNumber = -1;
+    state.teamWorkflowDraft.nodes.forEach(function (node) {
+      var match = /^n(\d+)$/.exec(node.id);
+      if (match) maxNodeNumber = Math.max(maxNodeNumber, Number(match[1]));
+    });
+    state.nextWorkflowNodeNumber = maxNodeNumber + 1;
+  }
+
+  function workflowNodeOption(select, nodeId) {
+    var option = elem("option", null, nodeId);
+    option.value = nodeId;
+    select.appendChild(option);
+  }
+
+  function renderWorkflowBuilder() {
+    var isCustom = el.teamMode.value === "custom";
+    el.teamWorkflow.style.display = isCustom ? "" : "none";
+    if (!isCustom) return;
+    if (!state.teamWorkflowDraft) seedTeamWorkflow(null);
+
+    var draft = state.teamWorkflowDraft;
+    var teamAgentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(Boolean);
+    var nodeIds = draft.nodes.map(function (node) {
+      return node.id;
+    });
+
+    el.workflowNodes.textContent = "";
+    if (draft.nodes.length === 0) {
+      el.workflowNodes.appendChild(
+        elem("div", "lib-sub", "No workflow nodes yet."),
+      );
+    }
+    draft.nodes.forEach(function (node, index) {
+      var row = elem("div", "team-item workflow-row");
+      row.appendChild(elem("span", "workflow-node-id", node.id));
+
+      var agentSelect = elem("select", "field");
+      agentSelect.setAttribute("aria-label", "Agent for " + node.id);
+      if (teamAgentIds.length === 0) {
+        var noAgent = elem("option", null, "No team agents available");
+        noAgent.value = "";
+        agentSelect.appendChild(noAgent);
+        node.agentId = "";
+        agentSelect.disabled = true;
+      } else {
+        teamAgentIds.forEach(function (agentId) {
+          var agent = agentById(agentId);
+          var option = elem("option", null, agent ? agent.name : agentId + " (missing)");
+          option.value = agentId;
+          agentSelect.appendChild(option);
+        });
+        if (teamAgentIds.indexOf(node.agentId) === -1) {
+          node.agentId = teamAgentIds[0];
+        }
+        agentSelect.value = node.agentId;
+      }
+      agentSelect.addEventListener("change", function () {
+        node.agentId = agentSelect.value;
+      });
+      row.appendChild(agentSelect);
+
+      var remove = elem("button", "icon-btn", "Remove");
+      remove.type = "button";
+      remove.addEventListener("click", function () {
+        draft.nodes.splice(index, 1);
+        draft.edges = draft.edges.filter(function (edge) {
+          return edge.from !== node.id && edge.to !== node.id;
+        });
+        if (draft.entryNodeId === node.id) draft.entryNodeId = null;
+        renderWorkflowBuilder();
+      });
+      row.appendChild(remove);
+      el.workflowNodes.appendChild(row);
+    });
+    el.workflowAddNode.disabled = teamAgentIds.length === 0;
+
+    el.workflowEdges.textContent = "";
+    if (draft.edges.length === 0) {
+      el.workflowEdges.appendChild(
+        elem("div", "lib-sub", "No dependencies yet."),
+      );
+    }
+    draft.edges.forEach(function (edge, index) {
+      var row = elem("div", "team-item workflow-row");
+      var fromSelect = elem("select", "field");
+      fromSelect.setAttribute("aria-label", "Dependency from node");
+      var toSelect = elem("select", "field");
+      toSelect.setAttribute("aria-label", "Dependency to node");
+      nodeIds.forEach(function (nodeId) {
+        workflowNodeOption(fromSelect, nodeId);
+        workflowNodeOption(toSelect, nodeId);
+      });
+      fromSelect.value = edge.from;
+      toSelect.value = edge.to;
+      fromSelect.addEventListener("change", function () {
+        edge.from = fromSelect.value;
+      });
+      toSelect.addEventListener("change", function () {
+        edge.to = toSelect.value;
+      });
+      row.appendChild(fromSelect);
+      row.appendChild(elem("span", "workflow-arrow", "→"));
+      row.appendChild(toSelect);
+
+      var remove = elem("button", "icon-btn", "Remove");
+      remove.type = "button";
+      remove.addEventListener("click", function () {
+        draft.edges.splice(index, 1);
+        renderWorkflowBuilder();
+      });
+      row.appendChild(remove);
+      el.workflowEdges.appendChild(row);
+    });
+    el.workflowAddEdge.disabled = nodeIds.length < 2;
+
+    el.workflowEntry.textContent = "";
+    var noEntry = elem("option", null, "No entry node");
+    noEntry.value = "";
+    el.workflowEntry.appendChild(noEntry);
+    nodeIds.forEach(function (nodeId) {
+      workflowNodeOption(el.workflowEntry, nodeId);
+    });
+    el.workflowEntry.value = draft.entryNodeId || "";
+  }
+
+  function saveTeamWorkflow() {
+    var draft = state.teamWorkflowDraft;
+    if (!draft) return;
+    var nodes = draft.nodes.map(function (node) {
+      return { id: node.id, type: "agent-task", agentId: node.agentId };
+    });
+    if (
+      nodes.some(function (node) {
+        return !node.agentId;
+      })
+    ) {
+      showBanner("Every workflow node needs a team agent.");
+      return;
+    }
+    var agentIds = [];
+    nodes.forEach(function (node) {
+      if (agentIds.indexOf(node.agentId) === -1) agentIds.push(node.agentId);
+    });
+    patchTeam({
+      orchestrationMode: "custom",
+      workflow: {
+        nodes: nodes,
+        edges: draft.edges.map(function (edge) {
+          return { from: edge.from, to: edge.to };
+        }),
+        entryNodeId: draft.entryNodeId || null,
+      },
+      agentIds: agentIds,
+    });
+  }
+
   // Open the team modal for a catalog summary. Loads the FULL app (agentIds +
   // connectionIds live only on the full record) and the agent/connection libraries
   // so the pickers are populated, then renders.
@@ -2042,6 +2280,7 @@
         "/apps/" + encodeURIComponent(appSummary.id),
       );
       state.teamApp = app;
+      seedTeamWorkflow(app);
     } catch (e) {
       handleError(e);
       return;
@@ -2068,7 +2307,9 @@
       });
     el.teamModeHint.textContent = parallelWarn
       ? "parallel mode forbids workspace-write agents — a run will be rejected."
-      : "How the team coordinates. Order below is the supervisor / pipeline order.";
+      : el.teamMode.value === "custom"
+        ? "Build a dependency graph over the team's agents, then save it below."
+        : "How the team coordinates. Order below is the supervisor / pipeline order.";
     el.teamModeHint.style.color = parallelWarn ? "var(--danger)" : "";
 
     // Ordered team list, with up/down reorder + remove.
@@ -2143,6 +2384,8 @@
       });
     }
 
+    renderWorkflowBuilder();
+
     // Connections: a checkbox per connection, checked = attached to this app.
     var connIds = (app.connectionIds || []).filter(Boolean);
     el.teamConnections.textContent = "";
@@ -2190,8 +2433,8 @@
 
   // PATCH the app definition (last-writer-wins, no expectedRev — mirrors
   // togglePublish). The response is the fresh full app; we adopt it, re-render the
-  // modal, and refresh the catalog so its counts/hint stay in sync. `workflow` is
-  // NEVER sent — the backend derives it from agentIds + orchestrationMode (D9).
+  // modal, and refresh the catalog so its counts/hint stay in sync. Built-in modes
+  // remain backend-derived; custom mode includes its explicitly saved workflow.
   async function patchTeam(patch) {
     var app = state.teamApp;
     if (!app) return;
@@ -2204,7 +2447,12 @@
       return;
     }
     if (updated && updated.id) state.teamApp = updated;
-    else if (patch.agentIds || patch.connectionIds || patch.orchestrationMode) {
+    else if (
+      patch.agentIds ||
+      patch.connectionIds ||
+      patch.orchestrationMode ||
+      patch.workflow
+    ) {
       // Fallback: adopt the patch locally if the response was unexpected.
       Object.keys(patch).forEach(function (k) {
         state.teamApp[k] = patch[k];
@@ -2945,6 +3193,13 @@
 
   // ---- Team editor wiring ----
   el.teamMode.addEventListener("change", function () {
+    if (el.teamMode.value === "custom") {
+      if (!state.teamApp || state.teamApp.orchestrationMode !== "custom") {
+        seedTeamWorkflow(null);
+      }
+      renderTeamModal();
+      return;
+    }
     patchTeam({ orchestrationMode: el.teamMode.value });
   });
   el.teamAddBtn.addEventListener("click", function () {
@@ -2956,6 +3211,26 @@
     if (ids.indexOf(id) === -1) ids.push(id);
     patchTeam({ agentIds: ids });
   });
+  el.workflowAddNode.addEventListener("click", function () {
+    var draft = state.teamWorkflowDraft;
+    var agentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(Boolean);
+    if (!draft || agentIds.length === 0) return;
+    var id = "n" + state.nextWorkflowNodeNumber++;
+    draft.nodes.push({ id: id, type: "agent-task", agentId: agentIds[0] });
+    renderWorkflowBuilder();
+  });
+  el.workflowAddEdge.addEventListener("click", function () {
+    var draft = state.teamWorkflowDraft;
+    if (!draft || draft.nodes.length < 2) return;
+    draft.edges.push({ from: draft.nodes[0].id, to: draft.nodes[1].id });
+    renderWorkflowBuilder();
+  });
+  el.workflowEntry.addEventListener("change", function () {
+    if (state.teamWorkflowDraft) {
+      state.teamWorkflowDraft.entryNodeId = el.workflowEntry.value || null;
+    }
+  });
+  el.workflowSave.addEventListener("click", saveTeamWorkflow);
 
   // ---- Run view wiring ----
   el.runBack.addEventListener("click", leaveRunView);

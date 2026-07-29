@@ -1781,6 +1781,150 @@ async function main() {
     }
   }
 
+  // ---- (iter8) custom DAG: diamond executes in dependency order ---------
+  {
+    // One read-only agent reused by all four nodes (branching -> must be read-only).
+    const ag = (
+      await (
+        await req("POST", "/api/agentic/agents", {
+          body: {
+            name: `dag-agent-${Date.now()}`,
+            runtimeProvider: "codex-cli",
+            sandboxMode: "read-only",
+            systemPrompt: "",
+          },
+          origin: ALLOWED_ORIGIN,
+        })
+      ).json()
+    ).id;
+    const mkNode = (id) => ({ id, type: "agent-task", agentId: ag });
+    // Diamond: n0 -> n1, n0 -> n2, n1 -> n3, n2 -> n3.
+    const diamond = {
+      nodes: [mkNode("n0"), mkNode("n1"), mkNode("n2"), mkNode("n3")],
+      edges: [
+        { from: "n0", to: "n1" },
+        { from: "n0", to: "n2" },
+        { from: "n1", to: "n3" },
+        { from: "n2", to: "n3" },
+      ],
+      entryNodeId: "n0",
+    };
+    const appRes = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: `dag-app-${Date.now()}`,
+        orchestrationMode: "custom",
+        agentIds: [ag],
+        workflow: diamond,
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(appRes.status === 201, `dag: create custom app -> ${appRes.status}`);
+    const dagApp = await appRes.json();
+    const runRes = await req(
+      "POST",
+      `/api/agentic/apps/${enc(dagApp.id)}/run`,
+      {
+        body: { sessionId: targetSessionId, objective: "diamond SLEEP=1" },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(runRes.status === 202, `dag: start -> ${runRes.status}`);
+    const dagRun = await runRes.json();
+    const done = await pollRun(dagRun.id, (r) => r.status === "completed", {
+      deadlineMs: 30000,
+      label: "dag-diamond",
+    });
+    const at = (id) => nodeOf(done, id);
+    assert(
+      ["n0", "n1", "n2", "n3"].every((id) => at(id).status === "done"),
+      "dag: all four nodes done",
+    );
+    // Dependency order via timestamps: n1/n2 start after n0 finishes; n3 after both.
+    assert(
+      at("n1").startedAt >= at("n0").finishedAt &&
+        at("n2").startedAt >= at("n0").finishedAt,
+      "dag: n1 & n2 start only after n0 completes (fan-out)",
+    );
+    assert(
+      at("n3").startedAt >= at("n1").finishedAt &&
+        at("n3").startedAt >= at("n2").finishedAt,
+      "dag: n3 starts only after BOTH n1 and n2 complete (join)",
+    );
+    console.log(
+      `  ok: (iter8) custom DAG diamond — fan-out after n0, join at n3, dependency order enforced`,
+    );
+
+    // A cycle is rejected at create (422).
+    const cyc = await req("POST", "/api/agentic/apps", {
+      body: {
+        name: `dag-cycle-${Date.now()}`,
+        orchestrationMode: "custom",
+        agentIds: [ag],
+        workflow: {
+          nodes: [mkNode("n0"), mkNode("n1")],
+          edges: [
+            { from: "n0", to: "n1" },
+            { from: "n1", to: "n0" },
+          ],
+          entryNodeId: "n0",
+        },
+      },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(
+      cyc.status === 422 || cyc.status === 400,
+      `dag: cycle rejected (got ${cyc.status})`,
+    );
+
+    // A branching custom graph with a workspace-write agent -> 422 at run start.
+    const wwAg = (
+      await (
+        await req("POST", "/api/agentic/agents", {
+          body: {
+            name: `dag-ww-${Date.now()}`,
+            runtimeProvider: "codex-cli",
+            sandboxMode: "workspace-write",
+            systemPrompt: "",
+          },
+          origin: ALLOWED_ORIGIN,
+        })
+      ).json()
+    ).id;
+    const wwApp = await (
+      await req("POST", "/api/agentic/apps", {
+        body: {
+          name: `dag-ww-app-${Date.now()}`,
+          orchestrationMode: "custom",
+          agentIds: [wwAg],
+          workflow: {
+            nodes: [
+              { id: "n0", type: "agent-task", agentId: wwAg },
+              { id: "n1", type: "agent-task", agentId: wwAg },
+              { id: "n2", type: "agent-task", agentId: wwAg },
+            ],
+            edges: [
+              { from: "n0", to: "n1" },
+              { from: "n0", to: "n2" },
+            ],
+            entryNodeId: "n0",
+          },
+        },
+        origin: ALLOWED_ORIGIN,
+      })
+    ).json();
+    const wwRun = await req("POST", `/api/agentic/apps/${enc(wwApp.id)}/run`, {
+      body: { sessionId: targetSessionId, objective: "x" },
+      origin: ALLOWED_ORIGIN,
+    });
+    assert(
+      wwRun.status === 422 || wwRun.status === 400,
+      `dag: branching + workspace-write rejected at run start (got ${wwRun.status})`,
+    );
+    console.log(
+      `  ok: (iter8) custom DAG guards — cycle rejected at save; branching + workspace-write rejected at run start`,
+    );
+  }
+
   // ---- (a) THE LOAD-BEARING TEST: crash mid-run, boot rediscovery -------
   {
     const { appId } = await createRunnerApp({

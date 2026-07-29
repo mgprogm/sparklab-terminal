@@ -50,7 +50,13 @@ const POLICY_DISPOSITIONS = new Set(["allow", "deny", "approval"]);
 const CONNECTION_TARGETS = new Set(["pm", "kanban"]);
 const CONNECTION_SCOPES = new Set(["fixed", "runtime-selection"]);
 const APP_STATUSES = new Set(["draft", "published", "paused", "archived"]);
-const ORCH_MODES = new Set(["single", "supervisor", "sequential", "parallel"]);
+const ORCH_MODES = new Set([
+  "single",
+  "supervisor",
+  "sequential",
+  "parallel",
+  "custom",
+]);
 
 // Terminal statuses (used by the run-engine primitives below).
 const NODE_TERMINAL = new Set(["done", "failed", "skipped"]);
