@@ -6,11 +6,15 @@
 > `retryCount` distinct from `spawnAttempts`, both caps env-clamped
 > (`AGENT_RETRY_MAX_ATTEMPTS`=5 / `AGENT_RETRY_BACKOFF_MAX_MS`=60000), FE retry
 > sub-form in the custom-DAG builder, and 4 tests incl. the load-bearing
-> crash-mid-retry (`test:agentic` now 288 checks). One fix beyond the plan:
-> `shapeWorkflow` was dropping `retryPolicy` on every read (the run reads the
-> shaped app), so the policy never reached the engine — now carried through
-> (wire-shape pinned by a regression assertion). §2 Condition/Router remains
-> **proposed — checkpoint with the user before build**.
+> crash-mid-retry (`test:agentic` now **298** checks incl. two load-bearing
+> survivability tests). Two fixes beyond the plan: (a) `shapeWorkflow` was
+> dropping `retryPolicy` on every read (the run reads the shaped app), so the
+> policy never reached the engine — now carried through (wire-shape pinned by a
+> regression assertion); (b) commit `06aafff` — the reap "never-ran" crash-cap
+> counted retry respawns too (D-Retry-3's warning), wrongly failing a node that
+> crashed in a retry's spawn window with budget left; now caps on
+> `spawnAttempts - retryCount` (test verified to fail pre-fix). §2
+> Condition/Router remains **proposed — checkpoint with the user before build**.
 > **Extends** `docs/AGENTIC-AI-CREATOR-PLAN.md` §8 ("Visual DAG builder /
 > condition-router / retry / evaluation node types") and continues the
 > **"richer workflows"** arc opened by iter8 (`315a343`, "custom agent-task
