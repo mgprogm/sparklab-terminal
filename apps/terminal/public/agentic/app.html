@@ -775,6 +775,41 @@
     gap: 10px;
   }
 
+  .run-history {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .run-hist-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    background: var(--canvas-soft);
+  }
+  .run-hist-row .run-hist-mid {
+    flex: 1;
+    min-width: 0;
+  }
+  .run-hist-row .run-hist-obj {
+    color: var(--ink);
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .run-hist-row .run-hist-time {
+    color: var(--mute);
+    font-size: 11.5px;
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .run-hist-row .badge {
+    flex: 0 0 auto;
+  }
+
   .node-card {
     background: var(--canvas-soft);
     border: 1px solid var(--hairline);
@@ -1139,6 +1174,15 @@
         </button>
       </div>
     </form>
+
+    <div id="run-history-wrap" style="display: none">
+      <div class="section-label" style="margin-top: 22px">Recent runs</div>
+      <div class="hint" style="margin-bottom: 10px">
+        Runs survive refresh and gateway restarts. Reopen a finished run, or
+        continue watching one that is still running.
+      </div>
+      <div id="run-history" class="run-history"></div>
+    </div>
 
     <div id="run-active" style="display: none">
       <div class="run-status-bar">
@@ -1665,6 +1709,8 @@
     runCwd: document.getElementById("run-cwd"),
     runObjective: document.getElementById("run-objective"),
     runStartBtn: document.getElementById("run-start-btn"),
+    runHistoryWrap: document.getElementById("run-history-wrap"),
+    runHistory: document.getElementById("run-history"),
     runActive: document.getElementById("run-active"),
     runStatusBadge: document.getElementById("run-status-badge"),
     runStatusMeta: document.getElementById("run-status-meta"),
@@ -3413,16 +3459,124 @@
     el.runTitle.textContent = "Run · " + app.name;
     el.runObjective.value = "";
     el.runForm.style.display = "";
+    el.runHistoryWrap.style.display = "";
     el.runActive.style.display = "none";
     el.nodeList.textContent = "";
     el.runCwd.style.display = "none";
     el.runCwd.textContent = "";
     setView("run");
+    loadRunHistory(app.id);
     populateSessionPicker()
       .then(function () {
         renderRunCwd(); // a session may be preselected on open
       })
       .catch(handleError);
+  }
+
+  // Re-derive relative-ish wall time for a run's start (durable across refresh).
+  function fmtWhen(ms) {
+    if (!ms) return "";
+    var diff = Date.now() - ms;
+    if (diff >= 0 && diff < 60000) return "just now";
+    if (diff >= 0 && diff < 3600000) return Math.floor(diff / 60000) + "m ago";
+    if (diff >= 0 && diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
+    try {
+      return new Date(ms).toLocaleString();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Run history for this Agentic AI — runs survive refresh + gateway restarts,
+  // so this list is how you get back to a run after reloading the page.
+  async function loadRunHistory(appId) {
+    el.runHistory.textContent = "";
+    el.runHistory.appendChild(elem("div", "run-meta", "Loading…"));
+    var runs;
+    try {
+      runs = (await api("GET", "/runs")).runs || [];
+    } catch (e) {
+      el.runHistory.textContent = "";
+      el.runHistory.appendChild(
+        elem("div", "run-meta", "Could not load run history."),
+      );
+      return;
+    }
+    // Ignore a stale response if the user navigated away / opened a run.
+    if (!state.runApp || state.runApp.id !== appId) return;
+    var mine = runs
+      .filter(function (r) {
+        return r.agenticAiId === appId;
+      })
+      .sort(function (a, b) {
+        return (b.startedAt || 0) - (a.startedAt || 0);
+      })
+      .slice(0, 15);
+    renderRunHistory(mine);
+  }
+
+  function renderRunHistory(runs) {
+    el.runHistory.textContent = "";
+    if (!runs.length) {
+      el.runHistory.appendChild(
+        elem("div", "run-meta", "No runs yet — start one above."),
+      );
+      return;
+    }
+    runs.forEach(function (r) {
+      var live = !RUN_TERMINAL[r.status];
+      var row = elem("div", "run-hist-row");
+      row.appendChild(
+        elem(
+          "span",
+          "badge badge-" + r.status,
+          r.status === "budget_exhausted" ? "budget exhausted" : r.status,
+        ),
+      );
+      var mid = elem("div", "run-hist-mid");
+      mid.appendChild(
+        elem("div", "run-hist-obj", r.objective || "(no objective)"),
+      );
+      mid.appendChild(
+        elem(
+          "div",
+          "run-hist-time",
+          "v" + (r.agenticAiVersion || 1) + " · " + fmtWhen(r.startedAt),
+        ),
+      );
+      row.appendChild(mid);
+      var btn = elem(
+        "button",
+        "btn" + (live ? " btn-primary" : ""),
+        live ? "Continue" : "Open",
+      );
+      btn.type = "button";
+      btn.addEventListener("click", function () {
+        openRun(r.id);
+      });
+      row.appendChild(btn);
+      el.runHistory.appendChild(row);
+    });
+  }
+
+  // Re-attach to an existing run (finished → view; still running → "continue"
+  // watching it live). This is what makes a run reachable after a page refresh.
+  async function openRun(runId) {
+    clearBanner();
+    stopPolling();
+    var run;
+    try {
+      run = await api("GET", "/runs/" + encodeURIComponent(runId));
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    state.activeRunId = run.id;
+    el.runForm.style.display = "none";
+    el.runHistoryWrap.style.display = "none";
+    el.runActive.style.display = "";
+    renderRun(run);
+    if (!RUN_TERMINAL[run.status]) startPolling();
   }
 
   function leaveRunView() {
@@ -3461,6 +3615,7 @@
     }
     state.activeRunId = run.id;
     el.runForm.style.display = "none";
+    el.runHistoryWrap.style.display = "none";
     el.runActive.style.display = "";
     renderRun(run);
     // A run may already be terminal (a fast/empty job): only poll if not.
