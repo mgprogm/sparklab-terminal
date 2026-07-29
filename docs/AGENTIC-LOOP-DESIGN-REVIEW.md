@@ -252,3 +252,81 @@ mirror the retry caps).
 
 Answer these (or amend) and I'll turn this into an implementation spec + build it with
 the same Codex-writes / Opus-controls loop.
+
+---
+
+## 7. Codex review — findings & resulting amendments (2026-07-29)
+
+Codex reviewed this doc against the real code and returned **"not ready as an
+implementation spec as-is."** It kept D-Loop-1 and D-Loop-2, but found real gaps.
+Opus concurs with all of the below; they become build preconditions.
+
+**Verdicts:** D-Loop-1 AGREE-w/-amendment · D-Loop-2 AGREE · **D-Loop-3 DISAGREE** ·
+D-Loop-4 AGREE-w/-amendment · D-Loop-5 AGREE-w/-amendment · D-Loop-6 AGREE-w/-amendment.
+
+### Amendments that change the design
+
+- **A durable `loopPending` transition is required (D-Loop-1).** Retry is restart-safe
+  because `recordRetryAttempt` persists `retryPending` BEFORE marker cleanup + respawn.
+  The loop needs the same: persist `loopPending` (and the counted verdict) before
+  clearing `exit.marker`, else a crash after counting a verdict but before clearing its
+  marker can process that verdict twice / skip an iteration. **Add `loopPending`.**
+- **A loop node is an `agent-task`, but `recordTerminalDone` parses `branch`/`score`
+  ONLY for `type==="router"` (server.js).** So a loop node would discard its own
+  verdict. **Fix: `recordTerminalDone` must parse for a loop node (agent-task with
+  `loopPolicy`) too**, not just routers.
+- **D-Loop-3 routing does NOT exist — DISAGREE.** `decide()` routes agent-tasks only by
+  `done`/`failed`; `chosenEdges` is consulted only for routers; `resolveWorkflow`
+  forbids `when` edges on agent-tasks; there is no inter-node data threading. So a
+  downstream router **cannot** read `loopExhausted`. **Choose: (a) `loopExhausted` is
+  DISPLAY-ONLY and the node always follows its plain success edges (recommended for
+  v1 — keeps decide() untouched), or (b) add real `on: converged|exhausted` edge
+  semantics — which DOES touch `resolveWorkflow` + `decide()` (drops A2 out of "reducer
+  untouched").** Opus recommends **(a) display-only in v1**; defer routable-exhaustion.
+- **`crashRespawns` was underspecified and would LOOSEN the cap (D-Loop-4).** Today the
+  first never-ran observation permits one recovery, the second fails. "Increment on
+  recovery, fail at ≥2" would permit TWO recoveries. **Use a persisted `neverRanCount`
+  incremented atomically when reap sees no-session+no-markers; fail when it reaches 2
+  (one recovery), else respawn — paired with `loopPending`.** (Codex confirmed the bug
+  is real but only in the crash-in-spawn window — a restart merely after 2 healthy
+  iterations does NOT fail, since exit/start markers route elsewhere.)
+- **D-Loop-5 is more than a flag.** `spawnNode` mints a fresh UUID every call and never
+  passes `resume`. The loop path must retrieve the persisted `providerSessionId`, keep
+  it, call `buildInvocation({resume:true})`, AND send a continuation prompt ("revise the
+  prior result; last verdict was revise") — resending the original objective is not a
+  revision instruction. **Reject codex `loopPolicy` in v1 (fail-closed)** — a stateless
+  repeat is too weak to call "revise-until-good."
+- **D-Loop-6 needs coupling code, it does NOT "fall out."** A resumed claude iteration
+  that exits nonzero currently goes `retryOrFailNode → spawnNode` → NEW session id +
+  fresh non-resume → context lost. **The current iteration's invocation mode/session
+  must be persisted so a retry repeats the SAME semantic iteration**; the `retryCount`
+  reset needs an atomic mutator coordinated with `loopPending`.
+
+### Cross-cutting issues Codex surfaced
+
+- **⚠️ Latent issue in ALREADY-SHIPPED router/eval: `parseResult` reads plaintext
+  `BRANCH:`/`SCORE:` lines, but claude runs with `--output-format stream-json`.** The
+  tests only ever used a plaintext stub — the branch/score parsing has NEVER been proven
+  against real claude output. This must be verified (structural parse of stream-json, or
+  a real fixture proving standalone lines survive) — it affects router + eval today, not
+  just A2. **Worth a follow-up regardless of A2.**
+- **Budget-gate bypass.** `advanceRun` reaps BEFORE `budgetExhausted`. If the loop
+  respawn happens inside `recordTerminalDone` (in reap), it spawns BEFORE the gate — so
+  `maxSpawns` won't PREVENT it (only counts it after). The "B2 caps a runaway loop"
+  claim in §5 is therefore only true up to a one-cycle overshoot. **Fix: the loop
+  respawn must do a pre-spawn budget check, or be driver work processed after the gate.**
+  (Note: retry respawns have the same one-cycle-overshoot property today.)
+- **Persistence/tests underspecified:** define `iterationCount` initial semantics
+  (esp. `maxIterations:1`); persist `lastVerdict` (the UI promises it, the schema
+  omits it); `until` must be a bounded non-whitespace token compatible with
+  `parseResult`; add phase-specific crash-recovery tests (crash before verdict persist /
+  after persist before cleanup / after cleanup before recordSpawned / after recordSpawned
+  before tmux — the single "restart between verdict and respawn" test is too coarse);
+  add `maxIterations:1`, loop-under-`maxSpawns`, and a real claude stream-json fixture.
+
+**Net:** D-Loop-1/2 stand; D-Loop-3 flips to display-only-in-v1 (keeps decide()
+untouched); D-Loop-4/5/6 gain `loopPending` + `neverRanCount` + persisted per-iteration
+invocation context + fail-closed codex. The budget-gate bypass and the claude
+stream-json parsing question must be resolved before build. Opus will fold these into
+the implementation spec once you confirm the D-Loop-3 direction (display-only vs. real
+edge semantics) — the one remaining true fork.
