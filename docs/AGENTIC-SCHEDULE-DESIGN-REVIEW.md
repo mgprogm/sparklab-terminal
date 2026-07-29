@@ -1,6 +1,6 @@
 # B1 — scheduled runs — DESIGN REVIEW
 
-> **Status: FOR REVIEW — not approved to build.** Arc II §B1 checkpoint (MEDIUM):
+> **Status: DESIGN SETTLED (3 Codex review rounds §7-§9) — approved to build; impl spec = docs/AGENTIC-SCHEDULE-IMPL-SPEC.md.** Arc II §B1 checkpoint (MEDIUM):
 > the reducer is untouched, but automated start reverses a v1 safety posture (D7:
 > start is human-only), so it needs sign-off before code. Grounded in current code
 > on `feat/agentic-ai-creator`; `test:agentic` at 417 (retry+router+eval+budget+A2).
@@ -269,3 +269,31 @@ spec-level.
 
 Direction sound; auth model now correct. Not yet an implementation spec until R-F +
 R-OMIT are resolved.
+
+---
+
+## 9. Codex review — round 3 (FINAL: ready to build) — 2026-07-29
+
+**R-F GO-WITH-CONDITIONS · R-OMIT GO-WITH-CONDITIONS. Convergence: YES — B1 is ready
+to become an implementation spec.** No remaining design blockers; the conditions below
+go into the impl spec.
+
+- **R-F conditions:** the synchronous check-and-`startReservations++` before any `await`
+  is race-free in one Node process; **release the reservation immediately after the
+  synchronous `createRunRecord()`** (with a conditional `finally` fallback) so the
+  reservation does NOT linger through `advanceRun` and cause false capacity skips.
+  Persist `scheduleId` on the run; `listActiveRuns()` returns IDs (not records), so the
+  overlap check needs a schedule-aware helper (e.g. `activeRunsForSchedule(scheduleId)`).
+  Crash-safe because run creation persists atomically.
+- **R-OMIT conditions:** the fingerprint closure MUST also include `objectiveTemplate`
+  (it changes every prompt) and the agents referenced by a CUSTOM workflow's node
+  `agentId`s (not only `app.agentIds`). Verify the fingerprint **inside `startRun`**,
+  after the final target-resolution `await` and before resolving agents / creating the
+  run, to prevent a TOCTOU between the scheduler's check and execution. `objective`,
+  `cwd`/`serverId`, and `unattended` are schedule-owned inputs and are NOT fingerprinted.
+  Refuse-and-advance-nextFireAt is correct (do not disable the schedule). Canonicalize an
+  explicit normalized projection (recursively sort object keys, preserve array order) and
+  **reject missing references** rather than hashing a partial closure.
+
+**STATUS: design SETTLED over 3 Codex review rounds (§7-§9). Ready to build — writing
+the implementation spec (docs/AGENTIC-SCHEDULE-IMPL-SPEC.md) next.**
