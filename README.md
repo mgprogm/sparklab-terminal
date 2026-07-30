@@ -2,7 +2,7 @@
 
 A web terminal whose defining property is that **your jobs survive the browser and the gateway**. Close the tab, drop the network, or restart the server process — a running job keeps going and is there, live, when you reconnect.
 
-It ships with multi-server SSH access, a file explorer, "job finished" push notifications, installable-PWA support, and an **Agent Chat**: an AI agent that can read a session's screen, type into it with per-write approval, create sessions, and drive an isolated browser.
+It ships with multi-server SSH access, a file explorer, "job finished" push notifications, installable-PWA support, an **Agent Chat** (an AI agent that can read a session's screen, type into it with per-write approval, create sessions, and drive an isolated browser), and three pluggable in-app tools — a **Kanban board**, a **project-management suite** (board/list/sprints/Gantt), and an **Agentic AI Creator** for building and running survivable AI agent workflows.
 
 > ⚠️ **Status:** experimental / single-user. This is a personal project, not a hardened multi-tenant product — see [Security & scope](#security--scope) before exposing it to the internet.
 
@@ -29,7 +29,10 @@ Full rationale in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/DESI
 - **Multi-server** — attach to remote hosts over SSH (key or password auth) with connection multiplexing; local and remote sessions live side by side.
 - **File explorer** — browse, preview, upload, download, rename, and delete files on any session's host (local or remote).
 - **Git-status footer** — live branch + working-tree summary for the active session's cwd.
-- **Agent Chat** — an Azure-OpenAI tool-calling loop that can read screens, type with per-write approval, create sessions, and operate an isolated, egress-restricted browser.
+- **Agent Chat** — an Azure-OpenAI tool-calling loop that can read screens, type with per-write approval, create sessions, run one-shot Codex CLI tasks, and operate an isolated, egress-restricted browser.
+- **Kanban board** — a gateway-owned, multi-board task tracker embedded as a self-contained sandboxed-iframe artifact; drivable by the agent or an external AI CLI over a scoped token.
+- **Project management** — a Kanban-first PM suite (Board · List · Sprints · dependency-aware Gantt) with issue keys, an epic→story→subtask hierarchy, comments, activity log, attachments, and watchers.
+- **Agentic AI Creator** — build catalog entries and agents (`claude-cli` / `codex-cli`) into workflows whose runs survive browser reload and gateway restart: each step continues as a detached tmux job, with retry/router/eval/loop/budget nodes and scheduled runs.
 - **PWA + Web Push** — installable app; get notified when a long job finishes, even with the tab closed.
 
 ## Quick start
