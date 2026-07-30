@@ -11,9 +11,11 @@ import { WebSocket } from "ws";
 import type { BrowserHandoffInput } from "@sparklab/shared-types";
 import { config } from "./config.js";
 import { SafeBrowserProxy } from "./browser-proxy.js";
+import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const CDP_CALL_TIMEOUT_MS = 10_000;
+const SCREENCAST_FRAME_INTERVAL_MS = 100;
 export const INTERACTIVE_VIEWPORT = { width: 1280, height: 720 } as const;
 
 export function interactiveViewportOverrideParams(
@@ -44,55 +46,62 @@ export class BrowserSessionHost {
 
   async start(): Promise<void> {
     if (this.chromium) return;
-    this.tempDir = await mkdtemp(join(tmpdir(), "sparklab-browser-"));
-    this.configDir = join(this.tempDir, "config");
-    this.profileDir = join(this.tempDir, "profile");
-    this.downloadsDir = join(this.tempDir, "downloads");
-    await Promise.all([
-      mkdir(this.configDir, { recursive: true }),
-      mkdir(this.profileDir, { recursive: true }),
-      mkdir(this.downloadsDir, { recursive: true }),
-    ]);
-    this.proxy = new SafeBrowserProxy();
-    const proxyUrl = await this.proxy.start();
-    const port = await availableLoopbackPort();
-    const executable = findChromium();
-    const args = [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${this.profileDir}`,
-      `--proxy-server=${proxyUrl}`,
-      "--proxy-bypass-list=<-loopback>",
-      "--window-size=1280,720",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-background-networking",
-      "--disable-component-update",
-      "--disable-sync",
-      "--disable-extensions",
-      "--disable-features=DownloadBubble",
-      ...(config.browser.headless ? ["--headless=new"] : []),
-      "about:blank",
-    ];
-    const child = spawn(executable, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-    this.chromium = child;
-    child.stdout.on("data", () => undefined);
-    child.stderr.on("data", () => undefined);
-    child.once("exit", () => {
-      if (this.chromium === child) {
-        this.chromium = null;
-        this.onUnexpectedExit?.();
-      }
-    });
-    this.cdpUrl = `http://127.0.0.1:${port}`;
+    const startedAt = Date.now();
+    let ready = false;
     try {
-      await waitForCdp(this.cdpUrl, child);
-    } catch (error) {
-      await this.dispose();
-      throw error;
+      this.tempDir = await mkdtemp(join(tmpdir(), "sparklab-browser-"));
+      this.configDir = join(this.tempDir, "config");
+      this.profileDir = join(this.tempDir, "profile");
+      this.downloadsDir = join(this.tempDir, "downloads");
+      await Promise.all([
+        mkdir(this.configDir, { recursive: true }),
+        mkdir(this.profileDir, { recursive: true }),
+        mkdir(this.downloadsDir, { recursive: true }),
+      ]);
+      this.proxy = new SafeBrowserProxy();
+      const proxyUrl = await this.proxy.start();
+      const port = await availableLoopbackPort();
+      const executable = findChromium();
+      const args = [
+        `--remote-debugging-port=${port}`,
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${this.profileDir}`,
+        `--proxy-server=${proxyUrl}`,
+        "--proxy-bypass-list=<-loopback>",
+        "--window-size=1280,720",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-sync",
+        "--disable-extensions",
+        "--disable-features=DownloadBubble",
+        ...(config.browser.headless ? ["--headless=new"] : []),
+        "about:blank",
+      ];
+      const child = spawn(executable, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      });
+      this.chromium = child;
+      child.stdout.on("data", () => undefined);
+      child.stderr.on("data", () => undefined);
+      child.once("exit", () => {
+        if (this.chromium === child) {
+          this.chromium = null;
+          this.onUnexpectedExit?.();
+        }
+      });
+      this.cdpUrl = `http://127.0.0.1:${port}`;
+      try {
+        await waitForCdp(this.cdpUrl, child);
+        ready = true;
+      } catch (error) {
+        await this.dispose();
+        throw error;
+      }
+    } finally {
+      browserPerformanceMetrics.chromiumReady(Date.now() - startedAt, ready);
     }
   }
 
@@ -155,6 +164,8 @@ class CdpPage {
   >();
   private originalViewport: { width: number; height: number } | null = null;
   private viewportNormalized = false;
+  private lastScreencastAckAt = 0;
+  private screencastAckTimer: NodeJS.Timeout | null = null;
   private constructor(
     private ws: WebSocket,
     private onFrame: (frame: Buffer) => void,
@@ -261,6 +272,10 @@ class CdpPage {
   }
 
   async close(): Promise<void> {
+    if (this.screencastAckTimer) {
+      clearTimeout(this.screencastAckTimer);
+      this.screencastAckTimer = null;
+    }
     if (this.ws.readyState === WebSocket.OPEN) {
       try {
         await this.call("Page.stopScreencast", {});
@@ -333,11 +348,7 @@ class CdpPage {
       const frame = Buffer.from(value.params.data ?? "", "base64");
       if (frame.length > 0 && frame.length <= MAX_FRAME_BYTES)
         this.onFrame(frame);
-      void ignoreScreencastAckFailure(
-        this.call("Page.screencastFrameAck", {
-          sessionId: value.params.sessionId,
-        }),
-      );
+      this.scheduleScreencastAck(value.params.sessionId);
       return;
     }
     if (typeof value.id !== "number") return;
@@ -353,6 +364,38 @@ class CdpPage {
       pending.reject(new Error("browser_handoff_unavailable"));
     this.pending.clear();
   }
+
+  /** Pace Chromium capture at the broker's 10 FPS transport ceiling. */
+  private scheduleScreencastAck(sessionId: number | undefined): void {
+    if (typeof sessionId !== "number" || this.screencastAckTimer) return;
+    const delay = screencastAckDelay(
+      Date.now(),
+      this.lastScreencastAckAt,
+      SCREENCAST_FRAME_INTERVAL_MS,
+    );
+    const acknowledge = () => {
+      this.screencastAckTimer = null;
+      this.lastScreencastAckAt = Date.now();
+      void ignoreScreencastAckFailure(
+        this.call("Page.screencastFrameAck", { sessionId }),
+      );
+    };
+    if (delay === 0) {
+      acknowledge();
+      return;
+    }
+    this.screencastAckTimer = setTimeout(acknowledge, delay);
+    this.screencastAckTimer.unref();
+  }
+}
+
+export function screencastAckDelay(
+  now: number,
+  lastAcknowledgedAt: number,
+  intervalMs = SCREENCAST_FRAME_INTERVAL_MS,
+): number {
+  if (lastAcknowledgedAt <= 0) return 0;
+  return Math.max(0, intervalMs - (now - lastAcknowledgedAt));
 }
 
 export function mouseEventParams(

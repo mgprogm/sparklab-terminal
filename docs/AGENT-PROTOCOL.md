@@ -90,24 +90,85 @@ is reserved for the terminal's `/attach`). Schemas live in
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                      | Kind      | Backing                                                          |
-| ------------------------- | --------- | ---------------------------------------------------------------- |
-| `list_sessions`           | read      | `GET /api/sessions`                                              |
-| `read_screen`             | read      | `GET /api/sessions/:id/screen`                                   |
-| `wait_idle`               | read      | polls `/screen` until a shell prompt / quiescence                |
-| `type_text`               | **write** | `POST /api/sessions/:id/keys {text}` — never executes            |
-| `press_keys`              | **write** | `POST …/keys {keys}` (whitelist)                                 |
-| `run_command`             | **write** | type + Enter + `wait_idle` (one approval)                        |
-| `create_session`          | **write** | `POST /api/sessions`                                             |
-| `run_codex`               | **write** | `POST …/codex` — `codex exec` in the session cwd                 |
-| `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                    |
-| `browser_list_tabs`       | read      | Browser Use MCP tab list                                         |
-| `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action             |
-| `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication |
+| Tool                      | Kind      | Backing                                                             |
+| ------------------------- | --------- | ------------------------------------------------------------------- |
+| `list_sessions`           | read      | `GET /api/sessions`                                                 |
+| `read_screen`             | read      | `GET /api/sessions/:id/screen`                                      |
+| `wait_idle`               | read      | polls `/screen` until a shell prompt / quiescence                   |
+| `type_text`               | **write** | `POST /api/sessions/:id/keys {text}` — never executes               |
+| `press_keys`              | **write** | `POST …/keys {keys}` (whitelist)                                    |
+| `run_command`             | **write** | type + Enter + `wait_idle` (one approval)                           |
+| `create_session`          | **write** | `POST /api/sessions`                                                |
+| `run_codex`               | **write** | `POST …/codex` — `codex exec` in the session cwd                    |
+| `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                       |
+| `browser_list_tabs`       | read      | Browser Use MCP tab list                                            |
+| `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action                |
+| `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication    |
+| `kanban_list`             | read      | `GET /api/kanban/boards`                                            |
+| `kanban_get`              | read      | `GET /api/kanban/boards/:id`                                        |
+| `kanban_create`           | **write** | `POST /api/kanban/boards`                                           |
+| `kanban_add_card`         | **write** | `POST /api/kanban/boards/:id/cards`                                 |
+| `kanban_update_card`      | **write** | `PATCH /api/kanban/cards/:id`                                       |
+| `kanban_move`             | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409) |
+| `kanban_delete`           | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)  |
+
+Kanban tools drive the gateway's `/api/kanban/*` board API (design:
+[`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). Approval tiers (D9): reads run
+immediately; the routine writes (`kanban_create`, `kanban_add_card`,
+`kanban_update_card`, `kanban_move`) are approvable **allow-always**;
+`kanban_delete` (destroying a whole board) is in `ONE_TIME_TOOLS`, so it is
+re-approved on **every** call like `run_codex` / `browser_act`. `kanban_move`
+fetches the board's current `rev` itself and retries once on a `409`, so the
+model never manages revisions. There is deliberately **no card-delete tool** —
+deleting individual cards stays a human action in the board UI.
+
+| `pm_list_projects` | read | `GET /api/pm/projects` |
+| `pm_get_project` | read | `GET /api/pm/projects/:id` |
+| `pm_get_tree` | read | `GET /api/pm/projects/:id/tree` — Epic→Story→Subtask forest |
+| `pm_create_project` | **write** | `POST /api/pm/projects` |
+| `pm_add_task` | **write** | `POST /api/pm/projects/:id/tasks` (+ `type`, `parent_id`) |
+| `pm_update_task` | **write** | `PATCH /api/pm/tasks/:id` (fields + `type`/`parent_id`/`dependsOn`; cycle/hierarchy→error) |
+| `pm_move_task` | **write** | `POST /api/pm/tasks/:id/move` (auto-manages `rev`, retries **409 only**) |
+| `pm_add_sprint` | **write** | `POST /api/pm/projects/:id/sprints` |
+| `pm_delete_project` | **write** | `DELETE /api/pm/projects/:id` — project delete (one-time approval) |
+| `pm_add_column` | **write** | `POST /api/pm/projects/:id/columns` |
+| `pm_update_column` | **write** | `PATCH /api/pm/columns/:colId` (name/`wip_limit`/`transitions`) |
+| `pm_move_column` | **write** | `POST /api/pm/columns/:colId/move` (auto-manages `rev`, retries 409) |
+| `pm_delete_column` | **write** | `DELETE /api/pm/columns/:colId` — can strand/relocate many tasks (one-time approval) |
+| `pm_add_comment` | **write** | `POST /api/pm/tasks/:id/comments` |
+| `pm_list_comments` | read | `GET /api/pm/tasks/:id/comments` |
+| `pm_list_activity` | read | `GET /api/pm/projects/:id/activity` |
+| `pm_watch_task` / `pm_unwatch_task` | **write** | `POST /api/pm/tasks/:id/watch`\|`unwatch` (idempotent) |
+| `pm_list_attachments` | read | `GET /api/pm/tasks/:id/attachments` |
+
+The PM tools drive the project-management artifact's `/api/pm/*` API (design:
+[`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md), extended by
+[`PM-ARTIFACT-ENHANCEMENTS-PLAN.md`](./PM-ARTIFACT-ENHANCEMENTS-PLAN.md)) — a
+separate artifact from Kanban, same approval model: reads auto; routine writes
+allow-always; `pm_delete_project` and `pm_delete_column` are in `ONE_TIME_TOOLS`
+(re-approved every call — both can destroy or relocate many tasks at once).
+`pm_update_task` sets task fields, type/hierarchy, and dependencies (a
+dependency cycle or a hierarchy-matrix violation — e.g. a Subtask without a
+parent, an Epic with a parent — comes back as a gateway 400/422, surfaced as an
+error string, never silently applied). `pm_move_task` distinguishes its two
+failure modes: a **409** `stale` revision is retried automatically, exactly
+once; a **422** (`wip_exceeded` or `transition_forbidden` — the destination
+column is at its WIP limit, or isn't in the source column's allowed
+transitions) is a hard rejection the tool **never retries** — it surfaces
+immediately as an error string for the model to re-plan around. There is
+**no `pm_delete_task`** tool — task deletion stays human-only in the UI.
+Attachment **upload** and all notification management are deliberately
+**not** exposed as agent tools (binary upload and notification triage stay
+human actions in the artifact UI); `pm_list_attachments` (metadata only) is
+the one read exposed for attachments.
 
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.
 It does not create a second browser, token, socket, cookie jar, or timeout.
+Each model hop is grounded with the runtime's current control lease. That live
+lease overrides stale assistant prose in chat history: the agent must not ask
+for **Done** when the lease is agent-active or closed, and must reopen an
+existing pending/active Browser View before referring the user to its controls.
 
 The dedicated handoff data plane is bounded and latest-frame-wins: the broker
 paces binary frames to 10 FPS, retains at most one unsent frame under

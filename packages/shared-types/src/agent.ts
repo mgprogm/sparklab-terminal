@@ -433,6 +433,7 @@ export const BrowserHandoffStateSchema = z
     handoffId: HandoffIdSchema.optional(),
     state: z.enum(["pending", "human_active", "agent_active", "closed"]),
     expiresAt: z.number().int().positive().safe().optional(),
+    hardExpiresAt: z.number().int().positive().safe().optional(),
   })
   .strict();
 export type BrowserHandoffState = z.infer<typeof BrowserHandoffStateSchema>;

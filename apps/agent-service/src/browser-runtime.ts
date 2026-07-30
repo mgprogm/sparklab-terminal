@@ -7,6 +7,8 @@ import { config, CAPS } from "./config.js";
 import { BrowserControlLease } from "./browser-control-lease.js";
 import { BrowserSessionHost } from "./browser-session-host.js";
 import { browserResources } from "./browser-resource-limiter.js";
+import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
+import { serializeBrowserState } from "./browser-state.js";
 import { sanitizePublicUrl, validateBrowserUrl } from "./browser-security.js";
 
 interface McpContent {
@@ -43,6 +45,29 @@ export type BrowserAction =
 export interface BrowserCallResult {
   content: string;
   snapshot?: BrowserSnapshot;
+}
+
+export function browserUseConfig(profileId: string, cdpUrl: string) {
+  return {
+    browser_profile: {
+      [profileId]: {
+        id: profileId,
+        default: true,
+        cdp_url: cdpUrl,
+        // SafeBrowserProxy is the authoritative network boundary and validates
+        // the exact destination IP for every HTTP request and CONNECT tunnel.
+        // Browser Use's switch blocks every literal IP, including public ones.
+        block_ip_addresses: false,
+        disable_security: false,
+        enable_default_extensions: false,
+        accept_downloads: false,
+        auto_download_pdfs: false,
+        permissions: [],
+      },
+    },
+    llm: {},
+    agent: {},
+  };
 }
 
 const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
@@ -222,79 +247,70 @@ export class BrowserRuntime {
     const profileId = randomUUID();
     await writeFile(
       join(configDir, "config.json"),
-      JSON.stringify({
-        browser_profile: {
-          [profileId]: {
-            id: profileId,
-            default: true,
-            cdp_url: this.host.cdpUrl,
-            block_ip_addresses: true,
-            disable_security: false,
-            enable_default_extensions: false,
-            accept_downloads: false,
-            auto_download_pdfs: false,
-            permissions: [],
-          },
-        },
-        llm: {},
-        agent: {},
-      }),
+      JSON.stringify(browserUseConfig(profileId, this.host.cdpUrl)),
       { mode: 0o600 },
     );
     this.assertOpen();
 
-    const child = spawn("uv", ["run", "browser-use", "--mcp"], {
-      cwd: workdir,
-      env: {
-        ...process.env,
-        XDG_CONFIG_HOME: configDir,
-        BROWSER_USE_CONFIG_DIR: configDir,
-        ANONYMIZED_TELEMETRY: "false",
-        BROWSER_USE_CLOUD_SYNC: "false",
-        BROWSER_USE_DISABLE_EXTENSIONS: "1",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
-    this.child = child;
-    child.once("error", (error) => this.rejectPending(error));
-    child.once("exit", (code, signal) => {
-      const unexpected = this.child === child;
-      if (unexpected) {
-        this.child = null;
-        void this.cleanupOwnedResources();
-        this.onUnexpectedClose?.(this.browserId, ++this.revision);
-      }
-      this.rejectPending(
-        new Error(`Browser Use exited (${code ?? signal ?? "unknown"})`),
+    const mcpStartedAt = Date.now();
+    let mcpReady = false;
+    try {
+      const child = spawn("uv", ["run", "browser-use", "--mcp"], {
+        cwd: workdir,
+        env: {
+          ...process.env,
+          XDG_CONFIG_HOME: configDir,
+          BROWSER_USE_CONFIG_DIR: configDir,
+          ANONYMIZED_TELEMETRY: "false",
+          BROWSER_USE_CLOUD_SYNC: "false",
+          BROWSER_USE_DISABLE_EXTENSIONS: "1",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      });
+      this.child = child;
+      child.once("error", (error) => this.rejectPending(error));
+      child.once("exit", (code, signal) => {
+        const unexpected = this.child === child;
+        if (unexpected) {
+          this.child = null;
+          void this.cleanupOwnedResources();
+          this.onUnexpectedClose?.(this.browserId, ++this.revision);
+        }
+        this.rejectPending(
+          new Error(`Browser Use exited (${code ?? signal ?? "unknown"})`),
+        );
+      });
+      child.stderr.on("data", () => undefined);
+      let stdout = Buffer.alloc(0);
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout = Buffer.concat([stdout, chunk]);
+        if (stdout.length > MAX_MCP_LINE_BYTES) {
+          void this.dispose();
+          return;
+        }
+        let newline = stdout.indexOf(0x0a);
+        while (newline >= 0) {
+          const line = stdout.subarray(0, newline).toString("utf8");
+          stdout = stdout.subarray(newline + 1);
+          this.handleLine(line);
+          newline = stdout.indexOf(0x0a);
+        }
+      });
+      await withAbortAndTimeout(
+        this.request("initialize", {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "sparklab-agent-service", version: "0.1.0" },
+        }),
+        undefined,
+        30_000,
       );
-    });
-    child.stderr.on("data", () => undefined);
-    let stdout = Buffer.alloc(0);
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout = Buffer.concat([stdout, chunk]);
-      if (stdout.length > MAX_MCP_LINE_BYTES) {
-        void this.dispose();
-        return;
-      }
-      let newline = stdout.indexOf(0x0a);
-      while (newline >= 0) {
-        const line = stdout.subarray(0, newline).toString("utf8");
-        stdout = stdout.subarray(newline + 1);
-        this.handleLine(line);
-        newline = stdout.indexOf(0x0a);
-      }
-    });
-    await withAbortAndTimeout(
-      this.request("initialize", {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "sparklab-agent-service", version: "0.1.0" },
-      }),
-      undefined,
-      30_000,
-    );
-    this.notify("notifications/initialized", {});
+      this.notify("notifications/initialized", {});
+      mcpReady = true;
+    } finally {
+      browserPerformanceMetrics.mcpReady(Date.now() - mcpStartedAt, mcpReady);
+    }
   }
 
   private assertOpen(): void {
@@ -307,26 +323,33 @@ export class BrowserRuntime {
     signal?: AbortSignal,
   ): Promise<McpContent[]> {
     await this.ensureStarted();
-    let response: McpResponse;
+    const startedAt = Date.now();
+    let succeeded = false;
     try {
-      response = await withAbortAndTimeout(
-        this.request("tools/call", { name, arguments: args }),
-        signal,
-        CAPS.browserActionTimeoutMs,
-      );
-    } catch (error) {
-      await this.dispose();
-      throw error;
+      let response: McpResponse;
+      try {
+        response = await withAbortAndTimeout(
+          this.request("tools/call", { name, arguments: args }),
+          signal,
+          CAPS.browserActionTimeoutMs,
+        );
+      } catch (error) {
+        await this.dispose();
+        throw error;
+      }
+      if (response.error)
+        throw new Error(response.error.message || "Browser Use MCP error");
+      const result = response.result;
+      if (!result?.content)
+        throw new Error("Browser Use returned a malformed result");
+      if (result.isError) throw new Error(extractText(result.content));
+      const text = extractText(result.content);
+      if (/^(Error:|Unknown tool:)/i.test(text)) throw new Error(text);
+      succeeded = true;
+      return result.content;
+    } finally {
+      browserPerformanceMetrics.browserCall(Date.now() - startedAt, succeeded);
     }
-    if (response.error)
-      throw new Error(response.error.message || "Browser Use MCP error");
-    const result = response.result;
-    if (!result?.content)
-      throw new Error("Browser Use returned a malformed result");
-    if (result.isError) throw new Error(extractText(result.content));
-    const text = extractText(result.content);
-    if (/^(Error:|Unknown tool:)/i.test(text)) throw new Error(text);
-    return result.content;
   }
 
   private request(method: string, params: unknown): Promise<McpResponse> {
@@ -384,7 +407,8 @@ export class BrowserRuntime {
       });
     }
     sanitizeStateUrls(state, rawUrl);
-    const publicText = JSON.stringify(state).slice(0, 100_000);
+    const publicText = serializeBrowserState(state);
+    browserPerformanceMetrics.browserState(Buffer.byteLength(publicText));
     if (!url || url === "about:blank") {
       this.lastElements.clear();
       return { content: publicText };
@@ -433,6 +457,9 @@ export class BrowserRuntime {
     if (Buffer.byteLength(image.data, "base64") > MAX_SCREENSHOT_BYTES) {
       throw new Error("browser screenshot exceeds the 2 MiB limit");
     }
+    browserPerformanceMetrics.browserSnapshot(
+      Buffer.byteLength(image.data, "base64"),
+    );
     const snapshot: BrowserSnapshot = {
       browserId: this.browserId,
       revision: ++this.revision,

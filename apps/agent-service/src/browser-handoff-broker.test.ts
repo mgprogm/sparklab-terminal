@@ -12,6 +12,7 @@ const {
   ignoreScreencastAckFailure,
   interactiveViewportOverrideParams,
   mouseEventParams,
+  screencastAckDelay,
 } = await import("./browser-session-host.js");
 
 class FakeBrowser {
@@ -112,13 +113,19 @@ test("reopen republishes an active handoff without replacing its session", async
   assert.equal(browser.leaseState, "human_active");
   assert.equal(socket.readyState, socket.OPEN);
   assert.equal(frames.length, frameCount + 1);
-  assert.deepEqual(frames.at(-1), {
+  const reopened = frames.at(-1) as {
+    expiresAt: number;
+    hardExpiresAt: number;
+  };
+  assert.deepEqual(reopened, {
     type: "browser_handoff_state",
     browserId: "browser-1",
     handoffId: issued.handoffId,
     state: "human_active",
-    expiresAt: (frames.at(-1) as { expiresAt: number }).expiresAt,
+    expiresAt: reopened.expiresAt,
+    hardExpiresAt: reopened.hardExpiresAt,
   });
+  assert.ok(reopened.hardExpiresAt >= reopened.expiresAt);
   assert.equal(broker.reopen("mallory", "chat-1", "browser-1"), false);
 
   await broker.finish(issued.handoffId, "alice", "chat-1");
@@ -414,4 +421,11 @@ test("interactive capture viewport keeps JPEG pixels aligned with CDP input", ()
       mobile: false,
     },
   );
+});
+
+test("screencast acknowledgements pace capture at the transport frame rate", () => {
+  assert.equal(screencastAckDelay(1_000, 0), 0);
+  assert.equal(screencastAckDelay(1_050, 1_000), 50);
+  assert.equal(screencastAckDelay(1_100, 1_000), 0);
+  assert.equal(screencastAckDelay(1_150, 1_000), 0);
 });

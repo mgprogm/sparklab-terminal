@@ -59,6 +59,7 @@ export function BrowserViewOverlay() {
   const agentConnected = useAgentStore((state) => state.connected);
   const handoffState = useBrowserHandoffStore((state) => state.state);
   const handoffId = useBrowserHandoffStore((state) => state.handoffId);
+  const handoffToken = useBrowserHandoffStore((state) => state.token);
   const connectionState = useBrowserHandoffStore(
     (state) => state.connectionState,
   );
@@ -127,14 +128,21 @@ export function BrowserViewOverlay() {
     };
   }, [hardExpiresAt, idleExpiresAt, now]);
 
-  if (!view || !visible) return null;
-
-  const imageUrl = `data:${view.screenshot.mediaType};base64,${view.screenshot.data}`;
   const humanActive = handoffState === "human_active";
   const pending = handoffState === "pending";
   const closed = handoffState === "closed";
+  const activeHandoff = (humanActive || pending) && Boolean(handoffId);
+  if ((!view || !visible) && !activeHandoff) return null;
+
+  const imageUrl = view
+    ? `data:${view.screenshot.mediaType};base64,${view.screenshot.data}`
+    : null;
+  const credentialsUnavailable = !view && !connection && !handoffToken;
   const takeControlEnabled =
-    agentConnected && agentStatus === "idle" && handoffState !== "closed";
+    Boolean(view) &&
+    agentConnected &&
+    agentStatus === "idle" &&
+    handoffState !== "closed";
 
   return (
     <section
@@ -145,10 +153,12 @@ export function BrowserViewOverlay() {
         <Globe2 className="text-chart-2 size-4 shrink-0" />
         <div className="min-w-0 flex-1">
           <div className="text-foreground truncate text-xs font-medium">
-            {view.title || "Browser"}
+            {view?.title || "Browser handoff"}
           </div>
           <div className="text-muted-foreground truncate text-[10px]">
-            {safeDisplayUrl(view.url)}
+            {view
+              ? safeDisplayUrl(view.url)
+              : "Recovery controls for the active session"}
           </div>
         </div>
 
@@ -228,7 +238,11 @@ export function BrowserViewOverlay() {
                     : "JPEG stream"}
             </span>
             <span aria-hidden="true">·</span>
-            {connectionState === "connected" ? (
+            {credentialsUnavailable ? (
+              <>
+                <Unplug className="size-3" /> Recovery controls only
+              </>
+            ) : connectionState === "connected" ? (
               <>Connected</>
             ) : connectionState === "reconnecting" ? (
               <>
@@ -250,12 +264,34 @@ export function BrowserViewOverlay() {
       )}
 
       <div className="bg-muted/30 flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2">
-        {humanActive ? (
+        {humanActive && credentialsUnavailable ? (
+          <div className="flex max-w-md flex-col items-center gap-2 text-center">
+            <Unplug className="text-muted-foreground size-7" />
+            <p className="text-foreground text-sm font-medium">
+              Interactive control is unavailable after reload
+            </p>
+            <p className="text-muted-foreground text-xs">
+              The private browser session is still active. Select Done to return
+              control to the agent, or Cancel to close the browser.
+            </p>
+          </div>
+        ) : humanActive ? (
           <InteractiveBrowser
             connection={connection}
             enabled={connectionState === "connected"}
             mediaStream={mediaStream}
           />
+        ) : pending && credentialsUnavailable ? (
+          <div className="flex max-w-md flex-col items-center gap-2 text-center">
+            <Unplug className="text-muted-foreground size-7" />
+            <p className="text-foreground text-sm font-medium">
+              Interactive setup is unavailable after reload
+            </p>
+            <p className="text-muted-foreground text-xs">
+              Cancel this browser session, then ask the agent to start a new
+              handoff.
+            </p>
+          </div>
         ) : pending ? (
           <div className="text-muted-foreground flex items-center gap-2 text-sm">
             <Loader2 className="size-4 animate-spin" /> Securing interactive
@@ -271,7 +307,7 @@ export function BrowserViewOverlay() {
               Its temporary cookies and login state are no longer available.
             </p>
           </div>
-        ) : (
+        ) : view && imageUrl ? (
           <button
             type="button"
             disabled={!takeControlEnabled}
@@ -286,20 +322,20 @@ export function BrowserViewOverlay() {
               height={view.viewport.height}
               className="max-h-full max-w-full object-contain shadow-lg transition group-hover:brightness-75"
             />
-            <span className="bg-background/90 text-foreground border-border absolute rounded-md border px-3 py-2 text-sm font-medium shadow-lg backdrop-blur-sm">
+            <span className="bg-background/90 text-foreground border-border absolute left-1/2 top-3 -translate-x-1/2 rounded-md border px-3 py-2 text-sm font-medium shadow-lg backdrop-blur-sm">
               <MousePointer2 className="mr-1.5 inline size-4" />
               {takeControlEnabled
                 ? "Take control"
                 : "Wait for the agent to become idle"}
             </span>
           </button>
-        )}
+        ) : null}
       </div>
 
       {!humanActive && !pending && !closed && (
         <div className="border-border text-muted-foreground flex shrink-0 items-center gap-2 border-t px-3 py-2 text-[11px]">
           <RefreshCw className="size-3" /> Read-only snapshot · Updated revision{" "}
-          {view.revision}
+          {view?.revision}
         </div>
       )}
 
@@ -322,7 +358,7 @@ export function BrowserViewOverlay() {
           <AlertDialogFooter>
             <AlertDialogCancel>Not now</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => requestBrowserHandoff(view.browserId)}
+              onClick={() => view && requestBrowserHandoff(view.browserId)}
             >
               Take control
             </AlertDialogAction>

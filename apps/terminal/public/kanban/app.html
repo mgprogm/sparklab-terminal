@@ -1,0 +1,1063 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kanban board</title>
+<!--
+  Pluggable Kanban board artifact (KANBAN-PLAN.md D6).
+
+  A SINGLE self-contained document — inline <style> + inline <script>, ZERO
+  external requests (no CDN, no fetched web fonts, no imports). Loaded into a
+  same-origin sandboxed <iframe> by components/kanban-dialog.tsx; it talks to
+  the gateway over relative /api/kanban/* fetches, which carry the app-origin
+  gw_session cookie through the Next proxy.
+
+  Palette/type are hardcoded to mirror DESIGN.md (a documented exception to the
+  "use Tailwind tokens" rule — this isolated document has no access to the app's
+  theme tokens): warm near-charcoal canvas #2b2622, off-white ink #f7f5f0,
+  Inter-ish system stack, tight radii, no chromatic accent beyond one restrained
+  highlight. Click-to-move (no native drag) is the chosen v1 interaction.
+
+  Safety: all user-supplied text is injected via textContent / DOM nodes, never
+  innerHTML, so titles/tags/descriptions cannot inject markup.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  select,
+  input,
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+
+  .topbar .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .board-select {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    max-width: 320px;
+  }
+
+  .board-tags {
+    display: inline-flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .btn {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--canvas-softer);
+  }
+
+  .btn-primary {
+    background: var(--ink);
+    color: var(--canvas);
+    border-color: var(--ink);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--mute);
+    padding: 4px 6px;
+  }
+
+  .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .btn-danger:hover {
+    color: var(--danger);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .tag {
+    display: inline-block;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  /* ---- Banner ---- */
+  .banner {
+    display: none;
+    padding: 8px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--danger);
+    font-size: 13px;
+  }
+
+  .banner.show {
+    display: block;
+  }
+
+  /* ---- Board (columns) ---- */
+  .board {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .column {
+    flex: 0 0 300px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  .column-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .column-name {
+    font-weight: 500;
+    font-size: 13px;
+    letter-spacing: -0.2px;
+  }
+
+  .column-count {
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .cards {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card-title {
+    font-size: 13px;
+    line-height: 1.35;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
+  .card-desc {
+    font-size: 12px;
+    color: var(--mute);
+    word-break: break-word;
+    white-space: pre-wrap;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .card-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .card-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .card-actions .grow {
+    flex: 1 1 auto;
+  }
+
+  .move-select {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 3px 6px;
+    max-width: 130px;
+  }
+
+  .add-card {
+    padding: 8px 10px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .add-card-trigger {
+    width: 100%;
+    text-align: left;
+    color: var(--mute);
+    background: transparent;
+    border: 1px dashed var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+  }
+
+  .add-card-trigger:hover {
+    color: var(--ink);
+    border-color: var(--mute);
+  }
+
+  .add-card-form {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .add-card-form.show {
+    display: flex;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  textarea.field {
+    resize: vertical;
+    min-height: 72px;
+    line-height: 1.45;
+  }
+
+  .row-end {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  /* ---- Empty / loading states ---- */
+  .placeholder {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: var(--mute);
+    text-align: center;
+    padding: 32px;
+  }
+
+  .placeholder h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--body);
+  }
+
+  /* ---- Modal ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 10;
+  }
+
+  .overlay.show {
+    display: flex;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 440px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--mute);
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 9999px;
+  }
+</style>
+
+<div class="topbar">
+  <select
+    id="board-select"
+    class="board-select"
+    aria-label="Select board"
+  ></select>
+  <span id="board-tags" class="board-tags grow"></span>
+  <button id="new-board-btn" class="btn btn-primary" type="button">
+    New board
+  </button>
+  <button
+    id="delete-board-btn"
+    class="btn btn-danger"
+    type="button"
+    title="Delete this board"
+  >
+    Delete board
+  </button>
+</div>
+
+<div id="banner" class="banner" role="alert"></div>
+
+<div id="content"></div>
+
+<!-- New board modal -->
+<div id="new-board-overlay" class="overlay">
+  <form id="new-board-form" class="modal">
+    <h3>New board</h3>
+    <div>
+      <label for="nb-name">Name</label>
+      <input
+        id="nb-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Checkout revamp"
+        required
+      />
+    </div>
+    <div>
+      <label for="nb-tags">Tags</label>
+      <input
+        id="nb-tags"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="frontend, q3"
+      />
+      <div class="hint">Comma-separated. Optional.</div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-board-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create board</button>
+    </div>
+  </form>
+</div>
+
+<!-- Edit card modal -->
+<div id="edit-card-overlay" class="overlay">
+  <form id="edit-card-form" class="modal">
+    <h3>Edit card</h3>
+    <div>
+      <label for="ec-title">Title</label>
+      <input
+        id="ec-title"
+        class="field"
+        type="text"
+        autocomplete="off"
+        required
+      />
+    </div>
+    <div>
+      <label for="ec-desc">Description</label>
+      <textarea id="ec-desc" class="field" placeholder="Optional"></textarea>
+    </div>
+    <div>
+      <label for="ec-tags">Tags</label>
+      <input id="ec-tags" class="field" type="text" autocomplete="off" />
+      <div class="hint">Comma-separated. Optional.</div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="edit-card-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  var state = {
+    boards: [], // summaries: {id,name,tags,rev,...}
+    boardId: null, // selected board id
+    board: null, // full board {columns, cards, rev, ...}
+    editingCardId: null,
+  };
+
+  var el = {
+    boardSelect: document.getElementById("board-select"),
+    boardTags: document.getElementById("board-tags"),
+    newBoardBtn: document.getElementById("new-board-btn"),
+    deleteBoardBtn: document.getElementById("delete-board-btn"),
+    banner: document.getElementById("banner"),
+    content: document.getElementById("content"),
+    newBoardOverlay: document.getElementById("new-board-overlay"),
+    newBoardForm: document.getElementById("new-board-form"),
+    nbName: document.getElementById("nb-name"),
+    nbTags: document.getElementById("nb-tags"),
+    editCardOverlay: document.getElementById("edit-card-overlay"),
+    editCardForm: document.getElementById("edit-card-form"),
+    ecTitle: document.getElementById("ec-title"),
+    ecDesc: document.getElementById("ec-desc"),
+    ecTags: document.getElementById("ec-tags"),
+  };
+
+  // ---------------------------------------------------------------------------
+  // API layer
+  // ---------------------------------------------------------------------------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message || "Request failed";
+  }
+  ApiError.prototype = Object.create(Error.prototype);
+
+  // Performs a same-origin JSON fetch. On non-2xx, throws ApiError with the
+  // parsed body attached (`.body`) so 409-stale handling can read the board.
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) {
+      opts.headers["content-type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    var res;
+    try {
+      res = await fetch("/api/kanban" + path, opts);
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = null;
+      }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Request failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function parseTags(raw) {
+    return raw
+      .split(",")
+      .map(function (t) {
+        return t.trim();
+      })
+      .filter(function (t) {
+        return t.length > 0;
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error / banner handling
+  // ---------------------------------------------------------------------------
+  function showBanner(message) {
+    el.banner.textContent = message;
+    el.banner.classList.add("show");
+  }
+
+  function clearBanner() {
+    el.banner.textContent = "";
+    el.banner.classList.remove("show");
+  }
+
+  function handleError(e) {
+    if (e && e.status === 401) {
+      showBanner("Session expired — reload the page to sign in again.");
+      return;
+    }
+    showBanner((e && e.message) || "Something went wrong.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOM helpers (textContent-only; never innerHTML with user data)
+  // ---------------------------------------------------------------------------
+  function elem(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function tagChips(container, tags) {
+    (tags || []).forEach(function (t) {
+      container.appendChild(elem("span", "tag", t));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+  async function loadBoards(preferId) {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/boards");
+    } catch (e) {
+      handleError(e);
+      renderContent();
+      return;
+    }
+    state.boards = (data && data.boards) || [];
+    if (state.boards.length === 0) {
+      state.boardId = null;
+      state.board = null;
+      renderBoardSelect();
+      renderContent();
+      return;
+    }
+    // Pick the requested board, keep the current one if still present, else first.
+    var ids = state.boards.map(function (b) {
+      return b.id;
+    });
+    var next =
+      (preferId && ids.indexOf(preferId) >= 0 && preferId) ||
+      (state.boardId && ids.indexOf(state.boardId) >= 0 && state.boardId) ||
+      state.boards[0].id;
+    state.boardId = next;
+    renderBoardSelect();
+    await loadBoard(next);
+  }
+
+  async function loadBoard(boardId) {
+    clearBanner();
+    try {
+      state.board = await api("GET", "/boards/" + encodeURIComponent(boardId));
+      state.boardId = boardId;
+    } catch (e) {
+      state.board = null;
+      handleError(e);
+    }
+    renderBoardTags();
+    renderContent();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------------------------------
+  // Adopt a board object returned from a write, keeping local rev in sync.
+  function adoptBoard(board) {
+    if (!board) return;
+    state.board = board;
+    state.boardId = board.id;
+    renderBoardTags();
+    renderContent();
+  }
+
+  async function createBoard(name, tags) {
+    var board = await api("POST", "/boards", { name: name, tags: tags });
+    await loadBoards(board.id);
+  }
+
+  async function deleteBoard(boardId) {
+    await api("DELETE", "/boards/" + encodeURIComponent(boardId));
+    if (state.boardId === boardId) {
+      state.boardId = null;
+      state.board = null;
+    }
+    await loadBoards();
+  }
+
+  async function addCard(columnId, title) {
+    var board = state.board;
+    if (!board) return;
+    await api("POST", "/boards/" + encodeURIComponent(board.id) + "/cards", {
+      title: title,
+      columnId: columnId,
+    });
+    await loadBoard(board.id); // returns the card, not the board — refetch
+  }
+
+  async function updateCard(cardId, patch) {
+    var board = state.board;
+    if (!board) return;
+    patch.boardId = board.id;
+    await api("PATCH", "/cards/" + encodeURIComponent(cardId), patch);
+    await loadBoard(board.id); // returns the card — refetch board to re-render
+  }
+
+  async function deleteCard(cardId) {
+    var board = state.board;
+    if (!board) return;
+    await api(
+      "DELETE",
+      "/cards/" +
+        encodeURIComponent(cardId) +
+        "?boardId=" +
+        encodeURIComponent(board.id),
+    );
+    await loadBoard(board.id);
+  }
+
+  // Move a card to the end of the target column. On 409 stale, refetch the
+  // board and retry ONCE with the fresh rev, then re-render.
+  async function moveCard(cardId, toColumnId) {
+    var board = state.board;
+    if (!board) return;
+
+    async function attempt(rev, targetColId) {
+      var target = null;
+      // Recompute the target column length from whatever board `rev` describes.
+      for (var i = 0; i < board.columns.length; i++) {
+        if (board.columns[i].id === targetColId) target = board.columns[i];
+      }
+      var toIndex = target ? target.cardIds.length : 0;
+      return api("POST", "/cards/" + encodeURIComponent(cardId) + "/move", {
+        boardId: board.id,
+        toColumnId: targetColId,
+        toIndex: toIndex,
+        rev: rev,
+      });
+    }
+
+    try {
+      var updated = await attempt(board.rev, toColumnId);
+      adoptBoard(updated);
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.board) {
+        // Adopt the fresh board the server returned, then retry once.
+        board = e.body.board;
+        state.board = board;
+        try {
+          var retried = await attempt(board.rev, toColumnId);
+          adoptBoard(retried);
+        } catch (e2) {
+          handleError(e2);
+          adoptBoard(board); // re-render with the fresh (server) board
+        }
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+  function renderBoardSelect() {
+    var sel = el.boardSelect;
+    sel.textContent = "";
+    if (state.boards.length === 0) {
+      var opt = elem("option", null, "No boards");
+      opt.value = "";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      el.deleteBoardBtn.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    el.deleteBoardBtn.disabled = false;
+    state.boards.forEach(function (b) {
+      var opt = elem("option", null, b.name);
+      opt.value = b.id;
+      if (b.id === state.boardId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderBoardTags() {
+    el.boardTags.textContent = "";
+    var board = state.board;
+    if (board && board.tags) tagChips(el.boardTags, board.tags);
+  }
+
+  function renderContent() {
+    var root = el.content;
+    root.textContent = "";
+    // Make #content fill remaining height whatever it holds.
+    root.style.flex = "1 1 auto";
+    root.style.minHeight = "0";
+    root.style.display = "flex";
+    root.style.flexDirection = "column";
+
+    if (state.boards.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No boards yet"));
+      empty.appendChild(
+        elem("div", null, 'Create your first board with "New board" above.'),
+      );
+      root.appendChild(empty);
+      return;
+    }
+
+    if (!state.board) {
+      var loading = elem("div", "placeholder");
+      loading.appendChild(elem("div", null, "Loading board…"));
+      root.appendChild(loading);
+      return;
+    }
+
+    root.appendChild(renderBoard(state.board));
+  }
+
+  function renderBoard(board) {
+    var boardEl = elem("div", "board");
+    board.columns.forEach(function (col) {
+      boardEl.appendChild(renderColumn(board, col));
+    });
+    return boardEl;
+  }
+
+  function renderColumn(board, col) {
+    var colEl = elem("div", "column");
+
+    var head = elem("div", "column-head");
+    head.appendChild(elem("span", "column-name", col.name));
+    head.appendChild(
+      elem("span", "column-count grow", String(col.cardIds.length)),
+    );
+    colEl.appendChild(head);
+
+    var cardsEl = elem("div", "cards");
+    col.cardIds.forEach(function (cardId) {
+      var card = board.cards.find(function (c) {
+        return c.id === cardId;
+      });
+      if (card) cardsEl.appendChild(renderCard(board, col, card));
+    });
+    colEl.appendChild(cardsEl);
+
+    colEl.appendChild(renderAddCard(col));
+    return colEl;
+  }
+
+  function renderCard(board, col, card) {
+    var cardEl = elem("div", "card");
+
+    cardEl.appendChild(elem("div", "card-title", card.title));
+
+    if (card.description) {
+      cardEl.appendChild(elem("div", "card-desc", card.description));
+    }
+
+    if (card.tags && card.tags.length) {
+      var tagsEl = elem("div", "card-tags");
+      tagChips(tagsEl, card.tags);
+      cardEl.appendChild(tagsEl);
+    }
+
+    var actions = elem("div", "card-actions");
+
+    // Move dropdown: lists the OTHER columns; append to end of target.
+    var others = board.columns.filter(function (c) {
+      return c.id !== col.id;
+    });
+    if (others.length) {
+      var moveSel = elem("select", "move-select");
+      moveSel.setAttribute("aria-label", "Move card");
+      var placeholder = elem("option", null, "Move ▾");
+      placeholder.value = "";
+      placeholder.selected = true;
+      moveSel.appendChild(placeholder);
+      others.forEach(function (c) {
+        var opt = elem("option", null, c.name);
+        opt.value = c.id;
+        moveSel.appendChild(opt);
+      });
+      moveSel.addEventListener("change", function () {
+        var toColumnId = moveSel.value;
+        moveSel.selectedIndex = 0; // reset to placeholder
+        if (toColumnId) void moveCard(card.id, toColumnId);
+      });
+      actions.appendChild(moveSel);
+    }
+
+    actions.appendChild(elem("span", "grow"));
+
+    var editBtn = elem("button", "btn btn-ghost", "Edit");
+    editBtn.type = "button";
+    editBtn.addEventListener("click", function () {
+      openEditCard(card);
+    });
+    actions.appendChild(editBtn);
+
+    var delBtn = elem("button", "btn btn-ghost btn-danger", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm('Delete card "' + card.title + '"?')) {
+        deleteCard(card.id).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+
+    cardEl.appendChild(actions);
+    return cardEl;
+  }
+
+  function renderAddCard(col) {
+    var wrap = elem("div", "add-card");
+
+    var trigger = elem("button", "add-card-trigger", "+ Add card");
+    trigger.type = "button";
+
+    var form = elem("form", "add-card-form");
+    var input = elem("input", "field");
+    input.type = "text";
+    input.placeholder = "Card title";
+    input.setAttribute("autocomplete", "off");
+    var rowEnd = elem("div", "row-end");
+    var cancel = elem("button", "btn", "Cancel");
+    cancel.type = "button";
+    var add = elem("button", "btn btn-primary", "Add");
+    add.type = "submit";
+    rowEnd.appendChild(cancel);
+    rowEnd.appendChild(add);
+    form.appendChild(input);
+    form.appendChild(rowEnd);
+
+    function open() {
+      trigger.style.display = "none";
+      form.classList.add("show");
+      input.focus();
+    }
+    function close() {
+      form.classList.remove("show");
+      trigger.style.display = "";
+      input.value = "";
+    }
+
+    trigger.addEventListener("click", open);
+    cancel.addEventListener("click", close);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var title = input.value.trim();
+      if (!title) return;
+      close();
+      addCard(col.id, title).catch(handleError);
+    });
+
+    wrap.appendChild(trigger);
+    wrap.appendChild(form);
+    return wrap;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modals
+  // ---------------------------------------------------------------------------
+  function openOverlay(overlay) {
+    overlay.classList.add("show");
+  }
+  function closeOverlay(overlay) {
+    overlay.classList.remove("show");
+  }
+
+  // Close buttons (data-close="<overlay id>") + backdrop click.
+  document.querySelectorAll("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      closeOverlay(document.getElementById(btn.getAttribute("data-close")));
+    });
+  });
+  [el.newBoardOverlay, el.editCardOverlay].forEach(function (ov) {
+    ov.addEventListener("mousedown", function (e) {
+      if (e.target === ov) closeOverlay(ov);
+    });
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      closeOverlay(el.newBoardOverlay);
+      closeOverlay(el.editCardOverlay);
+    }
+  });
+
+  function openEditCard(card) {
+    state.editingCardId = card.id;
+    el.ecTitle.value = card.title || "";
+    el.ecDesc.value = card.description || "";
+    el.ecTags.value = (card.tags || []).join(", ");
+    openOverlay(el.editCardOverlay);
+    el.ecTitle.focus();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  el.boardSelect.addEventListener("change", function () {
+    var id = el.boardSelect.value;
+    if (id) void loadBoard(id);
+  });
+
+  el.newBoardBtn.addEventListener("click", function () {
+    el.nbName.value = "";
+    el.nbTags.value = "";
+    openOverlay(el.newBoardOverlay);
+    el.nbName.focus();
+  });
+
+  el.deleteBoardBtn.addEventListener("click", function () {
+    if (!state.board) return;
+    if (
+      window.confirm(
+        'Delete board "' +
+          state.board.name +
+          '" and all its cards? This cannot be undone.',
+      )
+    ) {
+      deleteBoard(state.board.id).catch(handleError);
+    }
+  });
+
+  el.newBoardForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.nbName.value.trim();
+    if (!name) return;
+    var tags = parseTags(el.nbTags.value);
+    closeOverlay(el.newBoardOverlay);
+    createBoard(name, tags).catch(handleError);
+  });
+
+  el.editCardForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var id = state.editingCardId;
+    if (!id) return;
+    var patch = {
+      title: el.ecTitle.value.trim(),
+      description: el.ecDesc.value,
+      tags: parseTags(el.ecTags.value),
+    };
+    if (!patch.title) return;
+    closeOverlay(el.editCardOverlay);
+    updateCard(id, patch).catch(handleError);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  void loadBoards();
+</script>

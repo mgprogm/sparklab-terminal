@@ -35,9 +35,6 @@ interface BrowserHandoffStore {
   clear: () => void;
 }
 
-const IDLE_TIMEOUT_MS = 2 * 60_000;
-const HARD_TIMEOUT_MS = 10 * 60_000;
-
 const initialState = {
   browserId: null,
   handoffId: null,
@@ -73,9 +70,6 @@ export const useBrowserHandoffStore = create<BrowserHandoffStore>()((set) => ({
 
       if (current.browserId && frame.browserId !== current.browserId)
         return current;
-      const now = Date.now();
-      const becameHuman =
-        frame.state === "human_active" && current.state !== "human_active";
       const terminal =
         frame.state === "agent_active" || frame.state === "closed";
       return {
@@ -83,10 +77,10 @@ export const useBrowserHandoffStore = create<BrowserHandoffStore>()((set) => ({
         handoffId: frame.handoffId ?? current.handoffId,
         state: frame.state,
         expiresAt: frame.expiresAt ?? current.expiresAt,
-        ...(becameHuman
+        ...(frame.state === "human_active"
           ? {
-              hardExpiresAt: now + HARD_TIMEOUT_MS,
-              idleExpiresAt: now + IDLE_TIMEOUT_MS,
+              hardExpiresAt: frame.hardExpiresAt ?? current.hardExpiresAt,
+              idleExpiresAt: frame.expiresAt ?? current.idleExpiresAt,
             }
           : {}),
         ...(terminal

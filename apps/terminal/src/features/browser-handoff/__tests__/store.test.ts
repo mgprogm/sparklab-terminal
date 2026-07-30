@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { useBrowserHandoffStore } from "../store";
 
@@ -33,18 +33,21 @@ describe("browser handoff store", () => {
   });
 
   it("uses authoritative idle and hard deadlines from the server", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const idleExpiresAt = 1_800_000_120_000;
+    const hardExpiresAt = 1_800_000_600_000;
     useBrowserHandoffStore.getState().ingestControl({
       type: "browser_handoff_state",
       browserId: "browser-1",
+      handoffId: "handoff-1",
       state: "human_active",
+      expiresAt: idleExpiresAt,
+      hardExpiresAt,
     });
     const first = useBrowserHandoffStore.getState();
-    expect(first.idleExpiresAt).toBe(Date.now() + 120_000);
-    expect(first.hardExpiresAt).toBe(Date.now() + 600_000);
+    expect(first.idleExpiresAt).toBe(idleExpiresAt);
+    expect(first.hardExpiresAt).toBe(hardExpiresAt);
 
-    const updatedIdle = Date.now() + 60_000;
+    const updatedIdle = idleExpiresAt + 60_000;
     useBrowserHandoffStore
       .getState()
       .updateExpiry(updatedIdle, first.hardExpiresAt ?? undefined);
@@ -52,6 +55,5 @@ describe("browser handoff store", () => {
     expect(useBrowserHandoffStore.getState().hardExpiresAt).toBe(
       first.hardExpiresAt,
     );
-    vi.useRealTimers();
   });
 });

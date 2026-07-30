@@ -58,6 +58,26 @@ const isClipboardShortcut = (event: React.KeyboardEvent): boolean =>
     ["KeyC", "KeyV", "KeyX"].includes(event.code)) ||
   (event.shiftKey && event.code === "Insert");
 
+const setCanvasDimensions = (
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+): boolean => {
+  if (canvas.width === width && canvas.height === height) return false;
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  return true;
+};
+
+interface VirtualCursorState {
+  visible: boolean;
+  pressed: boolean;
+  acknowledged: boolean;
+  clientX: number;
+  clientY: number;
+  label: string;
+}
+
 export function InteractiveBrowser({
   connection,
   enabled = true,
@@ -72,10 +92,73 @@ export function InteractiveBrowser({
   const cursorRef = useRef<HTMLDivElement>(null);
   const cursorLabelRef = useRef<HTMLSpanElement>(null);
   const lastPointRef = useRef({ x: 0, y: 0 });
+  const layoutRectRef = useRef<DOMRect | null>(null);
+  const cursorFrameRef = useRef<number | null>(null);
+  const cursorStateRef = useRef<VirtualCursorState>({
+    visible: false,
+    pressed: false,
+    acknowledged: false,
+    clientX: 0,
+    clientY: 0,
+    label: "",
+  });
   const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heldButtonsRef = useRef(new Set<MouseButton>());
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+  const invalidateLayoutRect = () => {
+    layoutRectRef.current = null;
+  };
+  const scheduleCursorRender = () => {
+    if (cursorFrameRef.current !== null) return;
+    cursorFrameRef.current = window.requestAnimationFrame(() => {
+      cursorFrameRef.current = null;
+      // Reuse geometry only for one visual frame so layout shifts that do not
+      // emit resize or scroll events cannot leave coordinate mapping stale.
+      layoutRectRef.current = null;
+      const cursor = cursorRef.current;
+      const label = cursorLabelRef.current;
+      if (!cursor || !label) return;
+      const state = cursorStateRef.current;
+      cursor.hidden = !state.visible;
+      cursor.dataset.pressed = String(state.pressed);
+      cursor.dataset.connected = String(enabledRef.current);
+      cursor.dataset.acknowledged = String(state.acknowledged);
+      cursor.style.transform = `translate3d(${state.clientX}px, ${state.clientY}px, 0)`;
+      label.textContent = state.label;
+    });
+  };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const invalidate = () => invalidateLayoutRect();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(invalidate);
+    resizeObserver?.observe(canvas);
+    window.addEventListener("resize", invalidate);
+    window.addEventListener("scroll", invalidate, true);
+    window.visualViewport?.addEventListener("resize", invalidate);
+    window.visualViewport?.addEventListener("scroll", invalidate);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", invalidate);
+      window.removeEventListener("scroll", invalidate, true);
+      window.visualViewport?.removeEventListener("resize", invalidate);
+      window.visualViewport?.removeEventListener("scroll", invalidate);
+      layoutRectRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!cursorStateRef.current.visible) return;
+    scheduleCursorRender();
+  }, [enabled]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -91,8 +174,8 @@ export function InteractiveBrowser({
     const renderer = new LatestFrameRenderer(
       (frame) => createImageBitmap(frame),
       (bitmap) => {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
+        if (setCanvasDimensions(canvas, bitmap.width, bitmap.height))
+          invalidateLayoutRect();
         canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
       },
     );
@@ -114,11 +197,13 @@ export function InteractiveBrowser({
       const cursor = cursorRef.current;
       const label = cursorLabelRef.current;
       if (!cursor || !label) return;
-      cursor.dataset.acknowledged = "true";
-      label.textContent = `${lastPointRef.current.x}, ${lastPointRef.current.y} ✓`;
+      cursorStateRef.current.acknowledged = true;
+      cursorStateRef.current.label = `${lastPointRef.current.x}, ${lastPointRef.current.y} ✓`;
+      scheduleCursorRender();
       if (ackTimerRef.current) clearTimeout(ackTimerRef.current);
       ackTimerRef.current = setTimeout(() => {
-        cursor.dataset.acknowledged = "false";
+        cursorStateRef.current.acknowledged = false;
+        scheduleCursorRender();
       }, 350);
     });
     return () => {
@@ -135,7 +220,12 @@ export function InteractiveBrowser({
     );
   useEffect(() => {
     const scheduler = schedulerRef.current;
-    return () => scheduler?.dispose();
+    return () => {
+      scheduler?.dispose();
+      if (cursorFrameRef.current !== null)
+        window.cancelAnimationFrame(cursorFrameRef.current);
+      cursorFrameRef.current = null;
+    };
   }, []);
 
   const send = (input: HandoffInput) => {
@@ -143,7 +233,9 @@ export function InteractiveBrowser({
     schedulerRef.current?.send(input);
   };
   const point = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect =
+      layoutRectRef.current ?? event.currentTarget.getBoundingClientRect();
+    layoutRectRef.current = rect;
     return {
       x: Math.max(
         0,
@@ -173,19 +265,15 @@ export function InteractiveBrowser({
   ) => {
     const position = point(event);
     lastPointRef.current = position;
-    const cursor = cursorRef.current;
-    const label = cursorLabelRef.current;
-    if (cursor) {
-      cursor.hidden = false;
-      cursor.dataset.pressed = String(pressed);
-      cursor.dataset.connected = String(enabled);
-      cursor.dataset.acknowledged = "false";
-      cursor.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
-    }
-    if (label)
-      label.textContent = enabled
-        ? `${position.x}, ${position.y} …`
-        : "connecting…";
+    cursorStateRef.current = {
+      visible: true,
+      pressed,
+      acknowledged: false,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      label: enabled ? `${position.x}, ${position.y} …` : "connecting…",
+    };
+    scheduleCursorRender();
     return position;
   };
 
@@ -203,14 +291,14 @@ export function InteractiveBrowser({
             onLoadedMetadata={(event) => {
               const canvas = canvasRef.current;
               if (!canvas) return;
-              canvas.width = Math.min(
-                MAX_WIDTH,
-                event.currentTarget.videoWidth,
-              );
-              canvas.height = Math.min(
-                MAX_HEIGHT,
-                event.currentTarget.videoHeight,
-              );
+              if (
+                setCanvasDimensions(
+                  canvas,
+                  Math.min(MAX_WIDTH, event.currentTarget.videoWidth),
+                  Math.min(MAX_HEIGHT, event.currentTarget.videoHeight),
+                )
+              )
+                invalidateLayoutRect();
             }}
           />
         )}
@@ -349,7 +437,19 @@ export function InteractiveBrowser({
         className="group pointer-events-none fixed left-0 top-0 z-50 will-change-transform"
         aria-hidden="true"
       >
-        <div className="size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-sky-400 bg-sky-400/20 shadow-[0_0_0_2px_rgba(0,0,0,0.6)] transition-transform group-data-[pressed=true]:scale-75 group-data-[acknowledged=true]:border-emerald-400 group-data-[connected=false]:border-red-400 group-data-[pressed=true]:border-amber-400 group-data-[acknowledged=true]:bg-emerald-400/30 group-data-[pressed=true]:bg-amber-400/40" />
+        <svg
+          data-testid="virtual-mouse-arrow"
+          viewBox="0 0 24 24"
+          className="size-6 origin-[2px_2px] -translate-x-0.5 -translate-y-0.5 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] transition-transform group-data-[pressed=true]:scale-75"
+        >
+          <path
+            d="M2 2 9.5 21l3.1-7.1 7.4-2.8L2 2Z"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="fill-white stroke-sky-500 transition-colors group-data-[acknowledged=true]:fill-emerald-100 group-data-[connected=false]:fill-red-100 group-data-[pressed=true]:fill-amber-100 group-data-[acknowledged=true]:stroke-emerald-500 group-data-[connected=false]:stroke-red-500 group-data-[pressed=true]:stroke-amber-500"
+          />
+        </svg>
         <span
           ref={cursorLabelRef}
           className="absolute left-3 top-3 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 font-mono text-[10px] text-white"

@@ -24,6 +24,7 @@ import { systemPrompt } from "./system-prompt.js";
 import {
   TOOLS,
   WRITE_TOOLS,
+  ONE_TIME_TOOLS,
   describeCall,
   executeTool,
   targetSession,
@@ -182,11 +183,6 @@ export class AgentLoop {
       this.history.push(userMsg);
       await appendMessages(this.chatId, [userMsg]);
 
-      const system: ChatCompletionMessageParam = {
-        role: "system",
-        content: systemPrompt(activeSessionId),
-      };
-
       let modelCalls = 0;
       let writeExecs = 0;
 
@@ -200,6 +196,11 @@ export class AgentLoop {
         }
         modelCalls++;
         this.send({ type: "status", state: "thinking" });
+
+        const system: ChatCompletionMessageParam = {
+          role: "system",
+          content: systemPrompt(activeSessionId, this.browser.leaseState),
+        };
 
         const { text: segmentText, toolCalls } = await this.streamOnce(
           [system, ...this.history],
@@ -274,11 +275,11 @@ export class AgentLoop {
                   summary,
                   input: publicArgs,
                 }),
-              // browser_act and run_codex are consequential enough that each
-              // invocation is approved individually (no persistent allow-always).
-              tc.name !== "browser_act" &&
-                tc.name !== "browser_request_handoff" &&
-                tc.name !== "run_codex",
+              // ONE_TIME_TOOLS (browser_act, browser_request_handoff,
+              // run_codex, kanban_delete) are consequential enough that each
+              // invocation is approved individually (no persistent
+              // allow-always); pass allowAlways: false for them.
+              !ONE_TIME_TOOLS.has(tc.name),
             );
             if (behavior === "deny") {
               resultContent =

@@ -1,0 +1,3820 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Project management</title>
+<!--
+  Pluggable Project-management artifact (PM-TOOL-PLAN.md §5, D7/D8/D11).
+
+  A SINGLE self-contained document — inline <style> + inline <script>, ZERO
+  external requests (no CDN, no fetched web fonts, no imports). Loaded into a
+  same-origin sandboxed <iframe> by components/pm-dialog.tsx; it talks to the
+  gateway over relative /api/pm/* fetches, which carry the app-origin
+  gw_session cookie through the Next proxy.
+
+  Palette/type are hardcoded to mirror DESIGN.md (a documented exception to the
+  "use Tailwind tokens" rule — this isolated document has no access to the app's
+  theme tokens): warm near-charcoal canvas #2b2622, off-white ink #f7f5f0,
+  system font stack, tight radii, one restrained accent.
+
+  One task model, THREE views (Board · List · Sprints). Timeline/Gantt is a
+  later phase — the switcher shows it as a disabled "soon" placeholder.
+
+  Safety: all user-supplied text is injected via textContent / DOM nodes, never
+  innerHTML, so titles/labels/descriptions cannot inject markup.
+
+  Contract notes that diverge from Kanban (load-bearing):
+    - move 409 body key is `project` (not `board`); toIndex uses taskIds.length.
+    - task PATCH body carries `projectId` (not boardId).
+    - Backlog = sprintId:null; clearing a date/sprint sends explicit null.
+    - dates round-trip in UTC (Date.parse in, toISOString().slice(0,10) out).
+    - tasks is an array with a DERIVED columnId; ordering authority = taskIds.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --prio-low: #7fa6a0;
+    --prio-medium: #d8b46a;
+    --prio-high: #e0946a;
+    --prio-urgent: #e07a6a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  select,
+  input,
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+
+  .topbar .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .project-select {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    max-width: 280px;
+  }
+
+  .project-tags {
+    display: inline-flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  /* ---- View switcher ---- */
+  .view-switch {
+    display: inline-flex;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .view-switch button {
+    background: transparent;
+    color: var(--mute);
+    border: 0;
+    padding: 6px 12px;
+    border-right: 1px solid var(--hairline);
+  }
+
+  .view-switch button:last-child {
+    border-right: 0;
+  }
+
+  .view-switch button:hover:not(:disabled):not(.active) {
+    color: var(--ink);
+    background: var(--canvas-softer);
+  }
+
+  .view-switch button.active {
+    background: var(--ink);
+    color: var(--canvas);
+    font-weight: 500;
+  }
+
+  .view-switch button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .btn {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--canvas-softer);
+  }
+
+  .btn-primary {
+    background: var(--ink);
+    color: var(--canvas);
+    border-color: var(--ink);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--mute);
+    padding: 4px 6px;
+  }
+
+  .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .btn-danger:hover {
+    color: var(--danger);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .tag {
+    display: inline-block;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  /* ---- Banner ---- */
+  .banner {
+    display: none;
+    padding: 8px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--danger);
+    font-size: 13px;
+  }
+
+  .banner.show {
+    display: block;
+  }
+
+  /* ---- Content shell ---- */
+  #content {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---- Board (columns) ---- */
+  .board {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .column {
+    flex: 0 0 300px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  .column-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .column-name {
+    font-weight: 500;
+    font-size: 13px;
+    letter-spacing: -0.2px;
+  }
+
+  .column-count {
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .cards {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card-title {
+    font-size: 13px;
+    line-height: 1.35;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
+  .card-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .prio {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .prio::before {
+    content: "\2691"; /* flag */
+    font-size: 12px;
+  }
+
+  .prio-low {
+    color: var(--prio-low);
+  }
+  .prio-medium {
+    color: var(--prio-medium);
+  }
+  .prio-high {
+    color: var(--prio-high);
+  }
+  .prio-urgent {
+    color: var(--prio-urgent);
+  }
+
+  .due {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .due.overdue {
+    color: var(--danger);
+  }
+
+  .deps-badge {
+    color: var(--mute);
+    font-size: 11px;
+  }
+
+  .card-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .card-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .card-actions .grow {
+    flex: 1 1 auto;
+  }
+
+  .move-select {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 3px 6px;
+    max-width: 130px;
+  }
+
+  .add-card {
+    padding: 8px 10px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .add-card-trigger {
+    width: 100%;
+    text-align: left;
+    color: var(--mute);
+    background: transparent;
+    border: 1px dashed var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+  }
+
+  .add-card-trigger:hover {
+    color: var(--ink);
+    border-color: var(--mute);
+  }
+
+  .add-card-form {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .add-card-form.show {
+    display: flex;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  textarea.field {
+    resize: vertical;
+    min-height: 72px;
+    line-height: 1.45;
+  }
+
+  select.field[multiple] {
+    min-height: 96px;
+  }
+
+  .row-end {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .form-grid .full {
+    grid-column: 1 / -1;
+  }
+
+  /* ---- List view (table) ---- */
+  .list-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+    overflow: hidden;
+  }
+
+  .list-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .list-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead th {
+    position: sticky;
+    top: 0;
+    background: var(--canvas-soft);
+    text-align: left;
+    font-weight: 500;
+    color: var(--body);
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--hairline);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  thead th:hover {
+    color: var(--ink);
+  }
+
+  thead th .arrow {
+    color: var(--mute);
+    font-size: 10px;
+    margin-left: 4px;
+  }
+
+  tbody td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--hairline);
+    color: var(--body);
+    vertical-align: middle;
+  }
+
+  tbody tr {
+    cursor: pointer;
+  }
+
+  tbody tr:hover td {
+    background: var(--canvas-soft);
+  }
+
+  tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  /* ---- Sprints view ---- */
+  .sprints {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .lane {
+    flex: 0 0 300px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  .lane-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .lane-name {
+    font-weight: 500;
+    font-size: 13px;
+  }
+
+  .lane-dates {
+    color: var(--mute);
+    font-size: 11px;
+  }
+
+  .lane-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .lane-task {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .lane-task-title {
+    font-size: 13px;
+    word-break: break-word;
+  }
+
+  .sprint-select {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 3px 6px;
+    max-width: 100%;
+  }
+
+  .lane-add {
+    flex: 0 0 300px;
+    display: flex;
+    align-items: flex-start;
+  }
+
+  /* ---- Timeline / Gantt view ---- */
+  .timeline {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+  }
+
+  /* ---- Empty / loading states ---- */
+  .placeholder {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: var(--mute);
+    text-align: center;
+    padding: 32px;
+  }
+
+  .placeholder h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--body);
+  }
+
+  .muted {
+    color: var(--mute);
+  }
+
+  /* ---- Modal ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 10;
+  }
+
+  .overlay.show {
+    display: flex;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 560px;
+    max-height: 88vh;
+    overflow-y: auto;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal.narrow {
+    max-width: 440px;
+  }
+
+  .modal h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--mute);
+  }
+
+  /* ---- WIP badge ---- */
+  .wip-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    color: var(--mute);
+    margin-left: 4px;
+  }
+
+  .wip-badge.at-limit {
+    color: var(--danger);
+    font-weight: 600;
+  }
+
+  /* ---- Column menu ---- */
+  .col-menu-btn {
+    background: transparent;
+    border: 0;
+    color: var(--mute);
+    font-size: 16px;
+    padding: 2px 5px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+
+  .col-menu-btn:hover {
+    color: var(--ink);
+    background: var(--canvas-softer);
+  }
+
+  .col-menu-wrap {
+    position: relative;
+  }
+
+  .col-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 20;
+    min-width: 180px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 4px 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .col-menu.show {
+    display: block;
+  }
+
+  .col-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    color: var(--body);
+    font-size: 13px;
+    padding: 7px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .col-menu-item:hover {
+    background: var(--canvas-soft);
+    color: var(--ink);
+  }
+
+  .col-menu-item.danger:hover {
+    color: var(--danger);
+  }
+
+  .col-menu-sep {
+    height: 1px;
+    background: var(--hairline);
+    margin: 4px 0;
+  }
+
+  /* ---- Add column ---- */
+  .add-column {
+    flex: 0 0 300px;
+    display: flex;
+    align-items: flex-start;
+  }
+
+  .add-column-form {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 12px;
+    width: 100%;
+  }
+
+  .add-column-form.show {
+    display: flex;
+  }
+
+  /* ---- Issue key & type ---- */
+  .issue-key {
+    font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--mute);
+    white-space: nowrap;
+  }
+
+  .type-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius-sm);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .type-epic {
+    background: rgba(127, 166, 160, 0.18);
+    color: var(--prio-low);
+  }
+
+  .type-story {
+    background: rgba(216, 180, 106, 0.18);
+    color: var(--prio-medium);
+  }
+
+  .type-task {
+    background: rgba(201, 192, 173, 0.14);
+    color: var(--body);
+  }
+
+  .type-bug {
+    background: rgba(224, 122, 106, 0.18);
+    color: var(--danger);
+  }
+
+  .type-subtask {
+    background: rgba(174, 166, 156, 0.14);
+    color: var(--mute);
+  }
+
+  .parent-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 10px;
+    color: var(--mute);
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: 9999px;
+    padding: 0 6px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .card-top-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .readonly-field {
+    background: var(--canvas-soft);
+    color: var(--mute);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+    font-size: 13px;
+    cursor: default;
+  }
+
+  /* ---- Notification bell ---- */
+  .notif-wrap {
+    position: relative;
+  }
+
+  .notif-bell {
+    background: transparent;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    color: var(--mute);
+    padding: 5px 8px;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    position: relative;
+  }
+
+  .notif-bell:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .notif-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    text-align: center;
+    padding: 0 4px;
+  }
+
+  .notif-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 30;
+    width: 340px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  }
+
+  .notif-dropdown.show {
+    display: block;
+  }
+
+  .notif-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .notif-header-title {
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .notif-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--hairline);
+    padding: 10px 12px;
+    cursor: pointer;
+    color: var(--body);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .notif-item:hover {
+    background: var(--canvas-soft);
+  }
+
+  .notif-item:last-child {
+    border-bottom: 0;
+  }
+
+  .notif-item.unread {
+    background: rgba(218, 210, 193, 0.06);
+    color: var(--ink);
+  }
+
+  .notif-item.unread::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--prio-medium);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+
+  .notif-time {
+    display: block;
+    color: var(--mute);
+    font-size: 11px;
+    margin-top: 2px;
+  }
+
+  .notif-empty {
+    padding: 20px 12px;
+    text-align: center;
+    color: var(--mute);
+    font-size: 13px;
+  }
+
+  /* ---- Collab sections in edit-task modal ---- */
+  .collab-section {
+    border-top: 1px solid var(--hairline);
+    padding-top: 12px;
+  }
+
+  .collab-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .collab-header h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .collab-header .count {
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  /* Watchers */
+  .watcher-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .watcher-chip {
+    display: inline-flex;
+    align-items: center;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 2px 10px;
+    font-size: 11px;
+    line-height: 16px;
+  }
+
+  .watch-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  /* Comments */
+  .comment-list {
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .comment-item {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+  }
+
+  .comment-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+
+  .comment-author {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .comment-time {
+    font-size: 11px;
+    color: var(--mute);
+  }
+
+  .comment-body {
+    font-size: 13px;
+    color: var(--body);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .comment-delete-btn {
+    margin-left: auto;
+    background: transparent;
+    border: 0;
+    color: var(--mute);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+
+  .comment-delete-btn:hover {
+    color: var(--danger);
+  }
+
+  .comment-add {
+    display: flex;
+    gap: 6px;
+    align-items: flex-end;
+  }
+
+  .comment-add textarea {
+    flex: 1;
+    min-height: 48px;
+    resize: vertical;
+  }
+
+  /* Attachments */
+  .att-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .att-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .att-name {
+    color: var(--accent);
+    text-decoration: none;
+    word-break: break-all;
+  }
+
+  .att-name:hover {
+    text-decoration: underline;
+  }
+
+  .att-size {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .att-actor {
+    color: var(--mute);
+    font-size: 11px;
+  }
+
+  .att-delete-btn {
+    margin-left: auto;
+    background: transparent;
+    border: 0;
+    color: var(--mute);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+
+  .att-delete-btn:hover {
+    color: var(--danger);
+  }
+
+  .att-upload {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .att-upload input[type="file"] {
+    font-size: 12px;
+    color: var(--body);
+    max-width: 200px;
+  }
+
+  /* Activity */
+  .activity-list {
+    max-height: 200px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .activity-item {
+    font-size: 12px;
+    color: var(--body);
+    line-height: 1.45;
+    padding: 3px 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .activity-item:last-child {
+    border-bottom: 0;
+  }
+
+  .activity-actor {
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  .activity-verb {
+    color: var(--mute);
+  }
+
+  .activity-time {
+    color: var(--mute);
+    font-size: 11px;
+    float: right;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 9999px;
+  }
+</style>
+
+<div class="topbar">
+  <select
+    id="project-select"
+    class="project-select"
+    aria-label="Select project"
+  ></select>
+  <span id="project-tags" class="project-tags"></span>
+  <span class="grow"></span>
+  <div class="view-switch" id="view-switch" role="tablist">
+    <button type="button" data-view="board" role="tab">Board</button>
+    <button type="button" data-view="list" role="tab">List</button>
+    <button type="button" data-view="sprints" role="tab">Sprints</button>
+    <button type="button" data-view="timeline" role="tab">Timeline</button>
+  </div>
+  <div class="notif-wrap" id="notif-wrap">
+    <button id="notif-bell" class="notif-bell" type="button" aria-label="Notifications (0 unread)" title="Notifications">&#x1F514;</button>
+    <div id="notif-dropdown" class="notif-dropdown"></div>
+  </div>
+  <button id="new-project-btn" class="btn btn-primary" type="button">
+    New project
+  </button>
+  <button
+    id="delete-project-btn"
+    class="btn btn-danger"
+    type="button"
+    title="Delete this project"
+  >
+    Delete project
+  </button>
+</div>
+
+<div id="banner" class="banner" role="alert"></div>
+
+<div id="content"></div>
+
+<!-- New project modal -->
+<div id="new-project-overlay" class="overlay">
+  <form id="new-project-form" class="modal narrow">
+    <h3>New project</h3>
+    <div>
+      <label for="np-name">Name</label>
+      <input
+        id="np-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Payments service"
+        required
+      />
+    </div>
+    <div>
+      <label for="np-tags">Tags</label>
+      <input
+        id="np-tags"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="backend, q3"
+      />
+      <div class="hint">Comma-separated. Optional.</div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-project-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create project</button>
+    </div>
+  </form>
+</div>
+
+<!-- New sprint modal -->
+<div id="new-sprint-overlay" class="overlay">
+  <form id="new-sprint-form" class="modal narrow">
+    <h3>New sprint</h3>
+    <div>
+      <label for="ns-name">Name</label>
+      <input
+        id="ns-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Sprint 14"
+        required
+      />
+    </div>
+    <div class="form-grid">
+      <div>
+        <label for="ns-start">Start date</label>
+        <input id="ns-start" class="field" type="date" />
+      </div>
+      <div>
+        <label for="ns-end">End date</label>
+        <input id="ns-end" class="field" type="date" />
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-sprint-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create sprint</button>
+    </div>
+  </form>
+</div>
+
+<!-- Edit task modal -->
+<div id="edit-task-overlay" class="overlay">
+  <form id="edit-task-form" class="modal">
+    <h3>Edit task</h3>
+    <div class="form-grid">
+      <div>
+        <label for="et-key">Key</label>
+        <div id="et-key" class="readonly-field">—</div>
+      </div>
+      <div>
+        <label for="et-reporter">Reporter</label>
+        <div id="et-reporter" class="readonly-field">—</div>
+      </div>
+    </div>
+    <div>
+      <label for="et-title">Title</label>
+      <input
+        id="et-title"
+        class="field"
+        type="text"
+        autocomplete="off"
+        required
+      />
+    </div>
+    <div>
+      <label for="et-desc">Description</label>
+      <textarea id="et-desc" class="field" placeholder="Optional"></textarea>
+    </div>
+    <div class="form-grid">
+      <div>
+        <label for="et-type">Type</label>
+        <select id="et-type" class="field">
+          <option value="epic">Epic</option>
+          <option value="story">Story</option>
+          <option value="task">Task</option>
+          <option value="bug">Bug</option>
+          <option value="subtask">Subtask</option>
+        </select>
+      </div>
+      <div>
+        <label for="et-parent">Parent</label>
+        <select id="et-parent" class="field"></select>
+      </div>
+      <div>
+        <label for="et-assignee">Assignee</label>
+        <input id="et-assignee" class="field" type="text" autocomplete="off" />
+      </div>
+      <div>
+        <label for="et-priority">Priority</label>
+        <select id="et-priority" class="field">
+          <option value="">— None —</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="urgent">Urgent</option>
+        </select>
+      </div>
+      <div>
+        <label for="et-start">Start date</label>
+        <input id="et-start" class="field" type="date" />
+      </div>
+      <div>
+        <label for="et-due">Due date</label>
+        <input id="et-due" class="field" type="date" />
+      </div>
+      <div class="full">
+        <label for="et-labels">Labels</label>
+        <input id="et-labels" class="field" type="text" autocomplete="off" />
+        <div class="hint">Comma-separated. Optional.</div>
+      </div>
+      <div>
+        <label for="et-sprint">Sprint</label>
+        <select id="et-sprint" class="field"></select>
+      </div>
+      <div>
+        <label for="et-deps">Dependencies</label>
+        <select id="et-deps" class="field" multiple></select>
+        <div class="hint">Ctrl/⌘-click to select multiple.</div>
+      </div>
+    </div>
+    <!-- Watchers section -->
+    <div class="collab-section" id="et-watchers-section">
+      <div class="collab-header">
+        <h4>Watchers</h4>
+        <span class="count" id="et-watchers-count"></span>
+      </div>
+      <div class="watcher-chips" id="et-watchers-chips"></div>
+      <div class="watch-actions">
+        <button type="button" id="et-watch-btn" class="btn" aria-label="Watch this task">Watch</button>
+        <button type="button" id="et-unwatch-btn" class="btn" aria-label="Unwatch this task">Unwatch</button>
+      </div>
+    </div>
+
+    <!-- Comments section -->
+    <div class="collab-section" id="et-comments-section">
+      <div class="collab-header">
+        <h4>Comments</h4>
+        <span class="count" id="et-comments-count"></span>
+      </div>
+      <div class="comment-list" id="et-comment-list"></div>
+      <div class="comment-add">
+        <textarea id="et-comment-body" class="field" placeholder="Write a comment..." aria-label="Comment text"></textarea>
+        <button type="button" id="et-comment-post" class="btn btn-primary">Post</button>
+      </div>
+    </div>
+
+    <!-- Attachments section -->
+    <div class="collab-section" id="et-attachments-section">
+      <div class="collab-header">
+        <h4>Attachments</h4>
+        <span class="count" id="et-attachments-count"></span>
+      </div>
+      <div class="att-list" id="et-att-list"></div>
+      <div class="att-upload">
+        <input type="file" id="et-att-file" aria-label="Choose file to upload" />
+        <button type="button" id="et-att-upload" class="btn">Upload</button>
+      </div>
+    </div>
+
+    <!-- Activity section -->
+    <div class="collab-section" id="et-activity-section">
+      <div class="collab-header">
+        <h4>Activity</h4>
+      </div>
+      <div class="activity-list" id="et-activity-list"></div>
+    </div>
+
+    <div class="row-end">
+      <button type="button" class="btn" data-close="edit-task-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  var state = {
+    projects: [], // summaries: {id,name,tags,rev,...}
+    projectId: null, // selected project id
+    project: null, // full project {columns, sprints, tasks[], rev, ...}
+    view: "board", // board | list | sprints
+    editingTaskId: null,
+    listSort: { key: "title", dir: 1 }, // dir: 1 asc, -1 desc
+    listFilter: "",
+  };
+
+  var PRIORITY_RANK = { low: 0, medium: 1, high: 2, urgent: 3 };
+  var PRIORITY_LABEL = {
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    urgent: "Urgent",
+  };
+
+  var TYPE_GLYPH = {
+    epic: "E",
+    story: "S",
+    task: "T",
+    bug: "B",
+    subtask: "ST",
+  };
+  var TYPE_LABEL = {
+    epic: "Epic",
+    story: "Story",
+    task: "Task",
+    bug: "Bug",
+    subtask: "Subtask",
+  };
+
+  var el = {
+    projectSelect: document.getElementById("project-select"),
+    projectTags: document.getElementById("project-tags"),
+    viewSwitch: document.getElementById("view-switch"),
+    newProjectBtn: document.getElementById("new-project-btn"),
+    deleteProjectBtn: document.getElementById("delete-project-btn"),
+    banner: document.getElementById("banner"),
+    content: document.getElementById("content"),
+    newProjectOverlay: document.getElementById("new-project-overlay"),
+    newProjectForm: document.getElementById("new-project-form"),
+    npName: document.getElementById("np-name"),
+    npTags: document.getElementById("np-tags"),
+    newSprintOverlay: document.getElementById("new-sprint-overlay"),
+    newSprintForm: document.getElementById("new-sprint-form"),
+    nsName: document.getElementById("ns-name"),
+    nsStart: document.getElementById("ns-start"),
+    nsEnd: document.getElementById("ns-end"),
+    editTaskOverlay: document.getElementById("edit-task-overlay"),
+    editTaskForm: document.getElementById("edit-task-form"),
+    etKey: document.getElementById("et-key"),
+    etReporter: document.getElementById("et-reporter"),
+    etTitle: document.getElementById("et-title"),
+    etDesc: document.getElementById("et-desc"),
+    etType: document.getElementById("et-type"),
+    etParent: document.getElementById("et-parent"),
+    etAssignee: document.getElementById("et-assignee"),
+    etPriority: document.getElementById("et-priority"),
+    etStart: document.getElementById("et-start"),
+    etDue: document.getElementById("et-due"),
+    etLabels: document.getElementById("et-labels"),
+    etSprint: document.getElementById("et-sprint"),
+    etDeps: document.getElementById("et-deps"),
+    // Collaboration
+    notifWrap: document.getElementById("notif-wrap"),
+    notifBell: document.getElementById("notif-bell"),
+    notifDropdown: document.getElementById("notif-dropdown"),
+    etWatchersCount: document.getElementById("et-watchers-count"),
+    etWatchersChips: document.getElementById("et-watchers-chips"),
+    etWatchBtn: document.getElementById("et-watch-btn"),
+    etUnwatchBtn: document.getElementById("et-unwatch-btn"),
+    etCommentsCount: document.getElementById("et-comments-count"),
+    etCommentList: document.getElementById("et-comment-list"),
+    etCommentBody: document.getElementById("et-comment-body"),
+    etCommentPost: document.getElementById("et-comment-post"),
+    etAttachmentsCount: document.getElementById("et-attachments-count"),
+    etAttList: document.getElementById("et-att-list"),
+    etAttFile: document.getElementById("et-att-file"),
+    etAttUpload: document.getElementById("et-att-upload"),
+    etActivityList: document.getElementById("et-activity-list"),
+  };
+
+  // ---------------------------------------------------------------------------
+  // API layer (base path /api/pm — otherwise identical to the kanban artifact)
+  // ---------------------------------------------------------------------------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message || "Request failed";
+  }
+  ApiError.prototype = Object.create(Error.prototype);
+
+  // Performs a same-origin JSON fetch. On non-2xx, throws ApiError with the
+  // parsed body attached (`.body`) so 409-stale handling can read the project.
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) {
+      opts.headers["content-type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    var res;
+    try {
+      res = await fetch("/api/pm" + path, opts);
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = null;
+      }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Request failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function parseCsv(raw) {
+    return raw
+      .split(",")
+      .map(function (t) {
+        return t.trim();
+      })
+      .filter(function (t) {
+        return t.length > 0;
+      });
+  }
+
+  // ---- Date round-trip (both ends UTC, per the contract) --------------------
+  // ms -> <input type=date> value ("YYYY-MM-DD"); null/undefined -> "".
+  function msToDateInput(ms) {
+    if (ms == null || isNaN(ms)) return "";
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+  // <input type=date> value -> epoch ms (UTC midnight); "" -> null.
+  function dateInputToMs(v) {
+    if (!v) return null;
+    var ms = Date.parse(v);
+    return isNaN(ms) ? null : ms;
+  }
+  // ms -> compact human date for display; "" when absent.
+  function fmtDate(ms) {
+    if (ms == null || isNaN(ms)) return "";
+    var d = new Date(ms);
+    var months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // UTC getters so the label matches the stored UTC-midnight day.
+    return months[d.getUTCMonth()] + " " + d.getUTCDate();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error / banner handling
+  // ---------------------------------------------------------------------------
+  function showBanner(message) {
+    el.banner.textContent = message;
+    el.banner.classList.add("show");
+  }
+
+  function clearBanner() {
+    el.banner.textContent = "";
+    el.banner.classList.remove("show");
+  }
+
+  function handleError(e) {
+    if (e && e.status === 401) {
+      showBanner("Session expired — reload the page to sign in again.");
+      return;
+    }
+    showBanner((e && e.message) || "Something went wrong.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOM helpers (textContent-only; never innerHTML with user data)
+  // ---------------------------------------------------------------------------
+  function elem(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function tagChips(container, tags) {
+    (tags || []).forEach(function (t) {
+      container.appendChild(elem("span", "tag", t));
+    });
+  }
+
+  // Build id -> task and columnId -> column-name lookups for the current project.
+  function taskIndex(project) {
+    var byId = {};
+    (project.tasks || []).forEach(function (t) {
+      byId[t.id] = t;
+    });
+    return byId;
+  }
+
+  function columnNameIndex(project) {
+    var byId = {};
+    (project.columns || []).forEach(function (c) {
+      byId[c.id] = c.name;
+    });
+    return byId;
+  }
+
+  function sprintNameIndex(project) {
+    var byId = {};
+    (project.sprints || []).forEach(function (s) {
+      byId[s.id] = s.name;
+    });
+    return byId;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+  async function loadProjects(preferId) {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/projects");
+    } catch (e) {
+      handleError(e);
+      renderContent();
+      return;
+    }
+    state.projects = (data && data.projects) || [];
+    if (state.projects.length === 0) {
+      state.projectId = null;
+      state.project = null;
+      renderProjectSelect();
+      renderProjectTags();
+      renderContent();
+      return;
+    }
+    var ids = state.projects.map(function (p) {
+      return p.id;
+    });
+    var next =
+      (preferId && ids.indexOf(preferId) >= 0 && preferId) ||
+      (state.projectId && ids.indexOf(state.projectId) >= 0 && state.projectId) ||
+      state.projects[0].id;
+    state.projectId = next;
+    renderProjectSelect();
+    await loadProject(next);
+  }
+
+  async function loadProject(projectId) {
+    clearBanner();
+    try {
+      state.project = await api(
+        "GET",
+        "/projects/" + encodeURIComponent(projectId),
+      );
+      state.projectId = projectId;
+    } catch (e) {
+      state.project = null;
+      handleError(e);
+    }
+    renderProjectTags();
+    renderContent();
+  }
+
+  // Adopt a project object returned from a write, keeping local rev in sync.
+  function adoptProject(project) {
+    if (!project) return;
+    state.project = project;
+    state.projectId = project.id;
+    renderProjectTags();
+    renderContent();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------------------------------
+  async function createProject(name, tags) {
+    var project = await api("POST", "/projects", { name: name, tags: tags });
+    await loadProjects(project.id);
+  }
+
+  async function deleteProject(projectId) {
+    await api("DELETE", "/projects/" + encodeURIComponent(projectId));
+    if (state.projectId === projectId) {
+      state.projectId = null;
+      state.project = null;
+    }
+    await loadProjects();
+  }
+
+  async function addTask(columnId, title) {
+    var project = state.project;
+    if (!project) return;
+    await api("POST", "/projects/" + encodeURIComponent(project.id) + "/tasks", {
+      title: title,
+      columnId: columnId,
+    });
+    await loadProject(project.id); // returns the task — refetch to re-render
+  }
+
+  // patch: any subset of task fields. `projectId` is injected here. Send
+  // explicit null (not undefined) to clear a date or the sprint.
+  async function updateTask(taskId, patch) {
+    var project = state.project;
+    if (!project) return;
+    patch.projectId = project.id;
+    await api("PATCH", "/tasks/" + encodeURIComponent(taskId), patch);
+    await loadProject(project.id);
+  }
+
+  async function deleteTask(taskId) {
+    var project = state.project;
+    if (!project) return;
+    await api(
+      "DELETE",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "?projectId=" +
+        encodeURIComponent(project.id),
+    );
+    await loadProject(project.id);
+  }
+
+  // Move a task to the END of the target column. rev-guarded: on 409 stale,
+  // adopt the fresh project the server returned and retry ONCE.
+  async function moveTask(taskId, toColumnId) {
+    var project = state.project;
+    if (!project) return;
+
+    function attempt(rev, targetColId, fromProject) {
+      var target = null;
+      for (var i = 0; i < fromProject.columns.length; i++) {
+        if (fromProject.columns[i].id === targetColId)
+          target = fromProject.columns[i];
+      }
+      var toIndex = target ? target.taskIds.length : 0;
+      return api("POST", "/tasks/" + encodeURIComponent(taskId) + "/move", {
+        projectId: fromProject.id,
+        toColumnId: targetColId,
+        toIndex: toIndex,
+        rev: rev,
+      });
+    }
+
+    try {
+      var updated = await attempt(project.rev, toColumnId, project);
+      adoptProject(updated);
+    } catch (e) {
+      if (e && e.status === 422) {
+        // WIP exceeded or transition forbidden — show error, do NOT retry.
+        handleError(e);
+        return;
+      }
+      if (e && e.status === 409 && e.body && e.body.project) {
+        var fresh = e.body.project;
+        state.project = fresh;
+        try {
+          var retried = await attempt(fresh.rev, toColumnId, fresh);
+          adoptProject(retried);
+        } catch (e2) {
+          if (e2 && e2.status === 422) {
+            handleError(e2);
+            adoptProject(fresh);
+            return;
+          }
+          handleError(e2);
+          adoptProject(fresh); // re-render with the server's fresh project
+        }
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  async function createSprint(name, startDate, endDate) {
+    var project = state.project;
+    if (!project) return;
+    var body = { name: name };
+    if (startDate != null) body.startDate = startDate;
+    if (endDate != null) body.endDate = endDate;
+    await api(
+      "POST",
+      "/projects/" + encodeURIComponent(project.id) + "/sprints",
+      body,
+    );
+    await loadProject(project.id);
+  }
+
+  async function deleteSprint(sprintId) {
+    var project = state.project;
+    if (!project) return;
+    await api(
+      "DELETE",
+      "/sprints/" +
+        encodeURIComponent(sprintId) +
+        "?projectId=" +
+        encodeURIComponent(project.id),
+    );
+    await loadProject(project.id);
+  }
+
+  // Field edit (LWW, NOT rev-guarded): move a task between sprint lanes.
+  // sprintId "" / null -> backlog (send explicit null).
+  async function setTaskSprint(taskId, sprintId) {
+    await updateTask(taskId, { sprintId: sprintId || null });
+  }
+
+  // ---- Column mutations ----
+  async function createColumn(name) {
+    var project = state.project;
+    if (!project) return;
+    await api("POST", "/projects/" + encodeURIComponent(project.id) + "/columns", {
+      name: name,
+    });
+    await loadProject(project.id);
+  }
+
+  async function updateColumn(colId, patch) {
+    var project = state.project;
+    if (!project) return;
+    patch.projectId = project.id;
+    await api("PATCH", "/columns/" + encodeURIComponent(colId), patch);
+    await loadProject(project.id);
+  }
+
+  // rev-guarded column move with 409-retry-once (mirrors moveTask pattern).
+  async function moveColumn(colId, toIndex) {
+    var project = state.project;
+    if (!project) return;
+
+    function attempt(rev) {
+      return api("POST", "/columns/" + encodeURIComponent(colId) + "/move", {
+        projectId: project.id,
+        toIndex: toIndex,
+        rev: rev,
+      });
+    }
+
+    try {
+      var updated = await attempt(project.rev);
+      adoptProject(updated);
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.project) {
+        var fresh = e.body.project;
+        state.project = fresh;
+        try {
+          var retried = await attempt(fresh.rev);
+          adoptProject(retried);
+        } catch (e2) {
+          handleError(e2);
+          adoptProject(fresh);
+        }
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  async function deleteColumn(colId, mode, toColumnId) {
+    var project = state.project;
+    if (!project) return;
+    var qs = "?projectId=" + encodeURIComponent(project.id);
+    if (mode) qs += "&mode=" + encodeURIComponent(mode);
+    if (toColumnId) qs += "&toColumnId=" + encodeURIComponent(toColumnId);
+    await api("DELETE", "/columns/" + encodeURIComponent(colId) + qs);
+    await loadProject(project.id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Collaboration helpers (Phase 4b: comments, attachments, activity, watchers, notifications)
+  // ---------------------------------------------------------------------------
+
+  // Relative time formatter (pure, no deps).
+  function relativeTime(ms) {
+    if (ms == null) return "";
+    var diff = Date.now() - ms;
+    if (diff < 0) diff = 0;
+    var sec = Math.floor(diff / 1000);
+    if (sec < 60) return "just now";
+    var min = Math.floor(sec / 60);
+    if (min < 60) return min + "m ago";
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return hr + "h ago";
+    var day = Math.floor(hr / 24);
+    if (day < 30) return day + "d ago";
+    // Fallback to absolute date.
+    return fmtDate(ms);
+  }
+
+  // Human-readable file size.
+  function fmtSize(bytes) {
+    if (bytes == null || isNaN(bytes)) return "";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  // Raw-body upload for attachments (NOT using the JSON api() helper).
+  async function uploadAttachment(taskId, projectId, file) {
+    var url =
+      "/api/pm/tasks/" +
+      encodeURIComponent(taskId) +
+      "/attachments?projectId=" +
+      encodeURIComponent(projectId);
+    var res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": file.type || "application/octet-stream",
+          "x-filename": file.name || "upload",
+        },
+        body: file,
+      });
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try { data = JSON.parse(text); } catch (e) { data = null; }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Upload failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ---- Notification state ----
+  var notifState = {
+    notifications: [],
+    unreadCount: 0,
+    dropdownOpen: false,
+    pollTimer: null,
+  };
+
+  async function fetchNotifications(unreadOnly) {
+    try {
+      var qs = unreadOnly ? "?unread=1" : "";
+      return await api("GET", "/notifications" + qs);
+    } catch (e) {
+      // Silently swallow — polling should never disrupt the UI.
+      return null;
+    }
+  }
+
+  async function refreshNotifCount() {
+    var data = await fetchNotifications(true);
+    if (data && Array.isArray(data.notifications)) {
+      notifState.unreadCount = data.notifications.length;
+    }
+    renderNotifBadge();
+  }
+
+  function renderNotifBadge() {
+    // Remove existing badge if any.
+    var existing = el.notifBell.querySelector(".notif-badge");
+    if (existing) existing.remove();
+    if (notifState.unreadCount > 0) {
+      var badge = elem("span", "notif-badge", String(notifState.unreadCount));
+      el.notifBell.appendChild(badge);
+    }
+    el.notifBell.setAttribute(
+      "aria-label",
+      "Notifications (" + notifState.unreadCount + " unread)",
+    );
+  }
+
+  async function openNotifDropdown() {
+    notifState.dropdownOpen = true;
+    el.notifDropdown.classList.add("show");
+    // Fetch all notifications (not just unread) for the dropdown list.
+    el.notifDropdown.textContent = "";
+    var loading = elem("div", "notif-empty", "Loading...");
+    el.notifDropdown.appendChild(loading);
+
+    var data = await fetchNotifications(false);
+    el.notifDropdown.textContent = "";
+
+    // Header with "Mark all read" button.
+    var header = elem("div", "notif-header");
+    header.appendChild(elem("span", "notif-header-title", "Notifications"));
+    var markAllBtn = elem("button", "btn btn-ghost", "Mark all read");
+    markAllBtn.type = "button";
+    markAllBtn.addEventListener("click", function () {
+      markAllBtn.disabled = true;
+      api("POST", "/notifications/read", { all: true })
+        .then(function () {
+          notifState.unreadCount = 0;
+          renderNotifBadge();
+          // Re-render the dropdown items as read.
+          openNotifDropdown();
+        })
+        .catch(handleError)
+        .finally(function () {
+          markAllBtn.disabled = false;
+        });
+    });
+    header.appendChild(markAllBtn);
+    el.notifDropdown.appendChild(header);
+
+    if (!data || !data.notifications || data.notifications.length === 0) {
+      el.notifDropdown.appendChild(
+        elem("div", "notif-empty", "No notifications yet."),
+      );
+      return;
+    }
+
+    var items = data.notifications.slice(0, 50);
+    items.forEach(function (n) {
+      var btn = elem("button", "notif-item" + (n.readAt == null ? " unread" : ""));
+      btn.type = "button";
+      var summary = elem("span", null, n.summary || n.event || "Notification");
+      btn.appendChild(summary);
+      var time = elem("span", "notif-time", relativeTime(n.createdAt));
+      btn.appendChild(time);
+      btn.addEventListener("click", function () {
+        closeNotifDropdown();
+        // Mark this notification read.
+        if (n.readAt == null) {
+          api("POST", "/notifications/read", { ids: [n.id] })
+            .then(refreshNotifCount)
+            .catch(function () {});
+        }
+        // Navigate to the task's project and open the edit modal.
+        if (n.projectId && n.taskId) {
+          navigateToTask(n.projectId, n.taskId);
+        }
+      });
+      el.notifDropdown.appendChild(btn);
+    });
+  }
+
+  function closeNotifDropdown() {
+    notifState.dropdownOpen = false;
+    el.notifDropdown.classList.remove("show");
+  }
+
+  // Navigate to a specific project + task (used by notification click).
+  function navigateToTask(projectId, taskId) {
+    if (state.projectId === projectId && state.project) {
+      // Already on the right project — find the task and open the modal.
+      var task = (state.project.tasks || []).find(function (t) {
+        return t.id === taskId;
+      });
+      if (task) openEditTask(task);
+      return;
+    }
+    // Need to switch projects first.
+    state.projectId = projectId;
+    renderProjectSelect();
+    loadProject(projectId).then(function () {
+      if (!state.project) return;
+      var task = (state.project.tasks || []).find(function (t) {
+        return t.id === taskId;
+      });
+      if (task) openEditTask(task);
+    });
+  }
+
+  // Wire the notification bell.
+  el.notifBell.addEventListener("click", function (e) {
+    e.stopPropagation();
+    if (notifState.dropdownOpen) {
+      closeNotifDropdown();
+    } else {
+      openNotifDropdown();
+    }
+  });
+
+  // Close notification dropdown when clicking outside.
+  document.addEventListener("click", function (e) {
+    if (notifState.dropdownOpen && !el.notifWrap.contains(e.target)) {
+      closeNotifDropdown();
+    }
+  });
+
+  // Start notification polling (every 20s).
+  function startNotifPolling() {
+    refreshNotifCount();
+    notifState.pollTimer = setInterval(refreshNotifCount, 20000);
+  }
+
+  // ---- Collaboration section rendering in the edit-task modal ----
+
+  // Render watcher chips.
+  function renderWatchers(watchers) {
+    el.etWatchersChips.textContent = "";
+    if (!watchers || watchers.length === 0) {
+      el.etWatchersChips.appendChild(elem("span", "muted", "No watchers."));
+      el.etWatchersCount.textContent = "";
+      return;
+    }
+    el.etWatchersCount.textContent = "(" + watchers.length + ")";
+    watchers.forEach(function (w) {
+      el.etWatchersChips.appendChild(elem("span", "watcher-chip", w));
+    });
+  }
+
+  // Render comments list.
+  function renderComments(comments, projectId) {
+    el.etCommentList.textContent = "";
+    el.etCommentsCount.textContent =
+      comments.length > 0 ? "(" + comments.length + ")" : "";
+    if (comments.length === 0) {
+      el.etCommentList.appendChild(elem("div", "muted", "No comments yet."));
+      return;
+    }
+    comments.forEach(function (c) {
+      var item = elem("div", "comment-item");
+      var meta = elem("div", "comment-meta");
+      meta.appendChild(elem("span", "comment-author", c.author || "unknown"));
+      var timeStr = relativeTime(c.updatedAt || c.createdAt);
+      if (c.updatedAt) timeStr += " (edited)";
+      meta.appendChild(elem("span", "comment-time", timeStr));
+
+      // Delete button.
+      var delBtn = elem("button", "comment-delete-btn", "x");
+      delBtn.type = "button";
+      delBtn.title = "Delete comment";
+      delBtn.setAttribute("aria-label", "Delete comment");
+      delBtn.addEventListener("click", function () {
+        if (!window.confirm("Delete this comment?")) return;
+        delBtn.disabled = true;
+        api(
+          "DELETE",
+          "/comments/" +
+            encodeURIComponent(c.id) +
+            "?projectId=" +
+            encodeURIComponent(projectId),
+        )
+          .then(function () {
+            // Reload comments.
+            loadCommentsForTask(state.editingTaskId, projectId);
+          })
+          .catch(handleError)
+          .finally(function () {
+            delBtn.disabled = false;
+          });
+      });
+      meta.appendChild(delBtn);
+
+      item.appendChild(meta);
+      item.appendChild(elem("div", "comment-body", c.body));
+      el.etCommentList.appendChild(item);
+    });
+    // Scroll to bottom (newest comment visible).
+    el.etCommentList.scrollTop = el.etCommentList.scrollHeight;
+  }
+
+  function loadCommentsForTask(taskId, projectId) {
+    return api(
+      "GET",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "/comments?projectId=" +
+        encodeURIComponent(projectId),
+    ).then(function (data) {
+      renderComments((data && data.comments) || [], projectId);
+    });
+  }
+
+  // Render attachments list.
+  function renderAttachments(attachments, projectId) {
+    el.etAttList.textContent = "";
+    el.etAttachmentsCount.textContent =
+      attachments.length > 0 ? "(" + attachments.length + ")" : "";
+    if (attachments.length === 0) {
+      el.etAttList.appendChild(elem("div", "muted", "No attachments."));
+      return;
+    }
+    attachments.forEach(function (a) {
+      var item = elem("div", "att-item");
+      // Download link.
+      var link = document.createElement("a");
+      link.className = "att-name";
+      link.textContent = a.filename;
+      link.href =
+        "/api/pm/attachments/" +
+        encodeURIComponent(a.id) +
+        "?projectId=" +
+        encodeURIComponent(projectId);
+      link.setAttribute("download", "");
+      item.appendChild(link);
+      item.appendChild(elem("span", "att-size", fmtSize(a.size)));
+      if (a.actor) {
+        item.appendChild(elem("span", "att-actor", a.actor));
+      }
+
+      // Delete button.
+      var delBtn = elem("button", "att-delete-btn", "x");
+      delBtn.type = "button";
+      delBtn.title = "Delete attachment";
+      delBtn.setAttribute("aria-label", "Delete attachment " + a.filename);
+      delBtn.addEventListener("click", function () {
+        if (!window.confirm('Delete attachment "' + a.filename + '"?')) return;
+        delBtn.disabled = true;
+        api(
+          "DELETE",
+          "/attachments/" +
+            encodeURIComponent(a.id) +
+            "?projectId=" +
+            encodeURIComponent(projectId),
+        )
+          .then(function () {
+            return loadAttachmentsForTask(state.editingTaskId, projectId);
+          })
+          .then(function () {
+            return loadActivityForTask(projectId, state.editingTaskId).catch(function () {});
+          })
+          .catch(handleError)
+          .finally(function () {
+            delBtn.disabled = false;
+          });
+      });
+      item.appendChild(delBtn);
+      el.etAttList.appendChild(item);
+    });
+  }
+
+  function loadAttachmentsForTask(taskId, projectId) {
+    return api(
+      "GET",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "/attachments?projectId=" +
+        encodeURIComponent(projectId),
+    ).then(function (data) {
+      renderAttachments((data && data.attachments) || [], projectId);
+    });
+  }
+
+  // Render activity list (task-scoped: filter to target.id === task.id).
+  function renderActivity(activity, taskId) {
+    el.etActivityList.textContent = "";
+    // Filter to this task's activity.
+    var filtered = (activity || []).filter(function (a) {
+      return a.taskId === taskId || (a.target && a.target.id === taskId);
+    });
+    if (filtered.length === 0) {
+      el.etActivityList.appendChild(
+        elem("div", "muted", "No activity for this task."),
+      );
+      return;
+    }
+    filtered.forEach(function (a) {
+      var item = elem("div", "activity-item");
+      item.appendChild(elem("span", "activity-time", relativeTime(a.ts)));
+      item.appendChild(elem("span", "activity-actor", a.actor || ""));
+      item.appendChild(document.createTextNode(" "));
+      item.appendChild(
+        elem("span", "activity-verb", a.summary || a.verb || ""),
+      );
+      el.etActivityList.appendChild(item);
+    });
+  }
+
+  function loadActivityForTask(projectId, taskId) {
+    return api(
+      "GET",
+      "/projects/" +
+        encodeURIComponent(projectId) +
+        "/activity?limit=100",
+    ).then(function (data) {
+      renderActivity((data && data.activity) || [], taskId);
+    });
+  }
+
+  // ---- Comment post wiring ----
+  el.etCommentPost.addEventListener("click", function () {
+    var body = el.etCommentBody.value.trim();
+    if (!body) return;
+    var taskId = state.editingTaskId;
+    var project = state.project;
+    if (!taskId || !project) return;
+    el.etCommentPost.disabled = true;
+    api(
+      "POST",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "/comments?projectId=" +
+        encodeURIComponent(project.id),
+      { body: body },
+    )
+      .then(function () {
+        el.etCommentBody.value = "";
+        return loadCommentsForTask(taskId, project.id);
+      })
+      .then(function () {
+        return loadActivityForTask(project.id, taskId).catch(function () {});
+      })
+      .catch(handleError)
+      .finally(function () {
+        el.etCommentPost.disabled = false;
+      });
+  });
+
+  // ---- Attachment upload wiring ----
+  el.etAttUpload.addEventListener("click", function () {
+    var file = el.etAttFile.files && el.etAttFile.files[0];
+    if (!file) {
+      showBanner("Select a file to upload.");
+      return;
+    }
+    var taskId = state.editingTaskId;
+    var project = state.project;
+    if (!taskId || !project) return;
+    el.etAttUpload.disabled = true;
+    uploadAttachment(taskId, project.id, file)
+      .then(function () {
+        el.etAttFile.value = "";
+        return loadAttachmentsForTask(taskId, project.id);
+      })
+      .then(function () {
+        return loadActivityForTask(project.id, taskId).catch(function () {});
+      })
+      .catch(handleError)
+      .finally(function () {
+        el.etAttUpload.disabled = false;
+      });
+  });
+
+  // ---- Watch / Unwatch wiring ----
+  el.etWatchBtn.addEventListener("click", function () {
+    var taskId = state.editingTaskId;
+    var project = state.project;
+    if (!taskId || !project) return;
+    el.etWatchBtn.disabled = true;
+    api(
+      "POST",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "/watch?projectId=" +
+        encodeURIComponent(project.id),
+    )
+      .then(function (task) {
+        if (task && task.watchers) {
+          renderWatchers(task.watchers);
+        }
+        return loadActivityForTask(project.id, taskId).catch(function () {});
+      })
+      .catch(handleError)
+      .finally(function () {
+        el.etWatchBtn.disabled = false;
+      });
+  });
+
+  el.etUnwatchBtn.addEventListener("click", function () {
+    var taskId = state.editingTaskId;
+    var project = state.project;
+    if (!taskId || !project) return;
+    el.etUnwatchBtn.disabled = true;
+    api(
+      "POST",
+      "/tasks/" +
+        encodeURIComponent(taskId) +
+        "/unwatch?projectId=" +
+        encodeURIComponent(project.id),
+    )
+      .then(function (task) {
+        if (task && task.watchers) {
+          renderWatchers(task.watchers);
+        }
+        return loadActivityForTask(project.id, taskId).catch(function () {});
+      })
+      .catch(handleError)
+      .finally(function () {
+        el.etUnwatchBtn.disabled = false;
+      });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Top-bar rendering
+  // ---------------------------------------------------------------------------
+  function renderProjectSelect() {
+    var sel = el.projectSelect;
+    sel.textContent = "";
+    if (state.projects.length === 0) {
+      var opt = elem("option", null, "No projects");
+      opt.value = "";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      el.deleteProjectBtn.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    el.deleteProjectBtn.disabled = false;
+    state.projects.forEach(function (p) {
+      var opt = elem("option", null, p.name);
+      opt.value = p.id;
+      if (p.id === state.projectId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderProjectTags() {
+    el.projectTags.textContent = "";
+    var project = state.project;
+    if (project && project.tags) tagChips(el.projectTags, project.tags);
+  }
+
+  function renderViewSwitch() {
+    var btns = el.viewSwitch.querySelectorAll("button[data-view]");
+    btns.forEach(function (b) {
+      if (b.getAttribute("data-view") === state.view) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Content rendering (switches on state.view)
+  // ---------------------------------------------------------------------------
+  function renderContent() {
+    renderViewSwitch();
+    var root = el.content;
+    root.textContent = "";
+
+    if (state.projects.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No projects yet"));
+      empty.appendChild(
+        elem("div", null, 'Create your first project with "New project" above.'),
+      );
+      root.appendChild(empty);
+      return;
+    }
+
+    if (!state.project) {
+      var loading = elem("div", "placeholder");
+      loading.appendChild(elem("div", null, "Loading project…"));
+      root.appendChild(loading);
+      return;
+    }
+
+    if (state.view === "board") root.appendChild(renderBoard(state.project));
+    else if (state.view === "list") root.appendChild(renderList(state.project));
+    else if (state.view === "sprints")
+      root.appendChild(renderSprints(state.project));
+    else if (state.view === "timeline")
+      root.appendChild(renderTimeline(state.project));
+  }
+
+  // ---- Board view -----------------------------------------------------------
+  function renderBoard(project) {
+    var byId = taskIndex(project);
+    var boardEl = elem("div", "board");
+    project.columns.forEach(function (col, colIdx) {
+      boardEl.appendChild(renderColumn(project, col, byId, colIdx));
+    });
+    boardEl.appendChild(renderAddColumn());
+    return boardEl;
+  }
+
+  function renderAddColumn() {
+    var wrap = elem("div", "add-column");
+
+    var trigger = elem("button", "btn", "+ Add column");
+    trigger.type = "button";
+
+    var form = elem("form", "add-column-form");
+    var input = elem("input", "field");
+    input.type = "text";
+    input.placeholder = "Column name";
+    input.setAttribute("autocomplete", "off");
+    input.required = true;
+    var rowEnd = elem("div", "row-end");
+    var cancel = elem("button", "btn", "Cancel");
+    cancel.type = "button";
+    var add = elem("button", "btn btn-primary", "Add");
+    add.type = "submit";
+    rowEnd.appendChild(cancel);
+    rowEnd.appendChild(add);
+    form.appendChild(input);
+    form.appendChild(rowEnd);
+
+    function open() {
+      trigger.style.display = "none";
+      form.classList.add("show");
+      input.focus();
+    }
+    function close() {
+      form.classList.remove("show");
+      trigger.style.display = "";
+      input.value = "";
+    }
+
+    trigger.addEventListener("click", open);
+    cancel.addEventListener("click", close);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var name = input.value.trim();
+      if (!name) return;
+      add.disabled = true;
+      close();
+      createColumn(name)
+        .catch(handleError)
+        .finally(function () {
+          add.disabled = false;
+        });
+    });
+
+    wrap.appendChild(trigger);
+    wrap.appendChild(form);
+    return wrap;
+  }
+
+  function renderColumn(project, col, byId, colIdx) {
+    var colEl = elem("div", "column");
+
+    var head = elem("div", "column-head");
+    head.appendChild(elem("span", "column-name", col.name));
+
+    // WIP badge: show N/limit when limit set, just N otherwise.
+    var wipText;
+    if (col.wipLimit != null) {
+      wipText = col.taskIds.length + "/" + col.wipLimit;
+    } else {
+      wipText = String(col.taskIds.length);
+    }
+    var wipBadge = elem("span", "wip-badge", wipText);
+    if (col.wipLimit != null && col.taskIds.length >= col.wipLimit) {
+      wipBadge.classList.add("at-limit");
+    }
+    wipBadge.style.marginLeft = "auto";
+    head.appendChild(wipBadge);
+
+    // Column menu (triple-dot).
+    var menuWrap = elem("span", "col-menu-wrap");
+    var menuBtn = elem("button", "col-menu-btn", "⋯");
+    menuBtn.type = "button";
+    menuBtn.setAttribute("aria-label", "Column options for " + col.name);
+    menuBtn.setAttribute("aria-haspopup", "menu");
+    var menu = elem("div", "col-menu");
+    menu.setAttribute("role", "menu");
+
+    // Rename
+    var renameItem = elem("button", "col-menu-item", "Rename");
+    renameItem.type = "button";
+    renameItem.setAttribute("role", "menuitem");
+    renameItem.addEventListener("click", function () {
+      closeColMenu(menu);
+      var newName = window.prompt("Rename column:", col.name);
+      if (newName && newName.trim() && newName.trim() !== col.name) {
+        updateColumn(col.id, { name: newName.trim() }).catch(handleError);
+      }
+    });
+    menu.appendChild(renameItem);
+
+    // Set WIP limit
+    var wipItem = elem("button", "col-menu-item", "Set WIP limit");
+    wipItem.type = "button";
+    wipItem.setAttribute("role", "menuitem");
+    wipItem.addEventListener("click", function () {
+      closeColMenu(menu);
+      var current = col.wipLimit != null ? String(col.wipLimit) : "";
+      var raw = window.prompt(
+        "WIP limit (positive number, or leave empty for no limit):",
+        current,
+      );
+      if (raw === null) return; // cancelled
+      var val = raw.trim();
+      if (val === "") {
+        updateColumn(col.id, { wipLimit: null }).catch(handleError);
+      } else {
+        var n = parseInt(val, 10);
+        if (!isNaN(n) && n >= 1) {
+          updateColumn(col.id, { wipLimit: n }).catch(handleError);
+        } else {
+          showBanner("WIP limit must be a positive number or empty for no limit.");
+        }
+      }
+    });
+    menu.appendChild(wipItem);
+
+    // Set allowed transitions
+    var transItem = elem("button", "col-menu-item", "Allowed transitions");
+    transItem.type = "button";
+    transItem.setAttribute("role", "menuitem");
+    transItem.addEventListener("click", function () {
+      closeColMenu(menu);
+      openTransitionsDialog(project, col);
+    });
+    menu.appendChild(transItem);
+
+    var sep1 = elem("div", "col-menu-sep");
+    menu.appendChild(sep1);
+
+    // Move left / Move right
+    if (colIdx > 0) {
+      var moveLeftItem = elem("button", "col-menu-item", "Move left");
+      moveLeftItem.type = "button";
+      moveLeftItem.setAttribute("role", "menuitem");
+      moveLeftItem.addEventListener("click", function () {
+        closeColMenu(menu);
+        moveColumn(col.id, colIdx - 1).catch(handleError);
+      });
+      menu.appendChild(moveLeftItem);
+    }
+    if (colIdx < project.columns.length - 1) {
+      var moveRightItem = elem("button", "col-menu-item", "Move right");
+      moveRightItem.type = "button";
+      moveRightItem.setAttribute("role", "menuitem");
+      moveRightItem.addEventListener("click", function () {
+        closeColMenu(menu);
+        moveColumn(col.id, colIdx + 1).catch(handleError);
+      });
+      menu.appendChild(moveRightItem);
+    }
+
+    var sep2 = elem("div", "col-menu-sep");
+    menu.appendChild(sep2);
+
+    // Delete column
+    var deleteItem = elem("button", "col-menu-item danger", "Delete column");
+    deleteItem.type = "button";
+    deleteItem.setAttribute("role", "menuitem");
+    deleteItem.addEventListener("click", function () {
+      closeColMenu(menu);
+      handleDeleteColumn(project, col);
+    });
+    menu.appendChild(deleteItem);
+
+    menuBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var isOpen = menu.classList.contains("show");
+      closeAllColMenus();
+      if (!isOpen) menu.classList.add("show");
+    });
+
+    menuWrap.appendChild(menuBtn);
+    menuWrap.appendChild(menu);
+    head.appendChild(menuWrap);
+    colEl.appendChild(head);
+
+    var cardsEl = elem("div", "cards");
+    col.taskIds.forEach(function (taskId) {
+      var task = byId[taskId];
+      if (task) cardsEl.appendChild(renderCard(project, col, task, byId));
+    });
+    colEl.appendChild(cardsEl);
+
+    colEl.appendChild(renderAddTask(col));
+    return colEl;
+  }
+
+  function closeColMenu(menu) {
+    menu.classList.remove("show");
+  }
+  function closeAllColMenus() {
+    var menus = document.querySelectorAll(".col-menu.show");
+    menus.forEach(function (m) {
+      m.classList.remove("show");
+    });
+  }
+  // Close column menus when clicking outside.
+  document.addEventListener("click", function () {
+    closeAllColMenus();
+  });
+
+  // Transitions dialog: shows a list of other columns with checkboxes.
+  function openTransitionsDialog(project, col) {
+    var others = project.columns.filter(function (c) {
+      return c.id !== col.id;
+    });
+    var isRestricted = col.transitions != null;
+    var selected = isRestricted ? col.transitions.slice() : [];
+
+    // Build a simple modal-like confirmation using prompt/confirm is too limited.
+    // Instead, build a temporary overlay.
+    var overlay = elem("div", "overlay show");
+    overlay.style.zIndex = "30";
+    var modal = elem("div", "modal narrow");
+    modal.appendChild(elem("h3", null, "Allowed transitions from " + col.name));
+
+    // Toggle: restrict or unrestricted.
+    var toggleWrap = elem("div");
+    toggleWrap.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:8px;";
+    var toggleLabel = elem("label", null, "Restrict destinations");
+    toggleLabel.style.cssText = "font-size:13px;color:var(--body);cursor:pointer;";
+    var toggleCb = elem("input");
+    toggleCb.type = "checkbox";
+    toggleCb.checked = isRestricted;
+    toggleCb.id = "trans-toggle-" + col.id;
+    toggleLabel.setAttribute("for", toggleCb.id);
+    toggleWrap.appendChild(toggleCb);
+    toggleWrap.appendChild(toggleLabel);
+    modal.appendChild(toggleWrap);
+
+    var checklistWrap = elem("div");
+    checklistWrap.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+    if (!isRestricted) checklistWrap.style.display = "none";
+
+    others.forEach(function (c) {
+      var row = elem("label");
+      row.style.cssText =
+        "display:flex;align-items:center;gap:6px;font-size:13px;color:var(--body);cursor:pointer;padding:4px 0;";
+      var cb = elem("input");
+      cb.type = "checkbox";
+      cb.value = c.id;
+      cb.checked = selected.indexOf(c.id) >= 0;
+      row.appendChild(cb);
+      var txt = document.createTextNode(c.name);
+      row.appendChild(txt);
+      checklistWrap.appendChild(row);
+    });
+    modal.appendChild(checklistWrap);
+
+    toggleCb.addEventListener("change", function () {
+      checklistWrap.style.display = toggleCb.checked ? "flex" : "none";
+    });
+
+    var rowEnd = elem("div", "row-end");
+    var cancelBtn = elem("button", "btn", "Cancel");
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", function () {
+      document.body.removeChild(overlay);
+    });
+    var saveBtn = elem("button", "btn btn-primary", "Save");
+    saveBtn.type = "button";
+    saveBtn.addEventListener("click", function () {
+      var transitions = null;
+      if (toggleCb.checked) {
+        transitions = [];
+        var cbs = checklistWrap.querySelectorAll('input[type="checkbox"]');
+        cbs.forEach(function (cb) {
+          if (cb.checked) transitions.push(cb.value);
+        });
+      }
+      document.body.removeChild(overlay);
+      updateColumn(col.id, { transitions: transitions }).catch(handleError);
+    });
+    rowEnd.appendChild(cancelBtn);
+    rowEnd.appendChild(saveBtn);
+    modal.appendChild(rowEnd);
+
+    overlay.appendChild(modal);
+    overlay.addEventListener("mousedown", function (e) {
+      if (e.target === overlay) document.body.removeChild(overlay);
+    });
+    document.body.appendChild(overlay);
+  }
+
+  // Delete column handler: if empty, confirm and delete; if non-empty, offer relocate.
+  function handleDeleteColumn(project, col) {
+    if (project.columns.length <= 1) {
+      showBanner("Cannot delete the last column.");
+      return;
+    }
+    if (col.taskIds.length === 0) {
+      if (window.confirm('Delete empty column "' + col.name + '"?')) {
+        deleteColumn(col.id).catch(handleError);
+      }
+      return;
+    }
+    // Non-empty: offer relocate with a target selection dialog.
+    var others = project.columns.filter(function (c) {
+      return c.id !== col.id;
+    });
+    var overlay = elem("div", "overlay show");
+    overlay.style.zIndex = "30";
+    var modal = elem("div", "modal narrow");
+    modal.appendChild(
+      elem(
+        "h3",
+        null,
+        'Delete column "' + col.name + '" (' + col.taskIds.length + " tasks)",
+      ),
+    );
+    modal.appendChild(
+      elem("div", null, "Move its tasks to another column before deleting:"),
+    );
+
+    var sel = elem("select", "field");
+    sel.setAttribute("aria-label", "Target column for relocated tasks");
+    others.forEach(function (c) {
+      var opt = elem("option", null, c.name);
+      opt.value = c.id;
+      sel.appendChild(opt);
+    });
+    modal.appendChild(sel);
+
+    var rowEnd = elem("div", "row-end");
+    var cancelBtn = elem("button", "btn", "Cancel");
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", function () {
+      document.body.removeChild(overlay);
+    });
+    var delBtn = elem("button", "btn btn-primary", "Move & delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      var toId = sel.value;
+      document.body.removeChild(overlay);
+      deleteColumn(col.id, "relocate", toId).catch(handleError);
+    });
+    rowEnd.appendChild(cancelBtn);
+    rowEnd.appendChild(delBtn);
+    modal.appendChild(rowEnd);
+
+    overlay.appendChild(modal);
+    overlay.addEventListener("mousedown", function (e) {
+      if (e.target === overlay) document.body.removeChild(overlay);
+    });
+    document.body.appendChild(overlay);
+  }
+
+  function renderCard(project, col, task, byId) {
+    var cardEl = elem("div", "card");
+
+    // Top row: type badge, issue key, parent chip.
+    var topRow = elem("div", "card-top-row");
+    var taskType = task.type || "task";
+    var badge = elem("span", "type-badge type-" + taskType, TYPE_GLYPH[taskType] || "T");
+    badge.title = TYPE_LABEL[taskType] || "Task";
+    topRow.appendChild(badge);
+    if (task.key) {
+      topRow.appendChild(elem("span", "issue-key", task.key));
+    }
+    if (task.parentId && byId) {
+      var parent = byId[task.parentId];
+      if (parent && parent.key) {
+        topRow.appendChild(elem("span", "parent-chip", "↳ " + parent.key));
+      }
+    }
+    cardEl.appendChild(topRow);
+
+    cardEl.appendChild(elem("div", "card-title", task.title));
+
+    // Meta row: assignee, priority, due, deps count.
+    var meta = elem("div", "card-meta");
+    if (task.assignee) meta.appendChild(elem("span", "chip", task.assignee));
+    if (task.priority && PRIORITY_LABEL[task.priority]) {
+      meta.appendChild(
+        elem("span", "prio prio-" + task.priority, PRIORITY_LABEL[task.priority]),
+      );
+    }
+    if (task.dueDate != null) {
+      var overdue = task.dueDate < Date.now();
+      meta.appendChild(
+        elem("span", "due" + (overdue ? " overdue" : ""), "due " + fmtDate(task.dueDate)),
+      );
+    }
+    if (task.dependsOn && task.dependsOn.length) {
+      meta.appendChild(
+        elem("span", "deps-badge", "deps: " + task.dependsOn.length),
+      );
+    }
+    if (meta.childNodes.length) cardEl.appendChild(meta);
+
+    if (task.labels && task.labels.length) {
+      var labelsEl = elem("div", "card-tags");
+      tagChips(labelsEl, task.labels);
+      cardEl.appendChild(labelsEl);
+    }
+
+    var actions = elem("div", "card-actions");
+
+    // Move dropdown: filter by allowed transitions when set on source column.
+    var others = project.columns.filter(function (c) {
+      if (c.id === col.id) return false;
+      // When source column has transitions set, only show allowed destinations.
+      if (col.transitions != null) {
+        return col.transitions.indexOf(c.id) >= 0;
+      }
+      return true;
+    });
+    if (others.length) {
+      var moveSel = elem("select", "move-select");
+      moveSel.setAttribute("aria-label", "Move task");
+      var placeholder = elem("option", null, "Move ▾");
+      placeholder.value = "";
+      placeholder.selected = true;
+      moveSel.appendChild(placeholder);
+      others.forEach(function (c) {
+        var opt = elem("option", null, c.name);
+        opt.value = c.id;
+        moveSel.appendChild(opt);
+      });
+      moveSel.addEventListener("change", function () {
+        var toColumnId = moveSel.value;
+        moveSel.selectedIndex = 0;
+        if (toColumnId) void moveTask(task.id, toColumnId);
+      });
+      actions.appendChild(moveSel);
+    }
+
+    actions.appendChild(elem("span", "grow"));
+
+    var editBtn = elem("button", "btn btn-ghost", "Edit");
+    editBtn.type = "button";
+    editBtn.addEventListener("click", function () {
+      openEditTask(task);
+    });
+    actions.appendChild(editBtn);
+
+    var delBtn = elem("button", "btn btn-ghost btn-danger", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm('Delete task "' + task.title + '"?')) {
+        deleteTask(task.id).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+
+    cardEl.appendChild(actions);
+    return cardEl;
+  }
+
+  function renderAddTask(col) {
+    var wrap = elem("div", "add-card");
+
+    var trigger = elem("button", "add-card-trigger", "+ Add task");
+    trigger.type = "button";
+
+    var form = elem("form", "add-card-form");
+    var input = elem("input", "field");
+    input.type = "text";
+    input.placeholder = "Task title";
+    input.setAttribute("autocomplete", "off");
+    var rowEnd = elem("div", "row-end");
+    var cancel = elem("button", "btn", "Cancel");
+    cancel.type = "button";
+    var add = elem("button", "btn btn-primary", "Add");
+    add.type = "submit";
+    rowEnd.appendChild(cancel);
+    rowEnd.appendChild(add);
+    form.appendChild(input);
+    form.appendChild(rowEnd);
+
+    function open() {
+      trigger.style.display = "none";
+      form.classList.add("show");
+      input.focus();
+    }
+    function close() {
+      form.classList.remove("show");
+      trigger.style.display = "";
+      input.value = "";
+    }
+
+    trigger.addEventListener("click", open);
+    cancel.addEventListener("click", close);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var title = input.value.trim();
+      if (!title) return;
+      close();
+      addTask(col.id, title).catch(handleError);
+    });
+
+    wrap.appendChild(trigger);
+    wrap.appendChild(form);
+    return wrap;
+  }
+
+  // ---- List view ------------------------------------------------------------
+  var LIST_COLUMNS = [
+    { key: "issueKey", label: "Key" },
+    { key: "type", label: "Type" },
+    { key: "title", label: "Title" },
+    { key: "status", label: "Status" },
+    { key: "assignee", label: "Assignee" },
+    { key: "reporter", label: "Reporter" },
+    { key: "priority", label: "Priority" },
+    { key: "dueDate", label: "Due" },
+    { key: "sprint", label: "Sprint" },
+    { key: "deps", label: "#deps" },
+  ];
+
+  function renderList(project) {
+    var colName = columnNameIndex(project);
+    var sprName = sprintNameIndex(project);
+
+    // Build flattened rows with derived fields for sort/filter.
+    var rows = (project.tasks || []).map(function (t) {
+      return {
+        task: t,
+        issueKey: t.key || "",
+        type: t.type || "task",
+        title: t.title || "",
+        status: colName[t.columnId] || "",
+        assignee: t.assignee || "",
+        reporter: t.reporter || "",
+        priority: t.priority || "",
+        dueDate: t.dueDate != null ? t.dueDate : null,
+        sprint: t.sprintId ? sprName[t.sprintId] || "" : "",
+        deps: (t.dependsOn && t.dependsOn.length) || 0,
+      };
+    });
+
+    var filter = state.listFilter.trim().toLowerCase();
+    if (filter) {
+      rows = rows.filter(function (r) {
+        return (
+          r.title.toLowerCase().indexOf(filter) >= 0 ||
+          r.assignee.toLowerCase().indexOf(filter) >= 0 ||
+          r.reporter.toLowerCase().indexOf(filter) >= 0 ||
+          r.status.toLowerCase().indexOf(filter) >= 0 ||
+          r.sprint.toLowerCase().indexOf(filter) >= 0 ||
+          r.issueKey.toLowerCase().indexOf(filter) >= 0 ||
+          r.type.toLowerCase().indexOf(filter) >= 0
+        );
+      });
+    }
+
+    var sort = state.listSort;
+    rows.sort(function (a, b) {
+      var av, bv;
+      if (sort.key === "priority") {
+        av = a.priority ? PRIORITY_RANK[a.priority] : -1;
+        bv = b.priority ? PRIORITY_RANK[b.priority] : -1;
+      } else if (sort.key === "dueDate") {
+        av = a.dueDate != null ? a.dueDate : Infinity;
+        bv = b.dueDate != null ? b.dueDate : Infinity;
+      } else if (sort.key === "deps") {
+        av = a.deps;
+        bv = b.deps;
+      } else {
+        av = String(a[sort.key]).toLowerCase();
+        bv = String(b[sort.key]).toLowerCase();
+      }
+      if (av < bv) return -1 * sort.dir;
+      if (av > bv) return 1 * sort.dir;
+      return 0;
+    });
+
+    var wrap = elem("div", "list-wrap");
+
+    var toolbar = elem("div", "list-toolbar");
+    var filterInput = elem("input", "field");
+    filterInput.type = "text";
+    filterInput.placeholder = "Filter tasks…";
+    filterInput.value = state.listFilter;
+    filterInput.style.maxWidth = "260px";
+    filterInput.setAttribute("autocomplete", "off");
+    filterInput.addEventListener("input", function () {
+      state.listFilter = filterInput.value;
+      renderContent();
+      // Restore focus + caret after re-render.
+      var again = el.content.querySelector(".list-toolbar .field");
+      if (again) {
+        again.focus();
+        var len = again.value.length;
+        again.setSelectionRange(len, len);
+      }
+    });
+    toolbar.appendChild(filterInput);
+    var count = elem("span", "muted", rows.length + " task" + (rows.length === 1 ? "" : "s"));
+    toolbar.appendChild(count);
+    wrap.appendChild(toolbar);
+
+    var scroll = elem("div", "list-scroll");
+    var table = elem("table");
+    var thead = elem("thead");
+    var htr = elem("tr");
+    LIST_COLUMNS.forEach(function (c) {
+      var th = elem("th", null, c.label);
+      if (sort.key === c.key) {
+        th.appendChild(elem("span", "arrow", sort.dir > 0 ? "▲" : "▼"));
+      }
+      th.addEventListener("click", function () {
+        if (state.listSort.key === c.key) state.listSort.dir *= -1;
+        else state.listSort = { key: c.key, dir: 1 };
+        renderContent();
+      });
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+
+    var tbody = elem("tbody");
+    if (rows.length === 0) {
+      var tr = elem("tr");
+      var td = elem("td", "muted", "No tasks match.");
+      td.setAttribute("colspan", String(LIST_COLUMNS.length));
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    } else {
+      rows.forEach(function (r) {
+        var tr = elem("tr");
+        // Key column (monospace).
+        var keyTd = elem("td");
+        if (r.issueKey) {
+          keyTd.appendChild(elem("span", "issue-key", r.issueKey));
+        } else {
+          keyTd.textContent = "—";
+        }
+        tr.appendChild(keyTd);
+        // Type column (badge).
+        var typeTd = elem("td");
+        var typeBadge = elem("span", "type-badge type-" + r.type, TYPE_GLYPH[r.type] || "T");
+        typeBadge.title = TYPE_LABEL[r.type] || "Task";
+        typeTd.appendChild(typeBadge);
+        tr.appendChild(typeTd);
+        tr.appendChild(elem("td", null, r.title));
+        tr.appendChild(elem("td", null, r.status || "—"));
+        tr.appendChild(elem("td", null, r.assignee || "—"));
+        tr.appendChild(elem("td", null, r.reporter || "—"));
+        var ptd = elem("td");
+        if (r.priority) {
+          ptd.appendChild(
+            elem("span", "prio prio-" + r.priority, PRIORITY_LABEL[r.priority]),
+          );
+        } else {
+          ptd.textContent = "—";
+        }
+        tr.appendChild(ptd);
+        tr.appendChild(elem("td", null, r.dueDate != null ? fmtDate(r.dueDate) : "—"));
+        tr.appendChild(elem("td", null, r.sprint || "—"));
+        tr.appendChild(elem("td", null, String(r.deps)));
+        tr.addEventListener("click", function () {
+          openEditTask(r.task);
+        });
+        tbody.appendChild(tr);
+      });
+    }
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    wrap.appendChild(scroll);
+    return wrap;
+  }
+
+  // ---- Sprints view ---------------------------------------------------------
+  // ---- Timeline / Gantt view (D7: dependency-free raw SVG) -----------------
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var DAY_MS = 86400000;
+  function svgEl(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function priorityFill(p) {
+    return p === "urgent"
+      ? "#7a3b2e"
+      : p === "high"
+        ? "#8a5a2b"
+        : p === "medium"
+          ? "#5c5348"
+          : "#4a453d"; // low / none
+  }
+
+  function renderTimeline(project) {
+    var wrap = elem("div", "timeline");
+    var scheduled = [];
+    var unscheduled = [];
+    project.tasks.forEach(function (t) {
+      if (t.startDate != null && t.dueDate != null && t.dueDate >= t.startDate)
+        scheduled.push(t);
+      else unscheduled.push(t);
+    });
+
+    if (scheduled.length === 0) {
+      var ph = elem("div", "placeholder");
+      ph.appendChild(
+        elem("div", null, "No scheduled tasks. Give a task a start and due date to see it here."),
+      );
+      wrap.appendChild(ph);
+    } else {
+      // Group by sprint (in order), then a Backlog group (sprintId null).
+      var groups = [];
+      project.sprints.forEach(function (s) {
+        var ts = scheduled.filter(function (t) {
+          return t.sprintId === s.id;
+        });
+        if (ts.length) groups.push({ name: s.name, tasks: ts });
+      });
+      var backlog = scheduled.filter(function (t) {
+        return !t.sprintId;
+      });
+      if (backlog.length) groups.push({ name: "Backlog", tasks: backlog });
+
+      // Padded date range across scheduled tasks + sprint bounds.
+      var minMs = Infinity;
+      var maxMs = -Infinity;
+      scheduled.forEach(function (t) {
+        if (t.startDate < minMs) minMs = t.startDate;
+        if (t.dueDate > maxMs) maxMs = t.dueDate;
+      });
+      project.sprints.forEach(function (s) {
+        if (s.startDate != null && s.startDate < minMs) minMs = s.startDate;
+        if (s.endDate != null && s.endDate > maxMs) maxMs = s.endDate;
+      });
+      minMs -= DAY_MS;
+      maxMs += DAY_MS;
+      var days = Math.max(1, Math.round((maxMs - minMs) / DAY_MS));
+      var PX = days > 90 ? 8 : days > 45 ? 14 : 22; // adaptive px/day
+      var LABEL_W = 200;
+      var ROW_H = 28;
+      var HEADER_H = 26;
+      var PAD = 8;
+      var chartW = days * PX;
+      var totalW = LABEL_W + chartW + PAD * 2;
+
+      var rows = [];
+      groups.forEach(function (g) {
+        rows.push({ type: "group", name: g.name });
+        g.tasks.sort(function (a, b) {
+          return a.startDate - b.startDate;
+        });
+        g.tasks.forEach(function (t) {
+          rows.push({ type: "task", task: t });
+        });
+      });
+      var totalH = HEADER_H + rows.length * ROW_H + PAD * 2;
+      function xOf(ms) {
+        return LABEL_W + PAD + ((ms - minMs) / DAY_MS) * PX;
+      }
+
+      var svg = svgEl("svg", {
+        width: totalW,
+        height: totalH,
+        viewBox: "0 0 " + totalW + " " + totalH,
+      });
+      var defs = svgEl("defs");
+      var marker = svgEl("marker", {
+        id: "pm-arrow",
+        markerWidth: 7,
+        markerHeight: 7,
+        refX: 6,
+        refY: 3,
+        orient: "auto",
+      });
+      marker.appendChild(svgEl("path", { d: "M0,0 L6,3 L0,6 Z", fill: "#c96f4a" }));
+      defs.appendChild(marker);
+      svg.appendChild(defs);
+
+      // Weekly gridlines (Mondays) with date labels.
+      for (var ms = minMs; ms <= maxMs; ms += DAY_MS) {
+        if (new Date(ms).getUTCDay() === 1) {
+          var gx = xOf(ms);
+          svg.appendChild(
+            svgEl("line", { x1: gx, y1: HEADER_H, x2: gx, y2: totalH - PAD, stroke: "#3a352f", "stroke-width": 1 }),
+          );
+          var lbl = svgEl("text", { x: gx + 2, y: 16, fill: "#8a7f6f", "font-size": 10 });
+          lbl.textContent = fmtDate(ms);
+          svg.appendChild(lbl);
+        }
+      }
+      // Sprint markers (dashed verticals at start/end).
+      project.sprints.forEach(function (s) {
+        [s.startDate, s.endDate].forEach(function (m) {
+          if (m == null) return;
+          var mx = xOf(m);
+          svg.appendChild(
+            svgEl("line", { x1: mx, y1: HEADER_H, x2: mx, y2: totalH - PAD, stroke: "#7a6f60", "stroke-width": 1, "stroke-dasharray": "3 3" }),
+          );
+        });
+      });
+
+      // Rows: group headers + task labels + bars.
+      var barOf = {}; // taskId -> {x1,x2,ymid}
+      rows.forEach(function (r, i) {
+        var y = HEADER_H + i * ROW_H;
+        if (r.type === "group") {
+          var gt = svgEl("text", { x: PAD, y: y + 18, fill: "#f7f5f0", "font-size": 12, "font-weight": 600 });
+          gt.textContent = r.name;
+          svg.appendChild(gt);
+          return;
+        }
+        var t = r.task;
+        var tl = svgEl("text", { x: PAD + 12, y: y + 18, fill: "#d9cfc0", "font-size": 11 });
+        tl.textContent = t.title.length > 26 ? t.title.slice(0, 25) + "…" : t.title;
+        var tlTitle = svgEl("title");
+        tlTitle.textContent = t.title;
+        tl.appendChild(tlTitle);
+        svg.appendChild(tl);
+
+        var bx = xOf(t.startDate);
+        var bw = Math.max(PX * 0.6, xOf(t.dueDate + DAY_MS) - bx); // due day inclusive
+        var rect = svgEl("rect", {
+          x: bx,
+          y: y + 6,
+          width: bw,
+          height: ROW_H - 12,
+          rx: 3,
+          fill: priorityFill(t.priority),
+          stroke: "#7a6f60",
+          "stroke-width": 1,
+        });
+        rect.style.cursor = "pointer";
+        var rt = svgEl("title");
+        rt.textContent = t.title + " · " + fmtDate(t.startDate) + "–" + fmtDate(t.dueDate);
+        rect.appendChild(rt);
+        rect.addEventListener("click", function () {
+          openEditTask(t);
+        });
+        svg.appendChild(rect);
+        barOf[t.id] = { x1: bx, x2: bx + bw, ymid: y + ROW_H / 2 };
+      });
+
+      // Dependency connectors: predecessor end -> successor start, only when
+      // both endpoints are scheduled (on the chart). Date-less endpoints are
+      // surfaced in the Unscheduled tray + the task's dep count instead.
+      rows.forEach(function (r) {
+        if (r.type !== "task") return;
+        (r.task.dependsOn || []).forEach(function (depId) {
+          var from = barOf[depId];
+          var to = barOf[r.task.id];
+          if (!from || !to) return;
+          svg.appendChild(
+            svgEl("line", {
+              x1: from.x2,
+              y1: from.ymid,
+              x2: to.x1 - 2,
+              y2: to.ymid,
+              stroke: "#c96f4a",
+              "stroke-width": 1.5,
+              "marker-end": "url(#pm-arrow)",
+            }),
+          );
+        });
+      });
+
+      var scroller = elem("div", "gantt-scroll");
+      scroller.style.cssText =
+        "overflow-x:auto;overflow-y:hidden;border:1px solid #3a352f;border-radius:6px;background:#241f1b;padding:2px;";
+      scroller.appendChild(svg);
+      wrap.appendChild(scroller);
+    }
+
+    // Unscheduled tray.
+    if (unscheduled.length) {
+      var tray = elem("div", "gantt-tray");
+      tray.style.cssText = "margin-top:14px;";
+      tray.appendChild(elem("h3", null, "Unscheduled (" + unscheduled.length + ")"));
+      var hint = elem("div", null, "Tasks missing a start or due date. Click one to schedule it.");
+      hint.style.cssText = "color:#8a7f6f;font-size:11px;margin:2px 0 6px;";
+      tray.appendChild(hint);
+      unscheduled.forEach(function (t) {
+        var chip = elem("button", null, t.title);
+        chip.type = "button";
+        chip.style.cssText =
+          "display:inline-block;margin:3px;padding:4px 8px;border:1px solid #7a6f60;border-radius:12px;background:#332e28;color:#d9cfc0;cursor:pointer;font-size:11px;";
+        if (t.dependsOn && t.dependsOn.length) {
+          chip.appendChild(elem("span", null, " · deps: " + t.dependsOn.length));
+        }
+        chip.addEventListener("click", function () {
+          openEditTask(t);
+        });
+        tray.appendChild(chip);
+      });
+      wrap.appendChild(tray);
+    }
+    return wrap;
+  }
+
+  function renderSprints(project) {
+    var byId = taskIndex(project);
+
+    // Group tasks by sprintId. Order within a lane follows tasks[] order.
+    var backlog = [];
+    var bySprint = {};
+    (project.sprints || []).forEach(function (s) {
+      bySprint[s.id] = [];
+    });
+    (project.tasks || []).forEach(function (t) {
+      if (t.sprintId && bySprint[t.sprintId]) bySprint[t.sprintId].push(t);
+      else backlog.push(t);
+    });
+
+    var wrap = elem("div", "sprints");
+
+    wrap.appendChild(renderLane(project, null, "Backlog", null, null, backlog));
+    (project.sprints || []).forEach(function (s) {
+      wrap.appendChild(
+        renderLane(project, s.id, s.name, s.startDate, s.endDate, bySprint[s.id] || []),
+      );
+    });
+
+    // Trailing "New sprint" affordance.
+    var addLane = elem("div", "lane-add");
+    var addBtn = elem("button", "btn", "+ New sprint");
+    addBtn.type = "button";
+    addBtn.addEventListener("click", openNewSprint);
+    addLane.appendChild(addBtn);
+    wrap.appendChild(addLane);
+
+    return wrap;
+  }
+
+  function renderLane(project, sprintId, name, startDate, endDate, tasks) {
+    var lane = elem("div", "lane");
+
+    var head = elem("div", "lane-head");
+    head.appendChild(elem("span", "lane-name", name));
+    if (startDate != null || endDate != null) {
+      var range =
+        (startDate != null ? fmtDate(startDate) : "…") +
+        " – " +
+        (endDate != null ? fmtDate(endDate) : "…");
+      head.appendChild(elem("span", "lane-dates", range));
+    }
+    var spacer = elem("span");
+    spacer.style.marginLeft = "auto";
+    head.appendChild(spacer);
+    head.appendChild(elem("span", "lane-dates", String(tasks.length)));
+    if (sprintId) {
+      var del = elem("button", "btn btn-ghost btn-danger", "×");
+      del.type = "button";
+      del.title = "Delete sprint";
+      del.style.marginLeft = "6px";
+      del.addEventListener("click", function () {
+        if (
+          window.confirm(
+            'Delete sprint "' +
+              name +
+              '"? Its tasks move back to the backlog.',
+          )
+        ) {
+          deleteSprint(sprintId).catch(handleError);
+        }
+      });
+      head.appendChild(del);
+    }
+    lane.appendChild(head);
+
+    var body = elem("div", "lane-body");
+    if (tasks.length === 0) {
+      body.appendChild(elem("div", "muted", "No tasks."));
+    }
+    tasks.forEach(function (t) {
+      body.appendChild(renderLaneTask(project, t, sprintId));
+    });
+    lane.appendChild(body);
+    return lane;
+  }
+
+  function renderLaneTask(project, task, currentSprintId) {
+    var node = elem("div", "lane-task");
+
+    var title = elem("div", "lane-task-title", task.title);
+    node.appendChild(title);
+
+    if (task.priority && PRIORITY_LABEL[task.priority]) {
+      var meta = elem("div", "card-meta");
+      meta.appendChild(
+        elem("span", "prio prio-" + task.priority, PRIORITY_LABEL[task.priority]),
+      );
+      node.appendChild(meta);
+    }
+
+    // Sprint move select (field edit, LWW): Backlog + each sprint.
+    var sel = elem("select", "sprint-select");
+    sel.setAttribute("aria-label", "Move task to sprint");
+    var backOpt = elem("option", null, "— Backlog —");
+    backOpt.value = "";
+    if (!currentSprintId) backOpt.selected = true;
+    sel.appendChild(backOpt);
+    (project.sprints || []).forEach(function (s) {
+      var opt = elem("option", null, s.name);
+      opt.value = s.id;
+      if (s.id === currentSprintId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener("change", function () {
+      var next = sel.value || null;
+      if (next !== (currentSprintId || null)) {
+        setTaskSprint(task.id, next).catch(handleError);
+      }
+    });
+    node.appendChild(sel);
+
+    return node;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modals
+  // ---------------------------------------------------------------------------
+  function openOverlay(overlay) {
+    overlay.classList.add("show");
+  }
+  function closeOverlay(overlay) {
+    overlay.classList.remove("show");
+  }
+
+  document.querySelectorAll("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      closeOverlay(document.getElementById(btn.getAttribute("data-close")));
+    });
+  });
+  [el.newProjectOverlay, el.newSprintOverlay, el.editTaskOverlay].forEach(
+    function (ov) {
+      ov.addEventListener("mousedown", function (e) {
+        if (e.target === ov) closeOverlay(ov);
+      });
+    },
+  );
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      closeOverlay(el.newProjectOverlay);
+      closeOverlay(el.newSprintOverlay);
+      closeOverlay(el.editTaskOverlay);
+    }
+  });
+
+  function openNewSprint() {
+    if (!state.project) return;
+    el.nsName.value = "";
+    el.nsStart.value = "";
+    el.nsEnd.value = "";
+    openOverlay(el.newSprintOverlay);
+    el.nsName.focus();
+  }
+
+  // Helper: given a child type, return the set of valid parent types (or null for "none").
+  function validParentTypes(childType) {
+    switch (childType) {
+      case "epic":
+        return []; // no parent allowed
+      case "story":
+      case "task":
+      case "bug":
+        return [null, "epic"]; // none or epic
+      case "subtask":
+        return ["story", "task", "bug"]; // must have parent (one of these types)
+      default:
+        return [null, "epic"];
+    }
+  }
+
+  // Rebuild the parent select for the current type selection.
+  function rebuildParentOptions(project, taskId, selectedType, currentParentId) {
+    el.etParent.textContent = "";
+    var allowed = validParentTypes(selectedType);
+    // If the type forbids any parent (e.g. epic), show only "(none)".
+    if (allowed.length === 0 || (allowed.length === 1 && allowed[0] === null)) {
+      var opt = elem("option", null, "— None —");
+      opt.value = "";
+      el.etParent.appendChild(opt);
+      el.etParent.value = "";
+      // For epic: disable the parent select.
+      if (selectedType === "epic") {
+        el.etParent.disabled = true;
+      }
+      return;
+    }
+    el.etParent.disabled = false;
+    // Subtask requires a parent — no "(none)" option.
+    if (selectedType !== "subtask") {
+      var noneOpt = elem("option", null, "— None —");
+      noneOpt.value = "";
+      el.etParent.appendChild(noneOpt);
+    }
+    // Filter tasks to allowed parent types.
+    var allowedParentTypeSet = allowed.filter(function (t) {
+      return t !== null;
+    });
+    (project.tasks || []).forEach(function (t) {
+      if (t.id === taskId) return;
+      var tType = t.type || "task";
+      if (allowedParentTypeSet.indexOf(tType) < 0) return;
+      var label = (t.key || t.id) + " — " + t.title;
+      var opt = elem("option", null, label);
+      opt.value = t.id;
+      if (t.id === currentParentId) opt.selected = true;
+      el.etParent.appendChild(opt);
+    });
+    el.etParent.value = currentParentId || "";
+  }
+
+  function openEditTask(task) {
+    var project = state.project;
+    if (!project) return;
+    state.editingTaskId = task.id;
+
+    // Read-only fields.
+    el.etKey.textContent = task.key || "—";
+    el.etReporter.textContent = task.reporter || "—";
+
+    el.etTitle.value = task.title || "";
+    el.etDesc.value = task.description || "";
+    el.etAssignee.value = task.assignee || "";
+    el.etPriority.value = task.priority || "";
+    el.etStart.value = msToDateInput(task.startDate);
+    el.etDue.value = msToDateInput(task.dueDate);
+    el.etLabels.value = (task.labels || []).join(", ");
+
+    // Type select.
+    el.etType.value = task.type || "task";
+
+    // Parent select: populate based on selected type.
+    rebuildParentOptions(project, task.id, el.etType.value, task.parentId);
+
+    // Rebuild parent options when type changes.
+    el.etType.onchange = function () {
+      rebuildParentOptions(project, task.id, el.etType.value, null);
+    };
+
+    // Sprint select: Backlog + each sprint.
+    el.etSprint.textContent = "";
+    var back = elem("option", null, "— Backlog —");
+    back.value = "";
+    el.etSprint.appendChild(back);
+    (project.sprints || []).forEach(function (s) {
+      var opt = elem("option", null, s.name);
+      opt.value = s.id;
+      el.etSprint.appendChild(opt);
+    });
+    el.etSprint.value = task.sprintId || "";
+
+    // Dependencies multi-select: OTHER tasks in the project, showing keys.
+    el.etDeps.textContent = "";
+    var deps = task.dependsOn || [];
+    (project.tasks || []).forEach(function (t) {
+      if (t.id === task.id) return;
+      var label = (t.key || t.id) + " — " + t.title;
+      var opt = elem("option", null, label);
+      opt.value = t.id;
+      if (deps.indexOf(t.id) >= 0) opt.selected = true;
+      el.etDeps.appendChild(opt);
+    });
+
+    // ---- Collaboration sections: clear stale data, then load fresh ----
+    // Clear all collab sections immediately (prevents flash of previous task's data).
+    el.etWatchersChips.textContent = "";
+    el.etWatchersCount.textContent = "";
+    el.etCommentList.textContent = "";
+    el.etCommentsCount.textContent = "";
+    el.etCommentBody.value = "";
+    el.etAttList.textContent = "";
+    el.etAttachmentsCount.textContent = "";
+    el.etAttFile.value = "";
+    el.etActivityList.textContent = "";
+
+    // Show watchers from the already-loaded project data (no extra request).
+    renderWatchers(task.watchers || []);
+
+    // Load comments, attachments, and activity in parallel.
+    var pid = project.id;
+    var tid = task.id;
+    Promise.all([
+      loadCommentsForTask(tid, pid).catch(function () {}),
+      loadAttachmentsForTask(tid, pid).catch(function () {}),
+      loadActivityForTask(pid, tid).catch(function () {}),
+    ]);
+
+    openOverlay(el.editTaskOverlay);
+    el.etTitle.focus();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  el.projectSelect.addEventListener("change", function () {
+    var id = el.projectSelect.value;
+    if (id) void loadProject(id);
+  });
+
+  el.viewSwitch.querySelectorAll("button[data-view]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var v = btn.getAttribute("data-view");
+      if (v && v !== state.view) {
+        state.view = v;
+        renderContent();
+      }
+    });
+  });
+
+  el.newProjectBtn.addEventListener("click", function () {
+    el.npName.value = "";
+    el.npTags.value = "";
+    openOverlay(el.newProjectOverlay);
+    el.npName.focus();
+  });
+
+  el.deleteProjectBtn.addEventListener("click", function () {
+    if (!state.project) return;
+    if (
+      window.confirm(
+        'Delete project "' +
+          state.project.name +
+          '" and all its tasks? This cannot be undone.',
+      )
+    ) {
+      deleteProject(state.project.id).catch(handleError);
+    }
+  });
+
+  el.newProjectForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.npName.value.trim();
+    if (!name) return;
+    var tags = parseCsv(el.npTags.value);
+    closeOverlay(el.newProjectOverlay);
+    createProject(name, tags).catch(handleError);
+  });
+
+  el.newSprintForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.nsName.value.trim();
+    if (!name) return;
+    var start = dateInputToMs(el.nsStart.value);
+    var end = dateInputToMs(el.nsEnd.value);
+    closeOverlay(el.newSprintOverlay);
+    createSprint(name, start, end).catch(handleError);
+  });
+
+  el.editTaskForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var id = state.editingTaskId;
+    if (!id) return;
+    var title = el.etTitle.value.trim();
+    if (!title) return;
+    // Explicit nulls clear dates/sprint; JSON keeps null, drops undefined.
+    var patch = {
+      title: title,
+      description: el.etDesc.value,
+      type: el.etType.value || "task",
+      parentId: el.etParent.value || null,
+      assignee: el.etAssignee.value.trim(),
+      priority: el.etPriority.value || null,
+      labels: parseCsv(el.etLabels.value),
+      startDate: dateInputToMs(el.etStart.value),
+      dueDate: dateInputToMs(el.etDue.value),
+      sprintId: el.etSprint.value || null,
+      dependsOn: Array.from(el.etDeps.selectedOptions).map(function (o) {
+        return o.value;
+      }),
+    };
+    closeOverlay(el.editTaskOverlay);
+    updateTask(id, patch).catch(handleError);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  renderViewSwitch();
+  void loadProjects();
+  startNotifPolling();
+</script>

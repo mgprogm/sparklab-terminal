@@ -687,3 +687,883 @@ export const TestServerResponseSchema = z.object({
   error: z.string().optional(),
 });
 export type TestServerResponse = z.infer<typeof TestServerResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: Kanban /api/kanban/*
+// ---------------------------------------------------------------------------
+// A gateway-owned, multi-board task tracker. State lives in a data/kanban.json
+// sidecar (see apps/terminal-gateway/src/kanban.js). Ordering authority is
+// Column.cardIds[] ONLY — cards carry no columnId/order (a derived `columnId`
+// is added to GET responses for consumer convenience but never persisted).
+// Every board carries a monotonic `rev` for optimistic concurrency (see D3 in
+// docs/KANBAN-PLAN.md); a `move` with a stale rev is rejected 409.
+
+/** A single Kanban card. Persisted shape carries no column/order — position is
+ *  determined solely by the enclosing Column.cardIds[]. */
+export const KanbanCardSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** Derived on GET (the id of the column currently holding this card). Never
+   *  persisted — Column.cardIds is the source of truth. */
+  columnId: z.string().optional(),
+});
+export type KanbanCard = z.infer<typeof KanbanCardSchema>;
+
+/** A board column. `cardIds` is the ordered, authoritative card sequence. */
+export const KanbanColumnSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  cardIds: z.array(z.string()),
+});
+export type KanbanColumn = z.infer<typeof KanbanColumnSchema>;
+
+/** A full board with its columns and cards. Returned by GET /api/kanban/boards/:id. */
+export const KanbanBoardSchema = z.object({
+  id: z.string(),
+  /** The project name. */
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)),
+  /** Monotonic revision; bumped on every mutation of this board (optimistic concurrency). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columns: z.array(KanbanColumnSchema),
+  cards: z.array(KanbanCardSchema),
+});
+export type KanbanBoard = z.infer<typeof KanbanBoardSchema>;
+
+/** Lightweight board row for the list view (no cards/columns payload). */
+export const KanbanBoardSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tags: z.array(z.string()),
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columnCount: z.number().int(),
+  cardCount: z.number().int(),
+});
+export type KanbanBoardSummary = z.infer<typeof KanbanBoardSummarySchema>;
+
+/** Response body for GET /api/kanban/boards (200 OK). */
+export const KanbanListResponseSchema = z.object({
+  boards: z.array(KanbanBoardSummarySchema),
+});
+export type KanbanListResponse = z.infer<typeof KanbanListResponseSchema>;
+
+/** Request body for POST /api/kanban/boards (create a board). `columns` is
+ *  optional; when omitted the gateway seeds Backlog/To Do/In Progress/Done. */
+export const CreateBoardRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  columns: z.array(z.string().min(1).max(128)).optional(),
+});
+export type CreateBoardRequest = z.infer<typeof CreateBoardRequestSchema>;
+
+/** Request body for PATCH /api/kanban/boards/:boardId. */
+export const UpdateBoardRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine((b) => b.name !== undefined || b.tags !== undefined, {
+    message: "at least one of name/tags is required",
+  });
+export type UpdateBoardRequest = z.infer<typeof UpdateBoardRequestSchema>;
+
+/** Request body for POST /api/kanban/boards/:boardId/cards. Defaults to the
+ *  first column when columnId is omitted. */
+export const CreateCardRequestSchema = z.object({
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  columnId: z.string().optional(),
+});
+export type CreateCardRequest = z.infer<typeof CreateCardRequestSchema>;
+
+/** Request body for PATCH /api/kanban/cards/:cardId. `boardId` locates the card. */
+export const UpdateCardRequestSchema = z
+  .object({
+    boardId: z.string(),
+    title: z.string().min(1).max(512).optional(),
+    description: z.string().max(8192).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine(
+    (c) =>
+      c.title !== undefined ||
+      c.description !== undefined ||
+      c.tags !== undefined,
+    { message: "at least one of title/description/tags is required" },
+  );
+export type UpdateCardRequest = z.infer<typeof UpdateCardRequestSchema>;
+
+/** Request body for POST /api/kanban/cards/:cardId/move. `rev` is the board
+ *  revision the client observed; a mismatch is rejected 409 (stale). */
+export const MoveCardRequestSchema = z.object({
+  boardId: z.string(),
+  toColumnId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveCardRequest = z.infer<typeof MoveCardRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: Project-management tool /api/pm/*
+// ---------------------------------------------------------------------------
+// A Kanban-first PM suite (docs/PM-TOOL-PLAN.md), a separate artifact from
+// Kanban. State in data/pm.json (src/pm.js). Like Kanban: Column.taskIds[] is
+// the sole ordering/status authority (a task's `columnId`/`status` are derived
+// on GET, never persisted); per-project `rev` for optimistic concurrency on
+// move. Additions: task fields (assignee/priority/labels/dates), sprints
+// (orthogonal to columns; backlog = sprintId null), and a per-project
+// dependency DAG (dependsOn; a cycle is rejected 400).
+
+export const PmPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
+export type PmPriority = z.infer<typeof PmPrioritySchema>;
+
+/** Issue type — drives the card glyph, hierarchy validation, and filtering.
+ *  Hierarchy (§5.6): Epic → Story/Task/Bug → Subtask (max depth 3). */
+export const PmIssueTypeSchema = z.enum([
+  "epic",
+  "story",
+  "task",
+  "bug",
+  "subtask",
+]);
+export type PmIssueType = z.infer<typeof PmIssueTypeSchema>;
+
+/** A task. Persisted shape carries no status/order — position/status come from
+ *  the enclosing Column.taskIds[]. `columnId` and `key` are derived on GET. */
+export const PmTaskSchema = z.object({
+  id: z.string(),
+  /** Per-project issue number (with project.key ⇒ derived key "PAY-43"). */
+  number: z.number().int(),
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  /** Issue type; hierarchy edges validated against §5.6. */
+  type: PmIssueTypeSchema.default("task"),
+  assignee: z.string().max(128).nullable().default(null),
+  /** Creating actor (advisory, P2); auto-added to watchers. */
+  reporter: z.string().nullable().default(null),
+  priority: PmPrioritySchema.nullable().default(null),
+  labels: z.array(z.string().min(1).max(64)).default([]),
+  /** Epoch ms (day-level), nullable — drives the Gantt view. */
+  startDate: z.number().nullable().default(null),
+  dueDate: z.number().nullable().default(null),
+  /** Owning sprint, or null for the product backlog (orthogonal to columns). */
+  sprintId: z.string().nullable().default(null),
+  /** Parent task id (containment edge, same project) — hierarchy, not scheduling. */
+  parentId: z.string().nullable().default(null),
+  /** Actors watching this task (reporter/assignee/commenters). */
+  watchers: z.array(z.string()).default([]),
+  /** Ids of other tasks in THIS project this task depends on (a DAG). */
+  dependsOn: z.array(z.string()).default([]),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** Derived on GET (the column currently holding this task); never persisted. */
+  columnId: z.string().nullable().optional(),
+  /** Derived on GET (project.key + "-" + number, e.g. "PAY-43"); never persisted. */
+  key: z.string().optional(),
+});
+export type PmTask = z.infer<typeof PmTaskSchema>;
+
+/** A status column. `taskIds` is the ordered, authoritative task sequence. */
+export const PmColumnSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  taskIds: z.array(z.string()),
+  /** Per-column WIP limit (int ≥1) or null = unlimited (enforcement Phase 2). */
+  wipLimit: z.number().int().min(1).nullable().default(null),
+  /** Allowed destination column ids, or null = any (enforcement Phase 2). */
+  transitions: z.array(z.string()).nullable().default(null),
+});
+export type PmColumn = z.infer<typeof PmColumnSchema>;
+
+/** A sprint / iteration. Orthogonal to columns. */
+export const PmSprintSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  startDate: z.number().nullable().default(null),
+  endDate: z.number().nullable().default(null),
+});
+export type PmSprint = z.infer<typeof PmSprintSchema>;
+
+/** A full project. Returned by GET /api/pm/projects/:id. */
+export const PmProjectSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(200),
+  /** Unique project key (^[A-Z][A-Z0-9]{1,9}$) — the prefix of issue keys. */
+  key: z.string(),
+  /** Monotonic per-project issue-number counter. */
+  seq: z.number().int(),
+  tags: z.array(z.string().min(1).max(64)),
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columns: z.array(PmColumnSchema),
+  sprints: z.array(PmSprintSchema),
+  tasks: z.array(PmTaskSchema),
+});
+export type PmProject = z.infer<typeof PmProjectSchema>;
+
+/** Lightweight project row for the list view. */
+export const PmProjectSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tags: z.array(z.string()),
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  columnCount: z.number().int(),
+  taskCount: z.number().int(),
+  sprintCount: z.number().int(),
+});
+export type PmProjectSummary = z.infer<typeof PmProjectSummarySchema>;
+
+/** Response body for GET /api/pm/projects (200 OK). */
+export const PmListResponseSchema = z.object({
+  projects: z.array(PmProjectSummarySchema),
+});
+export type PmListResponse = z.infer<typeof PmListResponseSchema>;
+
+/** Request body for POST /api/pm/projects. Omitting columns seeds the defaults. */
+export const CreateProjectRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  /** Optional explicit project key; derived from name when omitted. */
+  key: z.string().min(2).max(10).optional(),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  columns: z.array(z.string().min(1).max(128)).optional(),
+});
+export type CreateProjectRequest = z.infer<typeof CreateProjectRequestSchema>;
+
+/** Request body for PATCH /api/pm/projects/:id. */
+export const UpdateProjectRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    key: z.string().min(2).max(10).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine(
+    (b) => b.name !== undefined || b.tags !== undefined || b.key !== undefined,
+    { message: "at least one of name/key/tags is required" },
+  );
+export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequestSchema>;
+
+/** Request body for POST /api/pm/projects/:id/tasks. */
+export const CreateTaskRequestSchema = z.object({
+  title: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  type: PmIssueTypeSchema.optional(),
+  assignee: z.string().max(128).optional(),
+  reporter: z.string().optional(),
+  priority: PmPrioritySchema.optional(),
+  labels: z.array(z.string().min(1).max(64)).default([]),
+  startDate: z.number().nullable().optional(),
+  dueDate: z.number().nullable().optional(),
+  sprintId: z.string().nullable().optional(),
+  parentId: z.string().nullable().optional(),
+  columnId: z.string().optional(),
+  dependsOn: z.array(z.string()).optional(),
+});
+export type CreateTaskRequest = z.infer<typeof CreateTaskRequestSchema>;
+
+/** Request body for PATCH /api/pm/tasks/:id. `projectId` locates the task. */
+export const UpdateTaskRequestSchema = z.object({
+  projectId: z.string(),
+  title: z.string().min(1).max(512).optional(),
+  description: z.string().max(8192).optional(),
+  type: PmIssueTypeSchema.optional(),
+  assignee: z.string().max(128).nullable().optional(),
+  reporter: z.string().nullable().optional(),
+  priority: PmPrioritySchema.nullable().optional(),
+  labels: z.array(z.string().min(1).max(64)).optional(),
+  startDate: z.number().nullable().optional(),
+  dueDate: z.number().nullable().optional(),
+  sprintId: z.string().nullable().optional(),
+  parentId: z.string().nullable().optional(),
+  dependsOn: z.array(z.string()).optional(),
+});
+export type UpdateTaskRequest = z.infer<typeof UpdateTaskRequestSchema>;
+
+/** Request body for POST /api/pm/tasks/:id/move (rev-guarded — D3). */
+export const MoveTaskRequestSchema = z.object({
+  projectId: z.string(),
+  toColumnId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveTaskRequest = z.infer<typeof MoveTaskRequestSchema>;
+
+/** Request body for POST /api/pm/projects/:id/columns. */
+export const CreateColumnRequestSchema = z.object({
+  name: z.string().min(1).max(128),
+  index: z.number().int().min(0).optional(),
+  wipLimit: z.number().int().min(1).nullable().optional(),
+  transitions: z.array(z.string()).nullable().optional(),
+});
+export type CreateColumnRequest = z.infer<typeof CreateColumnRequestSchema>;
+
+/** Request body for PATCH /api/pm/columns/:colId. */
+export const UpdateColumnRequestSchema = z.object({
+  projectId: z.string(),
+  name: z.string().min(1).max(128).optional(),
+  wipLimit: z.number().int().min(1).nullable().optional(),
+  transitions: z.array(z.string()).nullable().optional(),
+});
+export type UpdateColumnRequest = z.infer<typeof UpdateColumnRequestSchema>;
+
+/** Request body for POST /api/pm/columns/:colId/move (rev-guarded). */
+export const MoveColumnRequestSchema = z.object({
+  projectId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveColumnRequest = z.infer<typeof MoveColumnRequestSchema>;
+
+/** Request body for POST /api/pm/projects/:id/sprints. */
+export const CreateSprintRequestSchema = z.object({
+  name: z.string().min(1).max(128),
+  startDate: z.number().nullable().optional(),
+  endDate: z.number().nullable().optional(),
+});
+export type CreateSprintRequest = z.infer<typeof CreateSprintRequestSchema>;
+
+/** Request body for PATCH /api/pm/sprints/:id. */
+export const UpdateSprintRequestSchema = z.object({
+  projectId: z.string(),
+  name: z.string().min(1).max(128).optional(),
+  startDate: z.number().nullable().optional(),
+  endDate: z.number().nullable().optional(),
+});
+export type UpdateSprintRequest = z.infer<typeof UpdateSprintRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// REST: PM Collaboration /api/pm/* (Phase 3 — comments/activity/attachments/watchers/notifications)
+// ---------------------------------------------------------------------------
+
+/** A comment on a task. Stored in a JSONL sidecar, not pm.json. */
+export const PmCommentSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  author: z.string(),
+  body: z.string().max(8192),
+  createdAt: z.number(),
+  updatedAt: z.number().optional(),
+});
+export type PmComment = z.infer<typeof PmCommentSchema>;
+
+/** Request body for POST /api/pm/tasks/:id/comments. */
+export const AddCommentRequestSchema = z.object({
+  body: z.string().min(1).max(8192),
+});
+export type AddCommentRequest = z.infer<typeof AddCommentRequestSchema>;
+
+/** Request body for PATCH /api/pm/comments/:id. */
+export const EditCommentRequestSchema = z.object({
+  projectId: z.string(),
+  taskId: z.string().optional(),
+  body: z.string().min(1).max(8192),
+});
+export type EditCommentRequest = z.infer<typeof EditCommentRequestSchema>;
+
+/** An activity / audit record. Append-only, never edited or deleted. */
+export const PmActivitySchema = z.object({
+  id: z.string(),
+  ts: z.number(),
+  actor: z.string(),
+  verb: z.string(),
+  target: z.object({
+    type: z.string(),
+    id: z.string(),
+  }),
+  taskId: z.string().optional(),
+  summary: z.string(),
+  before: z.unknown().optional(),
+  after: z.unknown().optional(),
+});
+export type PmActivity = z.infer<typeof PmActivitySchema>;
+
+/** Attachment metadata (the blob is served separately via GET). */
+export const PmAttachmentMetaSchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  filename: z.string(),
+  size: z.number(),
+  contentType: z.string(),
+  actor: z.string(),
+  createdAt: z.number(),
+});
+export type PmAttachmentMeta = z.infer<typeof PmAttachmentMetaSchema>;
+
+/** An in-app notification for watchers. */
+export const PmNotificationSchema = z.object({
+  id: z.string(),
+  recipient: z.string(),
+  event: z.string(),
+  taskId: z.string().nullable(),
+  projectId: z.string().nullable(),
+  summary: z.string(),
+  createdAt: z.number(),
+  readAt: z.number().nullable(),
+});
+export type PmNotification = z.infer<typeof PmNotificationSchema>;
+
+/** Request body for POST /api/pm/notifications/read. */
+export const MarkNotificationsReadRequestSchema = z.object({
+  ids: z.array(z.string()).optional(),
+  all: z.boolean().optional(),
+});
+export type MarkNotificationsReadRequest = z.infer<
+  typeof MarkNotificationsReadRequestSchema
+>;
+
+// ---------------------------------------------------------------------------
+// REST: Agentic AI Creator /api/agentic/*
+// ---------------------------------------------------------------------------
+// A third gateway-owned pluggable artifact (docs/AGENTIC-AI-CREATOR-PLAN.md),
+// separate from Kanban and PM. State lives in a data/agentic.json sidecar
+// (apps/terminal-gateway/src/agentic.js) with FOUR top-level collections:
+// agents, connections, agenticAis, runs. Like Kanban/PM, mutators are fully
+// synchronous (atomic read-modify-write, no mutex). `rev` guards edits on
+// agents/agenticAis/connections; `runs` carry NO rev (only the gateway's own
+// poll/marker/approval paths mutate them — no cross-client race). Ordering /
+// structure authority is agentIds[] + workflow.edges (D8/§2). An AgenticAI
+// carries a monotonic `version` bumped on every definition edit (D9); each Run
+// snapshots the version + resolved config it executed with, for reproducibility.
+// NOTE (iteration 1): the CRUD surface only. Run records stay empty until the
+// run engine (startRun/reducer/tmux) lands in a later iteration.
+
+/** Backend that powers an Agent (D6). */
+export const AgentRuntimeProviderSchema = z.enum(["codex-cli", "claude-cli"]);
+export type AgentRuntimeProvider = z.infer<typeof AgentRuntimeProviderSchema>;
+
+/** Sandbox mode for a spawned agent-task step — clamped in code (D4). */
+export const AgentSandboxModeSchema = z.enum(["read-only", "workspace-write"]);
+export type AgentSandboxMode = z.infer<typeof AgentSandboxModeSchema>;
+
+/** Per-connection, per-tool policy for one Agent (D5). `tools` is either the
+ *  literal "all" or an explicit tool-name allowlist. `policy` is the default
+ *  disposition the per-run proxy applies to matching calls. */
+export const AgentToolPolicySchema = z.object({
+  connectionId: z.string(),
+  tools: z.union([z.literal("all"), z.array(z.string().min(1).max(128))]),
+  policy: z.enum(["allow", "deny", "approval"]),
+});
+export type AgentToolPolicy = z.infer<typeof AgentToolPolicySchema>;
+
+/** One team member inside an Agentic AI, backed by a runtime provider. */
+export const AgentSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(512),
+  runtimeProvider: AgentRuntimeProviderSchema,
+  /** Free-form label ("supervisor"/"worker"/"reviewer"); not enforced. */
+  role: z.string().max(128).nullable().default(null),
+  systemPrompt: z.string().max(8192).default(""),
+  sandboxMode: AgentSandboxModeSchema.default("read-only"),
+  toolPolicies: z.array(AgentToolPolicySchema).default([]),
+  /** Optional model override; null = provider default. */
+  model: z.string().max(256).nullable().default(null),
+  /** Monotonic revision; bumped on every mutation (optimistic concurrency). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type Agent = z.infer<typeof AgentSchema>;
+
+/** Scoped access from an Agentic AI's agents to another artifact's MCP server. */
+export const ArtifactConnectionSchema = z.object({
+  id: z.string(),
+  targetType: z.enum(["pm", "kanban"]),
+  scope: z.enum(["fixed", "runtime-selection"]),
+  /** A specific project/board id, when scope = "fixed". */
+  targetId: z.string().nullable().default(null),
+  createdAt: z.number(),
+  /** Monotonic revision (optional — connections are POST/DELETE only, no PATCH). */
+  rev: z.number().int().optional(),
+});
+export type ArtifactConnection = z.infer<typeof ArtifactConnectionSchema>;
+
+/** Per-agent-task retry policy. maxAttempts includes the initial attempt. */
+export const RetryPolicySchema = z.object({
+  maxAttempts: z.number().int().min(1).default(1),
+  backoffMs: z.number().int().min(0).default(0),
+  retryOn: z.literal("failure").default("failure"),
+});
+export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
+
+/** Per-agent-task bounded iteration policy. `until` must be a single
+ * non-whitespace token, matching parseResult's `BRANCH: <\S+>` verdict. */
+export const LoopPolicySchema = z.object({
+  maxIterations: z.number().int().min(1).default(1),
+  until: z.string().regex(/^\S+$/).default("done"),
+  backoffMs: z.number().int().min(0).default(0),
+});
+export type LoopPolicy = z.infer<typeof LoopPolicySchema>;
+
+/** One workflow node. DAG-shaped from day one so future node types are additive. */
+export const WorkflowNodeSchema = z.object({
+  id: z.string().min(1).max(128),
+  type: z.enum(["agent-task", "human-approval", "router"]),
+  /** The Agent that executes this node (for type = "agent-task" or "router"). */
+  agentId: z.string().optional(),
+  /** Ignored for human-approval nodes. */
+  retryPolicy: RetryPolicySchema.optional(),
+  loopPolicy: LoopPolicySchema.optional(),
+});
+export type WorkflowNode = z.infer<typeof WorkflowNodeSchema>;
+
+/** A directed edge between two workflow nodes. */
+export const WorkflowEdgeSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  on: z.enum(["success", "failure"]).optional(),
+  when: z.string().min(1).optional(),
+});
+export type WorkflowEdge = z.infer<typeof WorkflowEdgeSchema>;
+
+/** The workflow DAG. Empty/absent is allowed (default {[],[],null}). */
+export const WorkflowDefinitionSchema = z.object({
+  nodes: z.array(WorkflowNodeSchema).default([]),
+  edges: z.array(WorkflowEdgeSchema).default([]),
+  entryNodeId: z.string().nullable().default(null),
+});
+export type WorkflowDefinition = z.infer<typeof WorkflowDefinitionSchema>;
+
+/** Spawn and wall-clock budgets. Token/cost budgets are deferred until usage is measured. */
+export const AgenticBudgetSchema = z.object({
+  maxSpawns: z.number().int().positive().optional(),
+  maxWallClockMs: z.number().int().positive().optional(),
+});
+export type AgenticBudget = z.infer<typeof AgenticBudgetSchema>;
+
+/** A full Agentic AI (catalog entry). Returned by GET /api/agentic/apps/:id. */
+export const AgenticAiSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(512),
+  description: z.string().max(8192).default(""),
+  objectiveTemplate: z.string().max(8192).default(""),
+  status: z.enum(["draft", "published", "paused", "archived"]),
+  orchestrationMode: z.enum(["single", "supervisor", "sequential", "parallel"]),
+  /** Member agent ids; order = supervisor/pipeline order. */
+  agentIds: z.array(z.string()).default([]),
+  connectionIds: z.array(z.string()).default([]),
+  workflow: WorkflowDefinitionSchema,
+  budget: AgenticBudgetSchema.optional(),
+  /** Monotonic definition version, bumped on every definition edit (D9). */
+  version: z.number().int(),
+  /** Monotonic revision (optimistic concurrency). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type AgenticAi = z.infer<typeof AgenticAiSchema>;
+
+/** Lightweight catalog row for GET /api/agentic/apps. Counts derived on GET. */
+export const AgenticAiSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  status: z.enum(["draft", "published", "paused", "archived"]),
+  orchestrationMode: z.enum(["single", "supervisor", "sequential", "parallel"]),
+  /** Derived on GET (agentIds.length); never persisted. */
+  agentCount: z.number().int(),
+  /** Derived on GET (connectionIds.length); never persisted. */
+  connectionCount: z.number().int(),
+  version: z.number().int(),
+  updatedAt: z.number(),
+});
+export type AgenticAiSummary = z.infer<typeof AgenticAiSummarySchema>;
+
+/** Fixed-anchor UTC recurrence used by an Agentic AI schedule. */
+export const AgenticScheduleSpecSchema = z.object({
+  every: z.enum(["minute", "hour", "day"]),
+  interval: z.number().int().min(1),
+  atHour: z.number().int().min(0).max(23).optional(),
+  atMinute: z.number().int().min(0).max(59).optional(),
+});
+export type AgenticScheduleSpec = z.infer<typeof AgenticScheduleSpecSchema>;
+
+/** A persisted scheduled-run definition and its latest firing state. */
+export const AgenticScheduleSchema = z.object({
+  id: z.string(),
+  agenticId: z.string(),
+  serverId: z.string(),
+  cwd: z.string(),
+  objective: z.string(),
+  spec: AgenticScheduleSpecSchema,
+  enabled: z.boolean(),
+  defFingerprint: z.string(),
+  lastFiredAt: z.number().nullable(),
+  nextFireAt: z.number().nullable(),
+  lastAttemptAt: z.number().nullable(),
+  lastOutcome: z
+    .enum([
+      "started",
+      "capacity_skipped",
+      "target_error",
+      "definition_changed",
+      "overlap_skipped",
+    ])
+    .nullable()
+    .optional(),
+  lastError: z.string().nullable().optional(),
+  createdAt: z.number(),
+});
+export type AgenticSchedule = z.infer<typeof AgenticScheduleSchema>;
+
+/** Complete request body used to create or replace a schedule definition. */
+export const AgenticScheduleRequestSchema = z.object({
+  agenticId: z.string(),
+  serverId: z.string(),
+  cwd: z.string(),
+  objective: z.string(),
+  spec: AgenticScheduleSpecSchema,
+  enabled: z.boolean(),
+});
+export type AgenticScheduleRequest = z.infer<
+  typeof AgenticScheduleRequestSchema
+>;
+
+/** A node's current/last MCP tool-call approval record (D5, iter3). PERSISTED
+ *  (unlike `logTail`) — it is the durable half of the per-run proxy's
+ *  approval-mediation ledger. */
+export const PendingToolCallSchema = z.object({
+  id: z.string(),
+  toolName: z.string(),
+  connectionId: z.string().nullable(),
+  argsPreview: z.string(),
+  status: z.enum(["pending", "approved", "rejected", "timed_out"]),
+  createdAt: z.number(),
+  decidedAt: z.number().nullable(),
+  reason: z.string().nullable(),
+});
+export type PendingToolCall = z.infer<typeof PendingToolCallSchema>;
+
+/** One entry in a run's bounded MCP tool-call audit log (D5, iter3). */
+export const ToolCallLogEntrySchema = z.object({
+  id: z.string(),
+  nodeId: z.string().nullable(),
+  toolName: z.string(),
+  connectionId: z.string().nullable(),
+  targetType: z.string().nullable(),
+  disposition: z.enum(["allow", "deny", "approved", "rejected", "timed_out"]),
+  argsPreview: z.string(),
+  at: z.number(),
+});
+export type ToolCallLogEntry = z.infer<typeof ToolCallLogEntrySchema>;
+
+/** One workflow step's durable execution record (D3 — the run's position). */
+export const NodeExecutionSchema = z.object({
+  nodeId: z.string(),
+  status: z.enum([
+    "pending",
+    "running",
+    "waiting-approval",
+    "done",
+    "failed",
+    "skipped",
+  ]),
+  /** Ties an agent-task step to its tmux job (D3 layer 1). */
+  agentRunId: z.string().nullable().optional(),
+  /** For parallel fan-out: the parent step whose children these are. */
+  parentNodeId: z.string().nullable().optional(),
+  startedAt: z.number().nullable().optional(),
+  finishedAt: z.number().nullable().optional(),
+  /** Router-selected edge keys (`from->to`), persisted for restart safety. */
+  chosenEdges: z.array(z.string()).optional(),
+  /** Display-only evaluation score; never used for routing or skip logic. */
+  score: z.number().optional(),
+  /** Display-only current bounded-loop iteration. */
+  iterationCount: z.number().int().optional(),
+  /** Display-only marker that the bounded loop did not converge. */
+  loopExhausted: z.boolean().optional(),
+  /** Display-only verdict emitted by the most recently completed iteration. */
+  lastVerdict: z.string().optional(),
+  /** The node's current/last MCP tool-call approval record, if any (D5, iter3). */
+  pendingToolCall: PendingToolCallSchema.nullable().optional(),
+  /** Derived on GET (tailed step log); never persisted. */
+  logTail: z.string().optional(),
+});
+export type NodeExecution = z.infer<typeof NodeExecutionSchema>;
+
+/** One execution of an Agentic AI. Returned by GET /api/agentic/runs/:id. */
+export const RunSchema = z.object({
+  id: z.string(),
+  agenticAiId: z.string(),
+  /** Snapshot of the definition version this run executed with (D9). */
+  agenticAiVersion: z.number().int(),
+  /** Frozen, resolved config (agents+workflow+toolPolicies) at start time (D9). */
+  resolvedConfig: z.record(z.string(), z.unknown()).optional(),
+  sessionId: z.string().nullable().default(null),
+  objective: z.string().default(""),
+  status: z.enum([
+    "queued",
+    "running",
+    "waiting-approval",
+    "completed",
+    "failed",
+    "cancelled",
+    "budget_exhausted",
+  ]),
+  /** The durable workflow ledger — this array IS the run's position (D3). */
+  nodeExecutions: z.array(NodeExecutionSchema).default([]),
+  /** Display-only spawn usage derived from node spawn attempts. */
+  spawnsUsed: z.number().optional(),
+  /** Display-only copy of the run's frozen budget. */
+  budget: AgenticBudgetSchema.nullable().optional(),
+  /** Bounded MCP tool-call audit log (D5, iter3) — oldest entries trimmed. */
+  toolCallLog: z.array(ToolCallLogEntrySchema).default([]),
+  startedAt: z.number().nullable().default(null),
+  finishedAt: z.number().nullable().default(null),
+});
+export type Run = z.infer<typeof RunSchema>;
+
+/** Lightweight run row for GET /api/agentic/runs (no nodeExecutions/logs). */
+export const RunSummarySchema = z.object({
+  id: z.string(),
+  agenticAiId: z.string(),
+  agenticAiVersion: z.number().int(),
+  status: z.enum([
+    "queued",
+    "running",
+    "waiting-approval",
+    "completed",
+    "failed",
+    "cancelled",
+    "budget_exhausted",
+  ]),
+  objective: z.string(),
+  startedAt: z.number().nullable(),
+  finishedAt: z.number().nullable(),
+});
+export type RunSummary = z.infer<typeof RunSummarySchema>;
+
+/** Request body for POST /api/agentic/agents. */
+export const CreateAgentRequestSchema = z.object({
+  name: z.string().min(1).max(512),
+  runtimeProvider: AgentRuntimeProviderSchema,
+  role: z.string().max(128).optional(),
+  systemPrompt: z.string().max(8192).default(""),
+  sandboxMode: AgentSandboxModeSchema.default("read-only"),
+  toolPolicies: z.array(AgentToolPolicySchema).optional(),
+  model: z.string().max(256).nullable().optional(),
+});
+export type CreateAgentRequest = z.infer<typeof CreateAgentRequestSchema>;
+
+/** Request body for PATCH /api/agentic/agents/:id (partial; ≥1 field). */
+export const UpdateAgentRequestSchema = z
+  .object({
+    name: z.string().min(1).max(512).optional(),
+    runtimeProvider: AgentRuntimeProviderSchema.optional(),
+    role: z.string().max(128).nullable().optional(),
+    systemPrompt: z.string().max(8192).optional(),
+    sandboxMode: AgentSandboxModeSchema.optional(),
+    toolPolicies: z.array(AgentToolPolicySchema).optional(),
+    model: z.string().max(256).nullable().optional(),
+  })
+  .refine(
+    (b) =>
+      b.name !== undefined ||
+      b.runtimeProvider !== undefined ||
+      b.role !== undefined ||
+      b.systemPrompt !== undefined ||
+      b.sandboxMode !== undefined ||
+      b.toolPolicies !== undefined ||
+      b.model !== undefined,
+    { message: "at least one field is required" },
+  );
+export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequestSchema>;
+
+/** Request body for POST /api/agentic/connections. */
+export const CreateConnectionRequestSchema = z.object({
+  targetType: z.enum(["pm", "kanban"]),
+  scope: z.enum(["fixed", "runtime-selection"]).default("fixed"),
+  targetId: z.string().nullable().optional(),
+});
+export type CreateConnectionRequest = z.infer<
+  typeof CreateConnectionRequestSchema
+>;
+
+/** Request body for POST /api/agentic/apps (creates at version 1, draft). */
+export const CreateAgenticAiRequestSchema = z.object({
+  name: z.string().min(1).max(512),
+  description: z.string().max(8192).optional(),
+  objectiveTemplate: z.string().max(8192).optional(),
+  orchestrationMode: z
+    .enum(["single", "supervisor", "sequential", "parallel"])
+    .default("single"),
+  agentIds: z.array(z.string()).default([]),
+  connectionIds: z.array(z.string()).optional(),
+  workflow: WorkflowDefinitionSchema.optional(),
+  budget: AgenticBudgetSchema.optional(),
+});
+export type CreateAgenticAiRequest = z.infer<
+  typeof CreateAgenticAiRequestSchema
+>;
+
+/** Request body for PATCH /api/agentic/apps/:id (partial; bumps version, D9). */
+export const UpdateAgenticAiRequestSchema = z
+  .object({
+    name: z.string().min(1).max(512).optional(),
+    description: z.string().max(8192).optional(),
+    objectiveTemplate: z.string().max(8192).optional(),
+    orchestrationMode: z
+      .enum(["single", "supervisor", "sequential", "parallel"])
+      .optional(),
+    agentIds: z.array(z.string()).optional(),
+    connectionIds: z.array(z.string()).optional(),
+    workflow: WorkflowDefinitionSchema.optional(),
+    /** null clears the budget; the gateway's cleanBudget() treats null as "unset". */
+    budget: AgenticBudgetSchema.nullable().optional(),
+  })
+  .refine(
+    (b) =>
+      b.name !== undefined ||
+      b.description !== undefined ||
+      b.objectiveTemplate !== undefined ||
+      b.orchestrationMode !== undefined ||
+      b.agentIds !== undefined ||
+      b.connectionIds !== undefined ||
+      b.workflow !== undefined ||
+      b.budget !== undefined,
+    { message: "at least one field is required" },
+  );
+export type UpdateAgenticAiRequest = z.infer<
+  typeof UpdateAgenticAiRequestSchema
+>;
+
+/** Request body for PATCH /api/agentic/apps/:id/status — "publish" (D8). */
+export const UpdateAgenticAiStatusRequestSchema = z.object({
+  status: z.enum(["draft", "published", "paused", "archived"]),
+});
+export type UpdateAgenticAiStatusRequest = z.infer<
+  typeof UpdateAgenticAiStatusRequestSchema
+>;
+
+/** Request body for POST .../nodes/:nodeId/pending-tool-call (proxy -> gateway,
+ *  D5 iter3). */
+export const PendingToolCallRequestSchema = z.object({
+  toolName: z.string().min(1).max(256),
+  connectionId: z.string().nullable().optional(),
+  argsPreview: z.string().max(1024).optional(),
+});
+export type PendingToolCallRequest = z.infer<
+  typeof PendingToolCallRequestSchema
+>;
+
+/** Request body for POST .../nodes/:nodeId/approve (human, D5 iter3 plan §3). */
+export const ApproveNodeRequestSchema = z.object({
+  pendingId: z.string().optional(),
+});
+export type ApproveNodeRequest = z.infer<typeof ApproveNodeRequestSchema>;
+
+/** Request body for POST .../nodes/:nodeId/reject (human, D5 iter3 plan §3). */
+export const RejectNodeRequestSchema = z.object({
+  pendingId: z.string().optional(),
+  reason: z.string().max(2048).optional(),
+});
+export type RejectNodeRequest = z.infer<typeof RejectNodeRequestSchema>;

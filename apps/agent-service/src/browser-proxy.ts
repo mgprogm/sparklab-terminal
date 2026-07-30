@@ -1,8 +1,9 @@
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { connect, type Socket } from "node:net";
 import {
+  type BrowserHostResolver,
   resolvePublicBrowserHost,
-  validateBrowserUrl,
+  validateBrowserDestination,
 } from "./browser-security.js";
 
 /** A loopback forward proxy that resolves and checks every browser request before connecting by the checked IP. */
@@ -10,13 +11,20 @@ export class SafeBrowserProxy {
   private server: Server | null = null;
   private sockets = new Set<Socket>();
 
+  constructor(
+    private readonly resolveHost: BrowserHostResolver = resolvePublicBrowserHost,
+  ) {}
+
   async start(): Promise<string> {
     if (this.server) throw new Error("browser proxy already started");
     const server = createServer((req, res) => {
       void (async () => {
         try {
-          const url = await validateBrowserUrl(req.url ?? "");
-          const [address] = await resolvePublicBrowserHost(url.hostname);
+          const { url, addresses } = await validateBrowserDestination(
+            req.url ?? "",
+            this.resolveHost,
+          );
+          const [address] = addresses;
           if (!address) throw new Error("destination has no public address");
           const headers: Record<string, string | string[] | undefined> = {
             ...req.headers,
@@ -66,10 +74,11 @@ export class SafeBrowserProxy {
           if (!Number.isInteger(port) || port < 1 || port > 65535)
             throw new Error("invalid port");
           const urlHost = host.includes(":") ? `[${host}]` : host;
-          await validateBrowserUrl(
+          const { addresses } = await validateBrowserDestination(
             `https://${urlHost}${port === 443 ? "" : `:${port}`}`,
+            this.resolveHost,
           );
-          const [address] = await resolvePublicBrowserHost(host);
+          const [address] = addresses;
           if (!address) throw new Error("destination has no public address");
           const upstream = connect({
             host: address,

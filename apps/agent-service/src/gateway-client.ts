@@ -15,6 +15,26 @@ import type {
   CreateSessionResponse,
   CodexRunResponse,
   CodexSandboxMode,
+  KanbanBoard,
+  KanbanBoardSummary,
+  KanbanCard,
+  KanbanListResponse,
+  CreateBoardRequest,
+  UpdateBoardRequest,
+  CreateCardRequest,
+  UpdateCardRequest,
+  PmProject,
+  PmProjectSummary,
+  PmTask,
+  PmSprint,
+  PmListResponse,
+  CreateProjectRequest,
+  UpdateProjectRequest,
+  CreateTaskRequest,
+  UpdateTaskRequest,
+  CreateSprintRequest,
+  CreateColumnRequest,
+  UpdateColumnRequest,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -194,6 +214,405 @@ class GatewayClient {
         body: JSON.stringify(opts),
       }),
     );
+  }
+
+  // --- Kanban -------------------------------------------------------------
+  // The agent drives the gateway-owned Kanban board purely as a REST client
+  // (mirrors how it drives terminals); the gateway stays the single store of
+  // record and enforcement point.
+
+  async listKanbanBoards(): Promise<KanbanBoardSummary[]> {
+    const r = await this.json<KanbanListResponse>(
+      await this.call("/api/kanban/boards"),
+    );
+    return r.boards;
+  }
+
+  async getKanbanBoard(boardId: string): Promise<KanbanBoard> {
+    return this.json<KanbanBoard>(
+      await this.call(`/api/kanban/boards/${encodeURIComponent(boardId)}`),
+    );
+  }
+
+  async createKanbanBoard(body: CreateBoardRequest): Promise<KanbanBoard> {
+    return this.json<KanbanBoard>(
+      await this.call("/api/kanban/boards", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  async updateKanbanBoard(
+    boardId: string,
+    body: UpdateBoardRequest,
+  ): Promise<KanbanBoard> {
+    return this.json<KanbanBoard>(
+      await this.call(`/api/kanban/boards/${encodeURIComponent(boardId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  /** Delete a whole board. Gateway returns 204 on success (no body). */
+  async deleteKanbanBoard(boardId: string): Promise<void> {
+    const res = await this.call(
+      `/api/kanban/boards/${encodeURIComponent(boardId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async addKanbanCard(
+    boardId: string,
+    body: CreateCardRequest,
+  ): Promise<KanbanCard> {
+    return this.json<KanbanCard>(
+      await this.call(
+        `/api/kanban/boards/${encodeURIComponent(boardId)}/cards`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async updateKanbanCard(
+    boardId: string,
+    cardId: string,
+    body: Omit<UpdateCardRequest, "boardId">,
+  ): Promise<KanbanCard> {
+    return this.json<KanbanCard>(
+      await this.call(`/api/kanban/cards/${encodeURIComponent(cardId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ boardId, ...body }),
+      }),
+    );
+  }
+
+  /**
+   * Move (or reorder) a card. The gateway rejects a stale `rev` with 409 and
+   * echoes the current board; we surface that as `{ stale: true, board }` so
+   * the tool executor can refetch the fresh rev and retry once — the model
+   * never has to manage rev itself.
+   */
+  async moveKanbanCard(
+    boardId: string,
+    cardId: string,
+    body: { toColumnId: string; toIndex: number; rev: number },
+  ): Promise<{ stale: boolean; board: KanbanBoard }> {
+    const res = await this.call(
+      `/api/kanban/cards/${encodeURIComponent(cardId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ boardId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as { error?: string; board: KanbanBoard };
+      return { stale: true, board: b.board };
+    }
+    return { stale: false, board: await this.json<KanbanBoard>(res) };
+  }
+
+  /** Delete a card. `?boardId=` locates it; 204 on success (no body). */
+  async deleteKanbanCard(boardId: string, cardId: string): Promise<void> {
+    const res = await this.call(
+      `/api/kanban/cards/${encodeURIComponent(cardId)}?boardId=${encodeURIComponent(boardId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  // --- Project management (PM) -------------------------------------------
+  // Same posture as Kanban: the agent drives the gateway-owned PM store purely
+  // as a REST client. The gateway remains the single store of record and the
+  // one enforcement point (auth, CSRF, rev-guarded move).
+
+  async listPmProjects(): Promise<PmProjectSummary[]> {
+    const r = await this.json<PmListResponse>(
+      await this.call("/api/pm/projects"),
+    );
+    return r.projects;
+  }
+
+  async getPmProject(projectId: string): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(`/api/pm/projects/${encodeURIComponent(projectId)}`),
+    );
+  }
+
+  /** The project's issue hierarchy as a derived forest (read-only). */
+  async getPmTree(projectId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(`/api/pm/projects/${encodeURIComponent(projectId)}/tree`),
+    );
+  }
+
+  async createPmProject(body: CreateProjectRequest): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call("/api/pm/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  async updatePmProject(
+    projectId: string,
+    body: UpdateProjectRequest,
+  ): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(`/api/pm/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  /** Delete a whole project. Gateway returns 204 on success (no body). */
+  async deletePmProject(projectId: string): Promise<void> {
+    const res = await this.call(
+      `/api/pm/projects/${encodeURIComponent(projectId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async addPmTask(projectId: string, body: CreateTaskRequest): Promise<PmTask> {
+    return this.json<PmTask>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/tasks`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  /**
+   * Update a task's fields and/or its dependency set. The client injects
+   * `projectId` (which locates the task) into the body so callers only pass the
+   * fields they want to change. A dependency cycle comes back as
+   * `400 {error:"dependency cycle"}` → surfaced as a GatewayError.
+   */
+  async updatePmTask(
+    projectId: string,
+    taskId: string,
+    body: Omit<UpdateTaskRequest, "projectId">,
+  ): Promise<PmTask> {
+    return this.json<PmTask>(
+      await this.call(`/api/pm/tasks/${encodeURIComponent(taskId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      }),
+    );
+  }
+
+  /**
+   * Move (or reorder) a task. The gateway rejects a stale `rev` with 409 and
+   * echoes the current project; we surface that as `{ stale: true, project }`
+   * so the tool executor can refetch the fresh rev and retry once — the model
+   * never has to manage rev itself (mirrors moveKanbanCard).
+   */
+  async movePmTask(
+    projectId: string,
+    taskId: string,
+    body: { toColumnId: string; toIndex: number; rev: number },
+  ): Promise<{ stale: boolean; project: PmProject }> {
+    const res = await this.call(
+      `/api/pm/tasks/${encodeURIComponent(taskId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as { error?: string; project: PmProject };
+      return { stale: true, project: b.project };
+    }
+    return { stale: false, project: await this.json<PmProject>(res) };
+  }
+
+  // --- PM Column CRUD -------------------------------------------------------
+
+  async createPmColumn(
+    projectId: string,
+    body: CreateColumnRequest,
+  ): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/columns`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async updatePmColumn(
+    projectId: string,
+    colId: string,
+    body: Omit<UpdateColumnRequest, "projectId">,
+  ): Promise<PmProject> {
+    return this.json<PmProject>(
+      await this.call(`/api/pm/columns/${encodeURIComponent(colId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      }),
+    );
+  }
+
+  /**
+   * Move (reorder) a column. Rev-guarded; mirrors movePmTask — a 409 stale
+   * echoes the current project so the tool executor can retry once.
+   */
+  async movePmColumn(
+    projectId: string,
+    colId: string,
+    body: { toIndex: number; rev: number },
+  ): Promise<{ stale: boolean; project: PmProject }> {
+    const res = await this.call(
+      `/api/pm/columns/${encodeURIComponent(colId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as { error?: string; project: PmProject };
+      return { stale: true, project: b.project };
+    }
+    return { stale: false, project: await this.json<PmProject>(res) };
+  }
+
+  /** Delete a column. 204 on success. */
+  async deletePmColumn(
+    projectId: string,
+    colId: string,
+    opts: { mode?: string; toColumnId?: string } = {},
+  ): Promise<void> {
+    const params = new URLSearchParams({ projectId });
+    if (opts.mode) params.set("mode", opts.mode);
+    if (opts.toColumnId) params.set("toColumnId", opts.toColumnId);
+    const res = await this.call(
+      `/api/pm/columns/${encodeURIComponent(colId)}?${params}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async addPmSprint(
+    projectId: string,
+    body: CreateSprintRequest,
+  ): Promise<PmSprint> {
+    return this.json<PmSprint>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/sprints`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  // --- PM Collaboration (Phase 3) -------------------------------------------
+
+  async addPmComment(
+    projectId: string,
+    taskId: string,
+    body: { body: string },
+  ): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/comments?projectId=${encodeURIComponent(projectId)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async listPmComments(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/comments?projectId=${encodeURIComponent(projectId)}`,
+      ),
+    );
+  }
+
+  async listPmActivity(
+    projectId: string,
+    opts: { limit?: number; before?: number } = {},
+  ): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.before !== undefined) params.set("before", String(opts.before));
+    const qs = params.toString();
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/projects/${encodeURIComponent(projectId)}/activity${qs ? `?${qs}` : ""}`,
+      ),
+    );
+  }
+
+  async watchPmTask(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/watch?projectId=${encodeURIComponent(projectId)}`,
+        { method: "POST" },
+      ),
+    );
+  }
+
+  async unwatchPmTask(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/unwatch?projectId=${encodeURIComponent(projectId)}`,
+        { method: "POST" },
+      ),
+    );
+  }
+
+  async listPmAttachments(projectId: string, taskId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/pm/tasks/${encodeURIComponent(taskId)}/attachments?projectId=${encodeURIComponent(projectId)}`,
+      ),
+    );
+  }
+
+  /** Build a GatewayError from a non-2xx response (used by the 204 methods). */
+  private async error(res: Response): Promise<GatewayError> {
+    let msg = `${res.status}`;
+    try {
+      const b = (await res.json()) as { error?: string };
+      if (b?.error) msg = b.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    return new GatewayError(res.status, msg);
   }
 
   /** Verify a browser's cookie by proxying to GET /api/auth/me. */

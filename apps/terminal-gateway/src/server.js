@@ -20,6 +20,12 @@ import { spawn as ptySpawn } from "node-pty";
 import metadata from "./metadata.js";
 import registry from "./registry.js";
 import push from "./push.js";
+import kanban from "./kanban.js";
+import pm from "./pm.js";
+import pmCollab from "./pm-collab.js";
+import agentic from "./agentic.js";
+import schedules from "./agentic-schedules.js";
+import agentRuntime from "./agent-runtime.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,6 +51,25 @@ const ALLOWED_ORIGINS = new Set(
     .filter(Boolean),
 );
 const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
+// Optional scoped bearer token for the artifact APIs (/api/kanban/* and
+// /api/pm/*). Lets an external AI CLI (Claude/Codex) drive them without a cookie
+// login. Prefers GATEWAY_API_TOKEN (covers both artifacts); the original
+// KANBAN_API_TOKEN remains a backward-compatible fallback so the already-deployed
+// value keeps working unchanged (PM-TOOL-PLAN.md D10). Unset => cookie only.
+const GATEWAY_API_TOKEN =
+  process.env.GATEWAY_API_TOKEN || process.env.KANBAN_API_TOKEN || "";
+const AGENT_MCP_SCOPED_TOKENS = !["0", "false"].includes(
+  String(process.env.AGENT_MCP_SCOPED_TOKENS || "")
+    .trim()
+    .toLowerCase(),
+);
+const configuredAgentMcpTokenTtlMs = Number(process.env.AGENT_MCP_TOKEN_TTL_MS);
+const AGENT_MCP_TOKEN_TTL_MS =
+  Number.isFinite(configuredAgentMcpTokenTtlMs) &&
+  configuredAgentMcpTokenTtlMs > 0
+    ? configuredAgentMcpTokenTtlMs
+    : 3_600_000;
+const SCOPED_MCP_TOKENS = new Map();
 
 // The pre-user/pass shared secret is gone. Refusing to start (rather than
 // ignoring the var) keeps an un-migrated deploy from silently coming up with
@@ -174,6 +199,111 @@ function isAuthenticated(req) {
   if (OPEN_MODE) return true;
   const cookies = parseCookies(req);
   return validateAuthSession(cookies.gw_session);
+}
+
+// True only when the request is backed by a real HUMAN cookie session — NOT
+// when it was authorized solely by the scoped bearer token. This is the gate
+// behind the agentic approve/reject routes (self-approval defense): a claude
+// agent can read GATEWAY_API_TOKEN out of its own --mcp-config (its path is on
+// the CLI argv) and POST .../approve with that bearer to self-approve its own
+// approval-gated tool call — defeating the human gate. Approval is a
+// human-judgment-only action (AGENTIC-AI-CREATOR-PLAN D7), so the bearer must
+// never satisfy it. Open mode (loopback dev) has no auth boundary at all, so it
+// passes through — there is no bearer to distinguish there.
+function isHumanCookieSession(req) {
+  if (OPEN_MODE) return true;
+  const cookies = parseCookies(req);
+  return validateAuthSession(cookies.gw_session);
+}
+
+// Bearer-token auth scoped to the artifact APIs (/api/kanban/*, /api/pm/*).
+// Constant-time compare; only active when a token is configured. Requests from a
+// CLI carry no Origin header, so the CSRF guard is a no-op for them and the token
+// is the auth. (PM-TOOL-PLAN.md D10 — one helper for both artifacts.)
+function isArtifactBearerAuthorized(req) {
+  if (!GATEWAY_API_TOKEN) return false;
+  const header = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m) return false;
+  const provided = Buffer.from(m[1]);
+  const expected = Buffer.from(GATEWAY_API_TOKEN);
+  return (
+    provided.length === expected.length &&
+    crypto.timingSafeEqual(provided, expected)
+  );
+}
+
+function mintScopedMcpToken(runId, nodeId, prefixes) {
+  const now = Date.now();
+  for (const [token, entry] of SCOPED_MCP_TOKENS) {
+    if (now > entry.expiresAt) SCOPED_MCP_TOKENS.delete(token);
+  }
+  const token = crypto.randomBytes(32).toString("hex");
+  SCOPED_MCP_TOKENS.set(token, {
+    runId,
+    nodeId,
+    prefixes: [...new Set(prefixes)].filter(
+      (prefix) => prefix === "pm" || prefix === "kanban",
+    ),
+    expiresAt: now + AGENT_MCP_TOKEN_TTL_MS,
+  });
+  return token;
+}
+
+function revokeScopedMcpTokensForRun(runId) {
+  for (const [token, entry] of SCOPED_MCP_TOKENS) {
+    if (entry.runId === runId) SCOPED_MCP_TOKENS.delete(token);
+  }
+}
+
+function isScopedMcpAuthorized(req, url) {
+  const header = req.headers.authorization || "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match) return false;
+  const entry = SCOPED_MCP_TOKENS.get(match[1]);
+  if (!entry) return false;
+  if (Date.now() > entry.expiresAt) {
+    SCOPED_MCP_TOKENS.delete(match[1]);
+    return false;
+  }
+
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (
+    parts[0] === "api" &&
+    (parts[1] === "pm" || parts[1] === "kanban") &&
+    entry.prefixes.includes(parts[1])
+  ) {
+    return true;
+  }
+  return (
+    (req.method === "POST" || req.method === "GET") &&
+    parts.length >= 7 &&
+    parts[0] === "api" &&
+    parts[1] === "agentic" &&
+    parts[2] === "runs" &&
+    parts[3] === entry.runId &&
+    parts[4] === "nodes" &&
+    parts[5] === entry.nodeId &&
+    parts[6] === "pending-tool-call"
+  );
+}
+
+// Derive an advisory actor string for "who did this" fields (PM reporter, etc.)
+// from the auth channel (PM plan §2). Cookie session → user:<GATEWAY_AUTH_USER>;
+// scoped bearer → client:<X-PM-Actor> (validated) or client:bearer. NOT a trust
+// boundary — auth is still the cookie/bearer itself; this only labels writes.
+function actorOf(req) {
+  const cookies = parseCookies(req);
+  if (validateAuthSession(cookies.gw_session))
+    return `user:${GATEWAY_AUTH_USER || "local"}`;
+  if (isArtifactBearerAuthorized(req)) {
+    const raw = String(req.headers["x-pm-actor"] || "").trim();
+    if (raw && raw.length <= 64 && /^[\w.@:-]+$/.test(raw))
+      return `client:${raw}`;
+    return "client:bearer";
+  }
+  // Open mode (loopback dev) or agent-over-cookie fallthrough.
+  return `user:${GATEWAY_AUTH_USER || "local"}`;
 }
 
 // ---- A1: Origin helpers ----
@@ -951,6 +1081,3605 @@ function readBody(req) {
   });
 }
 
+// Parse a JSON-object request body with the standard 413/400 handling. Returns
+// { ok:true, body } or { ok:false, status, error }.
+async function readJsonObject(req) {
+  try {
+    const raw = await readBody(req);
+    const body = raw.trim() ? JSON.parse(raw) : {};
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false, status: 400, error: "body must be a JSON object" };
+    }
+    return { ok: true, body };
+  } catch (err) {
+    if (err.code === "BODY_TOO_LARGE") {
+      return { ok: false, status: 413, error: "request too large" };
+    }
+    return { ok: false, status: 400, error: "malformed JSON body" };
+  }
+}
+
+// ---- Kanban (/api/kanban/*) ----
+// A gateway-owned, multi-board task tracker (docs/KANBAN-PLAN.md). Store lives in
+// src/kanban.js; every mutator there is synchronous => atomic. This handler only
+// validates input and maps coded store errors to HTTP: not_found -> 404,
+// stale -> 409, everything else -> 400. `seg` = path after /api/kanban.
+async function handleKanban(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // GET /api/kanban/boards — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "boards") {
+      return sendJson(res, 200, { boards: kanban.listBoards() });
+    }
+    // GET /api/kanban/boards/:boardId — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "boards") {
+      const board = kanban.getBoard(seg[1]);
+      if (!board) return sendJson(res, 404, { error: "board not found" });
+      return sendJson(res, 200, board);
+    }
+    // POST /api/kanban/boards — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "boards") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name, tags, columns } = r.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      if (columns !== undefined && !Array.isArray(columns)) {
+        return sendJson(res, 400, { error: "columns must be an array" });
+      }
+      const board = kanban.createBoard({
+        name: name.trim(),
+        tags: Array.isArray(tags) ? tags.map(String) : [],
+        columns: Array.isArray(columns) ? columns.map(String) : undefined,
+      });
+      return sendJson(res, 201, board);
+    }
+    // PATCH /api/kanban/boards/:boardId — rename / retag
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "boards") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const patch = {};
+      if (r.body.name !== undefined) {
+        if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+          return sendJson(res, 400, {
+            error: "name must be a non-empty string",
+          });
+        }
+        patch.name = r.body.name.trim();
+      }
+      if (r.body.tags !== undefined) {
+        if (!Array.isArray(r.body.tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = r.body.tags.map(String);
+      }
+      if (patch.name === undefined && patch.tags === undefined) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, kanban.updateBoard(seg[1], patch));
+    }
+    // DELETE /api/kanban/boards/:boardId — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "boards") {
+      if (!kanban.deleteBoard(seg[1])) {
+        return sendJson(res, 404, { error: "board not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/kanban/boards/:boardId/cards — add card
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "boards" &&
+      seg[2] === "cards"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { title, description, tags, columnId } = r.body;
+      if (typeof title !== "string" || !title.trim()) {
+        return sendJson(res, 400, { error: "title is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      const card = kanban.createCard(seg[1], {
+        title: title.trim(),
+        description: typeof description === "string" ? description : "",
+        tags: Array.isArray(tags) ? tags.map(String) : [],
+        columnId: typeof columnId === "string" ? columnId : undefined,
+      });
+      return sendJson(res, 201, card);
+    }
+    // PATCH /api/kanban/cards/:cardId — edit card (boardId in body)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "cards") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { boardId, title, description, tags } = r.body;
+      if (typeof boardId !== "string") {
+        return sendJson(res, 400, { error: "boardId is required" });
+      }
+      const patch = {};
+      if (title !== undefined) {
+        if (typeof title !== "string" || !title.trim()) {
+          return sendJson(res, 400, {
+            error: "title must be a non-empty string",
+          });
+        }
+        patch.title = title.trim();
+      }
+      if (description !== undefined) patch.description = String(description);
+      if (tags !== undefined) {
+        if (!Array.isArray(tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = tags.map(String);
+      }
+      if (
+        patch.title === undefined &&
+        patch.description === undefined &&
+        patch.tags === undefined
+      ) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, kanban.updateCard(boardId, seg[1], patch));
+    }
+    // POST /api/kanban/cards/:cardId/move — move (optimistic concurrency)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "cards" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { boardId, toColumnId, toIndex, rev } = r.body;
+      if (typeof boardId !== "string" || typeof toColumnId !== "string") {
+        return sendJson(res, 400, {
+          error: "boardId and toColumnId are required",
+        });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      try {
+        const board = kanban.moveCard(boardId, seg[1], {
+          toColumnId,
+          toIndex,
+          expectedRev: typeof rev === "number" ? rev : undefined,
+        });
+        return sendJson(res, 200, board);
+      } catch (e) {
+        if (e.code === "stale") {
+          // Return the current board so the client can reconcile + retry.
+          return sendJson(res, 409, {
+            error: "stale",
+            board: kanban.getBoard(boardId) ?? null,
+          });
+        }
+        throw e;
+      }
+    }
+    // DELETE /api/kanban/cards/:cardId — boardId via ?boardId= or JSON body
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "cards") {
+      let boardId = url.searchParams.get("boardId") || "";
+      if (!boardId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.boardId === "string")
+          boardId = r.body.boardId;
+      }
+      if (!boardId) return sendJson(res, 400, { error: "boardId is required" });
+      if (!kanban.deleteCard(boardId, seg[1])) {
+        return sendJson(res, 404, { error: "card not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      const status =
+        e.code === "not_found" ? 404 : e.code === "stale" ? 409 : 400;
+      return sendJson(res, status, { error: e.message });
+    }
+    throw e;
+  }
+}
+
+// Map a coded pm.js store error to an HTTP status. New-rejection slugs use 422
+// (never blindly retried by the agent, unlike 409 stale — plan P5); state
+// conflicts use 409; not_found 404; everything else (cycle/bad_request/
+// validation) 400. The full table is wired now so Phase 2/3 need no change.
+function pmErrorStatus(code) {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "stale":
+    case "key_taken":
+    case "column_not_empty":
+      return 409;
+    case "hierarchy_invalid":
+    case "wip_exceeded":
+    case "transition_forbidden":
+      return 422;
+    default:
+      return 400; // cycle | bad_request | validation
+  }
+}
+
+// ---- Project-management tool (/api/pm/*) ----
+// A Kanban-first PM suite (docs/PM-TOOL-PLAN.md). Store: src/pm.js (synchronous
+// mutators => atomic). Coded store errors map via pmErrorStatus(). `seg` = path
+// after /api/pm.
+async function handlePm(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // GET /api/pm/projects — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "projects") {
+      return sendJson(res, 200, { projects: pm.listProjects() });
+    }
+    // GET /api/pm/projects/:id — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "projects") {
+      const project = pm.getProject(seg[1]);
+      if (!project) return sendJson(res, 404, { error: "project not found" });
+      return sendJson(res, 200, project);
+    }
+    // GET /api/pm/projects/:id/tree — Epic→Story→Subtask forest (derived)
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "tree"
+    ) {
+      const tree = pm.getTree(seg[1]);
+      if (!tree) return sendJson(res, 404, { error: "project not found" });
+      return sendJson(res, 200, tree);
+    }
+    // POST /api/pm/projects — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "projects") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name, tags, columns } = r.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      if (columns !== undefined && !Array.isArray(columns)) {
+        return sendJson(res, 400, { error: "columns must be an array" });
+      }
+      if (r.body.key !== undefined && typeof r.body.key !== "string") {
+        return sendJson(res, 400, { error: "key must be a string" });
+      }
+      return sendJson(
+        res,
+        201,
+        pm.createProject({
+          name: name.trim(),
+          tags: Array.isArray(tags) ? tags : [],
+          columns: Array.isArray(columns) ? columns : undefined,
+          ...(typeof r.body.key === "string" && r.body.key.trim()
+            ? { key: r.body.key.trim() }
+            : {}),
+        }),
+      );
+    }
+    // PATCH /api/pm/projects/:id — rename / retag
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "projects") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const patch = {};
+      if (r.body.name !== undefined) {
+        if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+          return sendJson(res, 400, {
+            error: "name must be a non-empty string",
+          });
+        }
+        patch.name = r.body.name.trim();
+      }
+      if (r.body.tags !== undefined) {
+        if (!Array.isArray(r.body.tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = r.body.tags;
+      }
+      if (r.body.key !== undefined) {
+        if (typeof r.body.key !== "string" || !r.body.key.trim()) {
+          return sendJson(res, 400, {
+            error: "key must be a non-empty string",
+          });
+        }
+        patch.key = r.body.key.trim();
+      }
+      if (
+        patch.name === undefined &&
+        patch.tags === undefined &&
+        patch.key === undefined
+      ) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, pm.updateProject(seg[1], patch));
+    }
+    // DELETE /api/pm/projects/:id — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "projects") {
+      if (!pm.deleteProject(seg[1])) {
+        return sendJson(res, 404, { error: "project not found" });
+      }
+      // Cascade: purge all collab data for this project (best-effort).
+      try {
+        pmCollab.deleteAllForProject(seg[1]);
+      } catch {
+        /* swallow */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/pm/projects/:id/tasks — add task
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.title !== "string" || !r.body.title.trim()) {
+        return sendJson(res, 400, { error: "title is required" });
+      }
+      // Reporter defaults to the creating actor (§5.4); an explicit reporter in
+      // the body wins (editable). Auto-watcher handled in the store.
+      const actor = actorOf(req);
+      const reporter =
+        typeof r.body.reporter === "string" && r.body.reporter.trim()
+          ? r.body.reporter.trim()
+          : actor;
+      const created = pm.createTask(seg[1], {
+        ...r.body,
+        title: r.body.title.trim(),
+        reporter,
+      });
+      // Activity: created.
+      try {
+        pmCollab.appendActivity(seg[1], {
+          actor,
+          verb: "created",
+          target: { type: "task", id: created.id },
+          taskId: created.id,
+          summary: `created ${created.type || "task"} "${created.title}"`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 201, created);
+    }
+    // POST /api/pm/projects/:id/columns — add column
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "columns"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+        return sendJson(res, 400, { error: "column name is required" });
+      }
+      if (
+        r.body.index !== undefined &&
+        (!Number.isInteger(r.body.index) || r.body.index < 0)
+      ) {
+        return sendJson(res, 400, {
+          error: "index must be a non-negative integer",
+        });
+      }
+      const created = pm.createColumn(seg[1], {
+        name: r.body.name.trim(),
+        index: r.body.index,
+        wipLimit: r.body.wipLimit,
+        transitions: r.body.transitions,
+      });
+      // Activity: column_added.
+      try {
+        const newCol = created.columns.find(
+          (c) => c.name === r.body.name.trim(),
+        );
+        pmCollab.appendActivity(seg[1], {
+          actor: actorOf(req),
+          verb: "column_added",
+          target: { type: "column", id: newCol ? newCol.id : "unknown" },
+          summary: `created column "${r.body.name.trim()}"`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 201, created);
+    }
+    // PATCH /api/pm/columns/:colId — rename / set wipLimit / transitions
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "columns") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      const updated = pm.updateColumn(r.body.projectId, seg[1], {
+        name: r.body.name,
+        wipLimit: r.body.wipLimit,
+        transitions: r.body.transitions,
+      });
+      // Activity: one record per changed aspect (wip_set, transition_set, or generic updated).
+      try {
+        const actor = actorOf(req);
+        const colId = seg[1];
+        if (r.body.wipLimit !== undefined) {
+          pmCollab.appendActivity(r.body.projectId, {
+            actor,
+            verb: "wip_set",
+            target: { type: "column", id: colId },
+            summary: `set WIP limit on column ${colId} to ${r.body.wipLimit}`,
+          });
+        }
+        if (r.body.transitions !== undefined) {
+          pmCollab.appendActivity(r.body.projectId, {
+            actor,
+            verb: "transition_set",
+            target: { type: "column", id: colId },
+            summary: `set transitions on column ${colId}`,
+          });
+        }
+        if (
+          r.body.name !== undefined &&
+          r.body.wipLimit === undefined &&
+          r.body.transitions === undefined
+        ) {
+          pmCollab.appendActivity(r.body.projectId, {
+            actor,
+            verb: "updated",
+            target: { type: "column", id: colId },
+            summary: `renamed column ${colId} to "${r.body.name}"`,
+          });
+        }
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, updated);
+    }
+    // POST /api/pm/columns/:colId/move — reorder (rev-guarded)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "columns" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { projectId, toIndex, rev } = r.body;
+      if (typeof projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      try {
+        const moved = pm.moveColumn(projectId, seg[1], {
+          toIndex,
+          expectedRev: typeof rev === "number" ? rev : undefined,
+        });
+        // Activity: column moved (reuses "moved" verb for consistency with task move).
+        try {
+          pmCollab.appendActivity(projectId, {
+            actor: actorOf(req),
+            verb: "moved",
+            target: { type: "column", id: seg[1] },
+            summary: `moved column ${seg[1]} to index ${toIndex}`,
+          });
+        } catch {
+          /* swallow */
+        }
+        return sendJson(res, 200, moved);
+      } catch (e) {
+        if (e.code === "stale") {
+          return sendJson(res, 409, {
+            error: "stale",
+            project: pm.getProject(projectId) ?? null,
+          });
+        }
+        throw e;
+      }
+    }
+    // DELETE /api/pm/columns/:colId?projectId=&mode=&toColumnId= — delete column
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "columns") {
+      let projectId = url.searchParams.get("projectId") || "";
+      let mode = url.searchParams.get("mode") || "";
+      let toColumnId = url.searchParams.get("toColumnId") || "";
+      // Also accept from JSON body as a fallback.
+      if (!projectId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.projectId === "string")
+          projectId = r.body.projectId;
+        if (r.ok && typeof r.body.mode === "string") mode = r.body.mode;
+        if (r.ok && typeof r.body.toColumnId === "string")
+          toColumnId = r.body.toColumnId;
+      }
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (mode && mode !== "block" && mode !== "relocate")
+        return sendJson(res, 400, {
+          error: 'mode must be "block" or "relocate"',
+        });
+      // Capture column name before deletion (it will be gone after).
+      const preProject = pm.getProject(projectId);
+      const deletingCol = preProject
+        ? preProject.columns.find((c) => c.id === seg[1])
+        : null;
+      const deletingColName = deletingCol ? deletingCol.name : seg[1];
+      pm.deleteColumn(projectId, seg[1], {
+        mode: mode || "block",
+        toColumnId: toColumnId || undefined,
+      });
+      // Activity: column_deleted.
+      try {
+        const effectiveMode = mode || "block";
+        const summary =
+          effectiveMode === "relocate"
+            ? `deleted column "${deletingColName}" (tasks relocated to ${toColumnId})`
+            : `deleted column "${deletingColName}" (empty)`;
+        pmCollab.appendActivity(projectId, {
+          actor: actorOf(req),
+          verb: "column_deleted",
+          target: { type: "column", id: seg[1] },
+          summary,
+        });
+      } catch {
+        /* swallow */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/pm/projects/:id/sprints — add sprint
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "sprints"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      return sendJson(
+        res,
+        201,
+        pm.createSprint(seg[1], { ...r.body, name: r.body.name.trim() }),
+      );
+    }
+    // PATCH /api/pm/tasks/:id — edit task fields / dependencies
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "tasks") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      const updated = pm.updateTask(r.body.projectId, seg[1], r.body);
+      // Activity: updated.
+      try {
+        const actor = actorOf(req);
+        pmCollab.appendActivity(r.body.projectId, {
+          actor,
+          verb: "updated",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `updated task ${updated.key || seg[1]}`,
+        });
+        // Notify watchers on assignee change.
+        if (r.body.assignee !== undefined && updated.watchers) {
+          for (const w of updated.watchers) {
+            if (w === actor) continue;
+            pmCollab.notify(w, {
+              event: "assigned",
+              taskId: seg[1],
+              projectId: r.body.projectId,
+              summary: `${actor} updated task ${updated.key || seg[1]}`,
+            });
+          }
+        }
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, updated);
+    }
+    // POST /api/pm/tasks/:id/move — board move (optimistic concurrency)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { projectId, toColumnId, toIndex, rev } = r.body;
+      if (typeof projectId !== "string" || typeof toColumnId !== "string") {
+        return sendJson(res, 400, {
+          error: "projectId and toColumnId are required",
+        });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      try {
+        const moved = pm.moveTask(projectId, seg[1], {
+          toColumnId,
+          toIndex,
+          expectedRev: typeof rev === "number" ? rev : undefined,
+        });
+        // Activity: moved.
+        try {
+          pmCollab.appendActivity(projectId, {
+            actor: actorOf(req),
+            verb: "moved",
+            target: { type: "task", id: seg[1] },
+            taskId: seg[1],
+            summary: `moved task ${seg[1]} to column ${toColumnId}`,
+          });
+        } catch {
+          /* swallow */
+        }
+        return sendJson(res, 200, moved);
+      } catch (e) {
+        if (e.code === "stale") {
+          return sendJson(res, 409, {
+            error: "stale",
+            project: pm.getProject(projectId) ?? null,
+          });
+        }
+        throw e;
+      }
+    }
+    // DELETE /api/pm/tasks/:id?projectId= — scrubs dependsOn
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "tasks") {
+      let projectId = url.searchParams.get("projectId") || "";
+      if (!projectId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.projectId === "string")
+          projectId = r.body.projectId;
+      }
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (!pm.deleteTask(projectId, seg[1])) {
+        return sendJson(res, 404, { error: "task not found" });
+      }
+      // Cascade: purge comments/attachments for this task (best-effort).
+      try {
+        pmCollab.deleteCommentsForTask(projectId, seg[1]);
+      } catch {
+        /* swallow */
+      }
+      try {
+        pmCollab.deleteAttachmentsForTask(projectId, seg[1]);
+      } catch {
+        /* swallow */
+      }
+      // Activity: deleted.
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor: actorOf(req),
+          verb: "deleted",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `deleted task ${seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // PATCH /api/pm/sprints/:id — edit sprint
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "sprints") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.projectId !== "string") {
+        return sendJson(res, 400, { error: "projectId is required" });
+      }
+      return sendJson(
+        res,
+        200,
+        pm.updateSprint(r.body.projectId, seg[1], r.body),
+      );
+    }
+    // DELETE /api/pm/sprints/:id?projectId= — nulls affected sprintId
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "sprints") {
+      let projectId = url.searchParams.get("projectId") || "";
+      if (!projectId) {
+        const r = await readJsonObject(req);
+        if (r.ok && typeof r.body.projectId === "string")
+          projectId = r.body.projectId;
+      }
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (!pm.deleteSprint(projectId, seg[1])) {
+        return sendJson(res, 404, { error: "sprint not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // ---- Collaboration routes (Phase 3: comments/activity/attachments/watchers/notifications) ----
+
+    // POST /api/pm/tasks/:id/comments?projectId= — add comment
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "comments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.body !== "string" || !r.body.body.trim())
+        return sendJson(res, 400, { error: "body is required" });
+      // Verify the task exists.
+      const project = pm.getProject(projectId);
+      if (!project) return sendJson(res, 404, { error: "project not found" });
+      const task = project.tasks.find((t) => t.id === seg[1]);
+      if (!task) return sendJson(res, 404, { error: "task not found" });
+      const actor = actorOf(req);
+      const comment = pmCollab.addComment(
+        projectId,
+        seg[1],
+        actor,
+        r.body.body,
+      );
+      // Auto-watch the commenter (§4.6).
+      try {
+        pm.watchTask(projectId, seg[1], actor);
+      } catch {
+        /* swallow */
+      }
+      // Activity: commented.
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "commented",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `commented on task ${task.key || seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      // Notify watchers (minus the acting actor).
+      try {
+        const freshProject = pm.getProject(projectId);
+        const freshTask = freshProject
+          ? freshProject.tasks.find((t) => t.id === seg[1])
+          : null;
+        const watchers = (freshTask && freshTask.watchers) || [];
+        for (const w of watchers) {
+          if (w === actor) continue;
+          pmCollab.notify(w, {
+            event: "commented",
+            taskId: seg[1],
+            projectId,
+            summary: `${actor} commented on ${task.key || seg[1]}`,
+          });
+        }
+        // Optional push (best-effort, no comment body in payload — just ids + summary).
+        if (push.isConfigured()) {
+          push
+            .sendToAll({
+              projectId,
+              taskId: seg[1],
+              summary: `${actor} commented on ${task.key || seg[1]}`,
+            })
+            .catch(() => {});
+        }
+      } catch {
+        /* push/notification failure must NEVER rollback the comment */
+      }
+      return sendJson(res, 201, comment);
+    }
+
+    // GET /api/pm/tasks/:id/comments?projectId= — list comments
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "comments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      return sendJson(res, 200, {
+        comments: pmCollab.listComments(projectId, seg[1]),
+      });
+    }
+
+    // PATCH /api/pm/comments/:id — edit comment body
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "comments") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const projectId = r.body.projectId;
+      if (typeof projectId !== "string")
+        return sendJson(res, 400, { error: "projectId is required" });
+      if (typeof r.body.body !== "string" || !r.body.body.trim())
+        return sendJson(res, 400, { error: "body is required" });
+      try {
+        const comment = pmCollab.editComment(projectId, seg[1], r.body.body);
+        return sendJson(res, 200, comment);
+      } catch (e) {
+        return sendJson(res, 404, { error: e.message });
+      }
+    }
+
+    // DELETE /api/pm/comments/:id?projectId=&taskId= — delete comment
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "comments") {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      try {
+        pmCollab.deleteComment(projectId, seg[1]);
+      } catch {
+        /* swallow — tombstone is idempotent */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // GET /api/pm/projects/:id/activity?limit=&before= — activity log
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "activity"
+    ) {
+      const limit = parseInt(url.searchParams.get("limit"), 10) || 50;
+      const beforeStr = url.searchParams.get("before");
+      const before = beforeStr ? Number(beforeStr) : undefined;
+      return sendJson(res, 200, {
+        activity: pmCollab.listActivity(seg[1], { limit, before }),
+      });
+    }
+
+    // GET /api/pm/tasks/:id/attachments?projectId= — list attachments
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "attachments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      return sendJson(res, 200, {
+        attachments: pmCollab.listAttachments(projectId, seg[1]),
+      });
+    }
+
+    // POST /api/pm/tasks/:id/attachments?projectId= — upload attachment (raw body)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "attachments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      // Verify the task exists.
+      const project = pm.getProject(projectId);
+      if (!project) return sendJson(res, 404, { error: "project not found" });
+      const task = project.tasks.find((t) => t.id === seg[1]);
+      if (!task) return sendJson(res, 404, { error: "task not found" });
+      const actor = actorOf(req);
+      const filename = String(req.headers["x-filename"] || "upload");
+      const contentType = String(
+        req.headers["content-type"] || "application/octet-stream",
+      );
+      // ROUTE-LOCAL BODY_LIMIT BYPASS: read raw body (mirroring fs/upload).
+      const PM_ATTACHMENT_CAP =
+        Number(process.env.PM_ATTACHMENT_CAP) || 8 * 1024 * 1024;
+      let buf;
+      try {
+        buf = await new Promise((resolve, reject) => {
+          const chunks = [];
+          let total = 0;
+          let over = false;
+          const tooLarge = () => {
+            const e = new Error("upload too large");
+            e.code = "UPLOAD_TOO_LARGE";
+            return e;
+          };
+          req.on("data", (c) => {
+            total += c.length;
+            if (total > PM_ATTACHMENT_CAP) {
+              if (!over) {
+                over = true;
+                chunks.length = 0;
+              }
+              if (total > PM_ATTACHMENT_CAP + 64 * 1024 * 1024) {
+                req.destroy();
+                reject(tooLarge());
+              }
+              return;
+            }
+            chunks.push(c);
+          });
+          req.on("end", () =>
+            over ? reject(tooLarge()) : resolve(Buffer.concat(chunks)),
+          );
+          req.on("error", reject);
+        });
+      } catch (err) {
+        if (err.code === "UPLOAD_TOO_LARGE") {
+          return sendJson(res, 413, {
+            error: `upload exceeds ${PM_ATTACHMENT_CAP} bytes`,
+          });
+        }
+        return sendJson(res, 400, { error: "failed to read upload body" });
+      }
+      try {
+        const meta = pmCollab.addAttachment(projectId, seg[1], {
+          filename,
+          contentType,
+          buffer: buf,
+          actor,
+        });
+        // Activity: attached.
+        try {
+          pmCollab.appendActivity(projectId, {
+            actor,
+            verb: "attached",
+            target: { type: "attachment", id: meta.id },
+            taskId: seg[1],
+            summary: `attached ${meta.filename} to task ${task.key || seg[1]}`,
+          });
+        } catch {
+          /* swallow */
+        }
+        // Notify watchers.
+        try {
+          const watchers = task.watchers || [];
+          for (const w of watchers) {
+            if (w === actor) continue;
+            pmCollab.notify(w, {
+              event: "attached",
+              taskId: seg[1],
+              projectId,
+              summary: `${actor} attached ${meta.filename} to ${task.key || seg[1]}`,
+            });
+          }
+        } catch {
+          /* swallow */
+        }
+        return sendJson(res, 201, meta);
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+    }
+
+    // GET /api/pm/attachments/:id?projectId= — download blob
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "attachments") {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      const meta = pmCollab.getAttachmentMeta(projectId, seg[1]);
+      if (!meta) return sendJson(res, 404, { error: "attachment not found" });
+      const blobPath = pmCollab.getAttachmentPath(projectId, seg[1]);
+      let stat;
+      try {
+        stat = fs.statSync(blobPath);
+      } catch {
+        return sendJson(res, 404, { error: "attachment blob not found" });
+      }
+      const name = meta.filename || "download";
+      const asciiName = name
+        .replace(/[^\x20-\x7e]/g, "_")
+        .replace(/["\\]/g, "_");
+      res.writeHead(200, {
+        "content-type": meta.contentType || "application/octet-stream",
+        "content-disposition": `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        "content-length": stat.size,
+        "x-content-type-options": "nosniff",
+      });
+      fs.createReadStream(blobPath).pipe(res);
+      return true;
+    }
+
+    // DELETE /api/pm/attachments/:id?projectId= — delete attachment
+    if (
+      req.method === "DELETE" &&
+      seg.length === 2 &&
+      seg[0] === "attachments"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, { error: "projectId is required" });
+      const meta = pmCollab.getAttachmentMeta(projectId, seg[1]);
+      pmCollab.deleteAttachment(projectId, seg[1]);
+      // Activity: detached.
+      try {
+        const actor = actorOf(req);
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "detached",
+          target: { type: "attachment", id: seg[1] },
+          taskId: meta ? meta.taskId : undefined,
+          summary: `removed attachment ${meta ? meta.filename : seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // POST /api/pm/tasks/:id/watch?projectId= — watch task
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "watch"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      const actor = actorOf(req);
+      const task = pm.watchTask(projectId, seg[1], actor);
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "watched",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `${actor} started watching task ${task.key || seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, task);
+    }
+
+    // POST /api/pm/tasks/:id/unwatch?projectId= — unwatch task
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "tasks" &&
+      seg[2] === "unwatch"
+    ) {
+      const projectId = url.searchParams.get("projectId") || "";
+      if (!projectId)
+        return sendJson(res, 400, {
+          error: "projectId query param is required",
+        });
+      const actor = actorOf(req);
+      const task = pm.unwatchTask(projectId, seg[1], actor);
+      try {
+        pmCollab.appendActivity(projectId, {
+          actor,
+          verb: "unwatched",
+          target: { type: "task", id: seg[1] },
+          taskId: seg[1],
+          summary: `${actor} stopped watching task ${task.key || seg[1]}`,
+        });
+      } catch {
+        /* swallow */
+      }
+      return sendJson(res, 200, task);
+    }
+
+    // GET /api/pm/notifications?unread=1 — list notifications for the acting user
+    if (
+      req.method === "GET" &&
+      seg.length === 1 &&
+      seg[0] === "notifications"
+    ) {
+      const recipient = actorOf(req);
+      const unreadOnly = url.searchParams.get("unread") === "1";
+      return sendJson(res, 200, {
+        notifications: pmCollab.listNotifications(recipient, { unreadOnly }),
+      });
+    }
+
+    // POST /api/pm/notifications/read — mark notifications read
+    if (
+      req.method === "POST" &&
+      seg.length === 2 &&
+      seg[0] === "notifications" &&
+      seg[1] === "read"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const recipient = actorOf(req);
+      const updated = pmCollab.markRead(recipient, {
+        ids: Array.isArray(r.body.ids) ? r.body.ids : undefined,
+        all: r.body.all === true,
+      });
+      return sendJson(res, 200, { updated });
+    }
+
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      return sendJson(res, pmErrorStatus(e.code), {
+        error: e.message,
+        ...(e.details || {}),
+      });
+    }
+    throw e;
+  }
+}
+
+// Map a coded agentic.js store error to an HTTP status. invalid_workflow (a
+// cycle or dangling edge) uses 422 like PM's business-rule rejections; stale
+// (rev mismatch) 409; not_found 404; backend_unavailable (reserved for the run
+// engine, iter2) 503; everything else (bad_request/validation) 400.
+function agenticErrorStatus(code) {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "stale":
+      return 409;
+    case "invalid_workflow":
+      return 422;
+    // Run-engine (iter2) driver codes:
+    case "parallel_write_forbidden":
+      return 422; // distinct reason, same class as invalid_workflow
+    case "too_many_runs":
+      return 429; // AGENT_MAX_CONCURRENT_RUNS cap
+    case "session_unreachable":
+    case "cwd_unresolved":
+      return 502; // target server/session could not be reached/resolved
+    case "backend_unavailable":
+      return 503;
+    default:
+      return 400;
+  }
+}
+
+// The artifact MCP targets an Agentic AI's agents may be connected to. These are
+// the currently-registered gateway-owned artifact MCP servers (pm, kanban). Used
+// by the connection picker (GET /api/agentic/mcp-servers) and mirrors the store's
+// CONNECTION_TARGETS set. Additive as future artifacts ship their own MCP server.
+const AGENTIC_MCP_SERVERS = [
+  { id: "pm", name: "Project Management" },
+  { id: "kanban", name: "Kanban" },
+];
+
+// ===========================================================================
+// Agentic AI Creator — RUN ENGINE (iter2). The async orchestration half of the
+// deliberate split described in agentic.js: agentic.js holds ONLY the pure
+// decide() reducer + sync atomic recorders; THESE drivers compose those with the
+// tmux exec seam (serverExec/serverCmd), keeping the gateway the single tmux
+// enforcement point (CLAUDE.md invariant) and agentic.js a pure sync store
+// (hard-constraint #3). Progress lives ONLY in the persisted nodeExecutions[]
+// ledger — the module-level state below is pure concurrency control; losing it
+// on a crash is harmless because boot re-derives everything from the ledger.
+// ===========================================================================
+
+// tmux run-session prefix — DELIBERATELY not "web-" (HARD-constraint #1). Three
+// consequences, all intentional:
+//   1. listSessions() filters name.startsWith(PREFIX="web-"), so agrun- jobs
+//      NEVER surface in the user's sidebar (verified: server.js listSessions).
+//   2. the push poll loop iterates listSessions() output only, so agrun- jobs
+//      never fire "job finished" pushes.
+//   3. attach/keys/DELETE machinery gate on ID_RE=/^web-.../, which agrun- fails,
+//      so a run job is unreachable via the human-session machinery.
+const AGENT_RUN_PREFIX = "agrun-";
+
+// Run-engine caps/config (plan §10; all optional, defaults keep boot unchanged).
+// AGENT_RUNS_DIR must be ABSOLUTE on the TARGET server (a relative default is
+// meaningless over ssh). Local default lives under the gateway data dir; remote
+// resolves a home-relative absolute base (see scratchBaseFor).
+const AGENT_RUNS_DIR =
+  (process.env.AGENT_RUNS_DIR || "").trim() ||
+  path.join(__dirname, "..", "data", "agentic-runs");
+const AGENT_RUN_TIMEOUT_MS =
+  Number(process.env.AGENT_RUN_TIMEOUT_MS) || 1_800_000; // per-step wall clock
+const AGENT_MAX_CONCURRENT_RUNS =
+  Number(process.env.AGENT_MAX_CONCURRENT_RUNS) || 4;
+const configuredDefaultMaxSpawns = Number(process.env.AGENT_DEFAULT_MAX_SPAWNS);
+const AGENT_DEFAULT_MAX_SPAWNS =
+  Number.isInteger(configuredDefaultMaxSpawns) && configuredDefaultMaxSpawns > 0
+    ? configuredDefaultMaxSpawns
+    : undefined;
+const AGENTIC_RUN_MAX_AGE_MS =
+  Number(process.env.AGENTIC_RUN_MAX_AGE_MS) || 259_200_000; // whole-run notify
+const AGENTIC_POLL_INTERVAL_MS =
+  Number(process.env.AGENTIC_POLL_INTERVAL_MS) || 4000;
+const AGENT_SCHEDULE_POLL_INTERVAL_MS =
+  Number(process.env.AGENT_SCHEDULE_POLL_INTERVAL_MS) || 30_000;
+const AGENT_OUTPUT_MAX_BYTES =
+  Number(process.env.AGENT_OUTPUT_MAX_BYTES) || 128 * 1024;
+// Per-MCP-tool-call approval hold window (iter3, D5). Read here (not just by
+// the proxy) so sweepStalePendingApprovals uses the SAME cutoff the proxy's own
+// poll loop gives up at. Default 170000 — empirically confirmed safe up to
+// 170s for both claude -p and codex exec (see AGENTIC-AI-CREATOR-PLAN.md /
+// iter3 build spec §0 Finding B); do not raise past a tested boundary.
+const AGENT_MCP_APPROVAL_TIMEOUT_MS =
+  Number(process.env.AGENT_MCP_APPROVAL_TIMEOUT_MS) || 170_000;
+
+// ---- In-memory concurrency control (NOT run progress; see header) ----
+// advanceRun re-entrancy guard: a run advances one driver-invocation at a time.
+// A concurrent request coalesces into a single re-run (rerunRequested), so a
+// poll tick that lands mid-advance never double-spawns.
+const advancing = new Set(); // runId currently inside advanceRun
+const rerunRequested = new Map(); // runId -> true (a re-advance is queued)
+// Runs we've already sent the whole-run max-age reminder for (notify-once).
+const agenticAgeNotified = new Set();
+// Resolved absolute scratch base per server (avoids an ssh round-trip per tick).
+const scratchBaseCache = new Map(); // serverId -> absolute base path
+
+let agenticPollTimer = null;
+let schedulePollTimer = null;
+let scheduleTicking = false;
+let startReservations = 0;
+
+// The registry server a run targets. Scheduled runs are sessionless and freeze
+// serverId directly; legacy/human runs retain the qualified-session fallback.
+function runServer(run) {
+  const frozenServerId = run?.resolvedConfig?.serverId;
+  if (frozenServerId) return registry.get(frozenServerId);
+  const { serverId } = parseSessionRef(String((run && run.sessionId) || ""));
+  return registry.get(serverId);
+}
+
+// Resolve the ABSOLUTE scratch base on a server. Local = AGENT_RUNS_DIR (already
+// absolute). Remote = a remote-set AGENT_RUNS_DIR if absolute, else
+// $HOME/.cache/agentic-runs — resolved once per server and cached. The gateway's
+// LOCAL AGENT_RUNS_DIR is never used as a remote path (it wouldn't exist there).
+async function scratchBaseFor(server) {
+  const key = server ? server.id : LOCAL_SERVER_ID;
+  if (scratchBaseCache.has(key)) return scratchBaseCache.get(key);
+  let base;
+  if (!server || server.type === "local") {
+    base = AGENT_RUNS_DIR;
+  } else {
+    const { stdout } = await serverCmd(server, [
+      "sh",
+      "-c",
+      'if [ -n "$AGENT_RUNS_DIR" ]; then printf %s "$AGENT_RUNS_DIR"; else printf %s "$HOME/.cache/agentic-runs"; fi',
+    ]);
+    base = stdout.trim();
+    if (!base.startsWith("/"))
+      throw new Error(`remote AGENT_RUNS_DIR not absolute: ${base}`);
+  }
+  scratchBaseCache.set(key, base);
+  return base;
+}
+
+function nodeSessionName(runId, nodeId) {
+  return `${AGENT_RUN_PREFIX}${runId}-${nodeId}`;
+}
+
+async function tmuxHasSession(server, name) {
+  try {
+    await serverExec(server, ["has-session", "-t", name]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function tmuxKill(server, name) {
+  // ONLY EVER an agrun- name derived from a run (HARD-constraint #2: run
+  // teardown never kills a web- session — this helper is only ever passed
+  // nodeSessionName() output).
+  try {
+    await serverExec(server, ["kill-session", "-t", name]);
+  } catch {
+    /* already gone — idempotent */
+  }
+}
+// Read a marker file's contents; "" when it exists-but-empty (start.marker), or
+// null when it does not exist. Existence checks reuse this (val !== null).
+async function readMarker(server, p) {
+  try {
+    const { stdout } = await serverCmd(server, ["cat", "--", p]);
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+// The frozen resolved config + workflow for a start. Custom mode uses its stored
+// DAG; built-in modes derive one here. All nodes type:"agent-task". supervisor
+// COLLAPSES to sequential in iter2 (true delegation needs the deferred
+// agent-to-agent protocol — FLAGGED).
+function buildResolvedWorkflow(app) {
+  const agentIds = (app.agentIds || []).filter(Boolean);
+  if (
+    app.orchestrationMode === "custom" &&
+    Array.isArray(app.workflow?.nodes) &&
+    app.workflow.nodes.length > 0
+  ) {
+    const workflow = {
+      nodes: app.workflow.nodes,
+      edges: app.workflow.edges,
+      entryNodeId: app.workflow.entryNodeId,
+    };
+    const resolvedAgents = {};
+    for (const id of new Set(workflow.nodes.map((node) => node.agentId))) {
+      const agent = agentic.getAgent(id);
+      if (agent) resolvedAgents[id] = agent;
+    }
+    return { workflow, resolvedAgents };
+  }
+  const resolvedAgents = {};
+  for (const id of agentIds) {
+    const a = agentic.getAgent(id);
+    if (a) resolvedAgents[id] = a; // frozen snapshot (shaped copy)
+  }
+  const mode = app.orchestrationMode;
+  let nodes = [];
+  let edges = [];
+  let entryNodeId = null;
+  if (mode === "single") {
+    nodes = [{ id: "n0", type: "agent-task", agentId: agentIds[0] }];
+    entryNodeId = "n0";
+  } else if (mode === "parallel") {
+    // No ordering — every node is ready at once (decide fans out in waves).
+    nodes = agentIds.map((aid, i) => ({
+      id: `n${i}`,
+      type: "agent-task",
+      agentId: aid,
+    }));
+    entryNodeId = null;
+  } else {
+    // sequential + supervisor(=sequential in iter2): n_i -> n_{i+1}.
+    nodes = agentIds.map((aid, i) => ({
+      id: `n${i}`,
+      type: "agent-task",
+      agentId: aid,
+    }));
+    for (let i = 0; i < nodes.length - 1; i++)
+      edges.push({ from: `n${i}`, to: `n${i + 1}` });
+    entryNodeId = nodes.length ? "n0" : null;
+  }
+  return { workflow: { nodes, edges, entryNodeId }, resolvedAgents };
+}
+
+// The per-node prompt (iter2: STATIC — objectiveTemplate + objective, NO
+// inter-node data threading; every node runs the objective independently. The
+// agent's systemPrompt is layered in by agent-runtime.buildInvocation).
+function composePromptText(run, cfg, opts = {}) {
+  const tmpl = (cfg && cfg.objectiveTemplate) || "";
+  const obj = (run && run.objective) || "";
+  const prompt = tmpl ? `${tmpl}\n\n${obj}` : obj;
+  if (!opts.resume) return prompt;
+  return `Revise the prior result. The last verdict was "${opts.lastVerdict}". Continue improving toward the goal, then end with a single line "BRANCH: <verdict>".\n\n${prompt}`;
+}
+
+function scopedMcpPrefixes(cfg, agent) {
+  const toolPolicies = Array.isArray(agent.toolPolicies)
+    ? agent.toolPolicies
+    : [];
+  return [
+    ...new Set(
+      toolPolicies
+        .map((policy) => cfg.connections?.[policy.connectionId]?.targetType)
+        .filter((targetType) => targetType === "pm" || targetType === "kanban"),
+    ),
+  ];
+}
+
+function gatewayApiTokenForNode(run, cfg, nodeId, agent) {
+  let gatewayApiToken = GATEWAY_API_TOKEN;
+  const prefixes = scopedMcpPrefixes(cfg, agent);
+  if (AGENT_MCP_SCOPED_TOKENS && prefixes.length > 0) {
+    gatewayApiToken = mintScopedMcpToken(run.id, nodeId, prefixes);
+  } else if (run?.resolvedConfig?.unattended) {
+    if (Object.keys(cfg.connections || {}).length > 0) {
+      throw agenticErr(
+        "unattended_no_scoped_token",
+        "unattended runs with artifact connections require scoped MCP tokens",
+      );
+    }
+    // No connections means no MCP capability is needed. Keep the token empty;
+    // unattended jobs never receive the broad bearer even in this inert case.
+    gatewayApiToken = "";
+  }
+  return gatewayApiToken;
+}
+
+// Manifest input for unattended runs. agent-runtime builds the actual per-node
+// manifest from this snapshot, so approval-tier tools become unreachable before
+// the proxy starts (the callback route below remains a second fail-closed layer).
+function invocationAgentForRun(run, agent) {
+  if (!run?.resolvedConfig?.unattended) return agent;
+  return {
+    ...agent,
+    toolPolicies: (agent.toolPolicies || []).map((policy) => ({
+      ...policy,
+      policy: policy.policy === "approval" ? "deny" : policy.policy,
+    })),
+  };
+}
+
+function agenticErr(code, message, extra) {
+  const e = new Error(message || code);
+  e.code = code;
+  if (extra) Object.assign(e, extra);
+  return e;
+}
+
+function buildAgenticTemplate(app) {
+  const agents = app.agentIds.map((id) => {
+    const a = agentic.getAgent(id);
+    if (!a) throw agenticErr("not_found", `agent not found: ${id}`);
+    return {
+      ref: a.id,
+      name: a.name,
+      runtimeProvider: a.runtimeProvider,
+      role: a.role,
+      systemPrompt: a.systemPrompt,
+      sandboxMode: a.sandboxMode,
+      model: a.model,
+      toolPolicies: a.toolPolicies.map((p) => ({
+        connectionId: p.connectionId,
+        tools: p.tools === "all" ? "all" : [...p.tools],
+        policy: p.policy,
+      })),
+    };
+  });
+  const connections = app.connectionIds.map((id) => {
+    const c = agentic.getConnection(id);
+    if (!c) throw agenticErr("not_found", `connection not found: ${id}`);
+    return {
+      ref: c.id,
+      targetType: c.targetType,
+      scope: c.scope,
+      targetId: c.targetId,
+    };
+  });
+  return {
+    kind: "agentic-ai-template",
+    version: 1,
+    app: {
+      name: app.name,
+      description: app.description,
+      objectiveTemplate: app.objectiveTemplate,
+      ...(app.budget != null ? { budget: { ...app.budget } } : {}),
+      orchestrationMode: app.orchestrationMode,
+      agentIds: [...app.agentIds],
+      connectionIds: [...app.connectionIds],
+      workflow: {
+        nodes: app.workflow.nodes.map((n) => ({
+          id: n.id,
+          type: n.type,
+          ...(n.agentId != null ? { agentId: n.agentId } : {}),
+          ...(n.retryPolicy ? { retryPolicy: { ...n.retryPolicy } } : {}),
+        })),
+        edges: app.workflow.edges.map((e) => ({ from: e.from, to: e.to })),
+        entryNodeId: app.workflow.entryNodeId,
+      },
+    },
+    agents,
+    connections,
+  };
+}
+
+function validateAgenticTemplate(template) {
+  const invalid = (why) => {
+    throw agenticErr("bad_request", `invalid template: ${why}`);
+  };
+  const isObject = (value) =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const isNullableString = (value) =>
+    value === null || typeof value === "string";
+
+  if (!isObject(template) || template.kind !== "agentic-ai-template")
+    invalid("kind must be agentic-ai-template");
+  if (template.version !== 1) invalid("unsupported version");
+  if (!isObject(template.app)) invalid("app must be an object");
+  if (!Array.isArray(template.agents)) invalid("agents must be an array");
+  if (!Array.isArray(template.connections))
+    invalid("connections must be an array");
+
+  const app = template.app;
+  if (typeof app.name !== "string") invalid("app.name must be a string");
+  if (typeof app.description !== "string")
+    invalid("app.description must be a string");
+  if (typeof app.objectiveTemplate !== "string")
+    invalid("app.objectiveTemplate must be a string");
+  if (typeof app.orchestrationMode !== "string")
+    invalid("app.orchestrationMode must be a string");
+  if (!Array.isArray(app.agentIds)) invalid("app.agentIds must be an array");
+  if (!Array.isArray(app.connectionIds))
+    invalid("app.connectionIds must be an array");
+  if (!isObject(app.workflow)) invalid("app.workflow must be an object");
+  if (!Array.isArray(app.workflow.nodes))
+    invalid("app.workflow.nodes must be an array");
+  if (!Array.isArray(app.workflow.edges))
+    invalid("app.workflow.edges must be an array");
+  if (!isNullableString(app.workflow.entryNodeId))
+    invalid("app.workflow.entryNodeId must be a string or null");
+
+  const connectionRefs = new Set();
+  for (const connection of template.connections) {
+    if (!isObject(connection)) invalid("each connection must be an object");
+    if (typeof connection.ref !== "string" || !connection.ref)
+      invalid("connection.ref must be a non-empty string");
+    if (connectionRefs.has(connection.ref))
+      invalid(`duplicate connection ref: ${connection.ref}`);
+    connectionRefs.add(connection.ref);
+    if (typeof connection.targetType !== "string")
+      invalid(`connection ${connection.ref} targetType must be a string`);
+    if (typeof connection.scope !== "string")
+      invalid(`connection ${connection.ref} scope must be a string`);
+    if (!isNullableString(connection.targetId))
+      invalid(`connection ${connection.ref} targetId must be a string or null`);
+  }
+
+  const agentRefs = new Set();
+  for (const agent of template.agents) {
+    if (!isObject(agent)) invalid("each agent must be an object");
+    if (typeof agent.ref !== "string" || !agent.ref)
+      invalid("agent.ref must be a non-empty string");
+    if (agentRefs.has(agent.ref)) invalid(`duplicate agent ref: ${agent.ref}`);
+    agentRefs.add(agent.ref);
+    if (typeof agent.name !== "string")
+      invalid(`agent ${agent.ref} name must be a string`);
+    if (typeof agent.runtimeProvider !== "string")
+      invalid(`agent ${agent.ref} runtimeProvider must be a string`);
+    if (!isNullableString(agent.role))
+      invalid(`agent ${agent.ref} role must be a string or null`);
+    if (typeof agent.systemPrompt !== "string")
+      invalid(`agent ${agent.ref} systemPrompt must be a string`);
+    if (typeof agent.sandboxMode !== "string")
+      invalid(`agent ${agent.ref} sandboxMode must be a string`);
+    if (!isNullableString(agent.model))
+      invalid(`agent ${agent.ref} model must be a string or null`);
+    if (!Array.isArray(agent.toolPolicies))
+      invalid(`agent ${agent.ref} toolPolicies must be an array`);
+    for (const policy of agent.toolPolicies) {
+      if (!isObject(policy))
+        invalid(`agent ${agent.ref} toolPolicy must be an object`);
+      if (
+        typeof policy.connectionId !== "string" ||
+        !connectionRefs.has(policy.connectionId)
+      )
+        invalid(
+          `agent ${agent.ref} references unknown connection: ${policy.connectionId}`,
+        );
+      if (
+        policy.tools !== "all" &&
+        (!Array.isArray(policy.tools) ||
+          policy.tools.some((tool) => typeof tool !== "string"))
+      )
+        invalid(`agent ${agent.ref} toolPolicy.tools is invalid`);
+      if (typeof policy.policy !== "string")
+        invalid(`agent ${agent.ref} toolPolicy.policy must be a string`);
+    }
+  }
+
+  for (const ref of app.agentIds) {
+    if (typeof ref !== "string" || !agentRefs.has(ref))
+      invalid(`app.agentIds references unknown agent: ${ref}`);
+  }
+  for (const ref of app.connectionIds) {
+    if (typeof ref !== "string" || !connectionRefs.has(ref))
+      invalid(`app.connectionIds references unknown connection: ${ref}`);
+  }
+  for (const node of app.workflow.nodes) {
+    if (!isObject(node)) invalid("each workflow node must be an object");
+    if (typeof node.id !== "string" || typeof node.type !== "string")
+      invalid("workflow node id and type must be strings");
+    if (
+      node.agentId !== undefined &&
+      (typeof node.agentId !== "string" || !agentRefs.has(node.agentId))
+    )
+      invalid(`workflow node references unknown agent: ${node.agentId}`);
+  }
+  for (const edge of app.workflow.edges) {
+    if (
+      !isObject(edge) ||
+      typeof edge.from !== "string" ||
+      typeof edge.to !== "string"
+    )
+      invalid("workflow edge from and to must be strings");
+  }
+}
+
+function importAgenticTemplate(template, name) {
+  validateAgenticTemplate(template);
+  const connectionIds = new Map();
+  const agentIds = new Map();
+  const createdConnectionIds = [];
+  const createdAgentIds = [];
+  try {
+    for (const connection of template.connections) {
+      const created = agentic.createConnection({
+        targetType: connection.targetType,
+        scope: connection.scope,
+        targetId: connection.targetId,
+      });
+      connectionIds.set(connection.ref, created.id);
+      createdConnectionIds.push(created.id);
+    }
+    for (const agent of template.agents) {
+      const created = agentic.createAgent({
+        name: agent.name,
+        runtimeProvider: agent.runtimeProvider,
+        role: agent.role,
+        systemPrompt: agent.systemPrompt,
+        sandboxMode: agent.sandboxMode,
+        model: agent.model,
+        toolPolicies: agent.toolPolicies.map((p) => ({
+          connectionId: connectionIds.get(p.connectionId),
+          tools: p.tools === "all" ? "all" : [...p.tools],
+          policy: p.policy,
+        })),
+      });
+      agentIds.set(agent.ref, created.id);
+      createdAgentIds.push(created.id);
+    }
+    const app = template.app;
+    return agentic.createAgenticAi({
+      name: name || app.name,
+      description: app.description,
+      objectiveTemplate: app.objectiveTemplate,
+      ...(app.budget !== undefined ? { budget: app.budget } : {}),
+      orchestrationMode: app.orchestrationMode,
+      agentIds: app.agentIds.map((ref) => agentIds.get(ref)),
+      connectionIds: app.connectionIds.map((ref) => connectionIds.get(ref)),
+      workflow: {
+        nodes: app.workflow.nodes.map((node) => ({
+          id: node.id,
+          type: node.type,
+          ...(node.agentId !== undefined
+            ? { agentId: agentIds.get(node.agentId) }
+            : {}),
+          ...(node.retryPolicy ? { retryPolicy: { ...node.retryPolicy } } : {}),
+        })),
+        edges: app.workflow.edges.map((edge) => ({ ...edge })),
+        entryNodeId: app.workflow.entryNodeId,
+      },
+    });
+  } catch (error) {
+    for (const id of createdAgentIds.reverse()) agentic.deleteAgent(id);
+    for (const id of createdConnectionIds.reverse())
+      agentic.deleteConnection(id);
+    throw error;
+  }
+}
+
+// Spawn ONE agent-task node. Ordering is load-bearing for restart-safety:
+//   1. recordSpawned() persists status:"running" BEFORE any tmux spawn;
+//   2. materialize wrapper.sh/prompt/system (0600) on the target server;
+//   3. has-session guard — if the agrun- session already exists, DO NOTHING
+//      (idempotent: a retried/boot advance never double-spawns a live job);
+//   4. tmux new-session -d the wrapper.
+// A crash/throw at any step leaves a recoverable ledger: the reap table re-spawns
+// a never-started node (no markers) or fails it after one committed recovery.
+async function spawnNode(run, cfg, nodeId) {
+  const server = runServer(run);
+  const node = (cfg.workflow.nodes || []).find((n) => n.id === nodeId);
+  const agent = node && cfg.agents && cfg.agents[node.agentId];
+  if (!agent) {
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+    });
+    return;
+  }
+  const sessionName = nodeSessionName(run.id, nodeId);
+  const ls = agentic.getLoopState(run.id, nodeId);
+  let providerSessionId;
+  let resume = false;
+  if (agent.runtimeProvider === "claude-cli") {
+    const inv = ls.iterationInvocation;
+    if (ls.sessionEstablished && inv?.providerSessionId) {
+      providerSessionId = inv.providerSessionId;
+      resume = true;
+    } else {
+      providerSessionId = crypto.randomUUID();
+    }
+    agentic.setIterationInvocation(run.id, nodeId, {
+      mode: resume ? "resume" : "fresh",
+      providerSessionId,
+    });
+  }
+  let scratchDir;
+  try {
+    const base = await scratchBaseFor(server);
+    scratchDir = path.posix.join(base, run.id, nodeId);
+  } catch (e) {
+    console.warn(`[agentic] scratch base resolve failed: ${e.message}`);
+    return; // leave pending/running; retried next tick
+  }
+
+  // (1) persist RUNNING before spawning tmux.
+  agentic.recordSpawned(run.id, nodeId, {
+    agentRunId: sessionName,
+    startedAt: Date.now(),
+    providerSessionId,
+  });
+
+  const invocationAgent = invocationAgentForRun(run, agent);
+  const gatewayApiToken = gatewayApiTokenForNode(
+    run,
+    cfg,
+    nodeId,
+    invocationAgent,
+  );
+
+  let inv;
+  try {
+    inv = agentRuntime.buildInvocation({
+      runId: run.id,
+      nodeId,
+      agent: invocationAgent,
+      cwd: cfg.cwd,
+      promptText: composePromptText(run, cfg, {
+        resume,
+        lastVerdict: ls.lastVerdict,
+      }),
+      scratchDir,
+      server,
+      // iter3 (D5): frozen resolvedConfig.connections + this gateway's own
+      // bearer/base URL, so the claude-cli/local builder can wire the per-run
+      // MCP proxy in (codex-cli and remote targets never read these — see
+      // agent-runtime.js's own gating).
+      connections: cfg.connections,
+      gatewayApiToken,
+      gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
+      agentSessionId: providerSessionId,
+      resume,
+    });
+  } catch (e) {
+    console.warn(`[agentic] buildInvocation failed (${nodeId}): ${e.message}`);
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `buildInvocation failed: ${e && e.message}`,
+    });
+    return;
+  }
+
+  // (2) materialize files on the target (each path a single argv token — never
+  //     concatenated; content via tee stdin; then chmod 600).
+  try {
+    await serverCmd(server, ["mkdir", "-p", "--", scratchDir]);
+    for (const f of inv.files) {
+      const dest = path.posix.join(scratchDir, f.relPath);
+      await serverCmdStdin(server, ["tee", "--", dest], f.content);
+      await serverCmd(server, ["chmod", f.mode, "--", dest]);
+    }
+  } catch (e) {
+    console.warn(`[agentic] materialize failed (${nodeId}): ${e.message}`);
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `materialize failed: ${e && e.message}`,
+    });
+    return;
+  }
+
+  // FIX 4 (kill/cancel race): the materialize steps above involve async I/O
+  // (slow over SSH); a concurrent killRun can flip the run terminal in that
+  // window. Re-read the run immediately BEFORE creating the tmux session and
+  // ABORT if it is no longer active — otherwise we'd spawn a live agent job for
+  // an already-cancelled run (an orphan a workspace-write agent could still use
+  // to mutate the workspace). Mark the already-recordSpawned node "skipped" so a
+  // terminal run's ledger stays consistent (its advanceRun breaks before reap,
+  // so a node left "running" would never respawn or fail). recordNodeResult is
+  // idempotent-safe against killRunningJobs also marking it.
+  const liveRun = agentic.getRun(run.id);
+  if (
+    liveRun &&
+    liveRun.status !== "running" &&
+    liveRun.status !== "queued" &&
+    liveRun.status !== "waiting-approval"
+  ) {
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "skipped",
+      finishedAt: Date.now(),
+    });
+    return;
+  }
+
+  // (3)+(4) idempotent spawn: has-session guard, then detached new-session.
+  try {
+    if (await tmuxHasSession(server, sessionName)) return; // already alive
+    await serverExec(server, [
+      "new-session",
+      "-d",
+      "-s",
+      sessionName,
+      "-c",
+      cfg.cwd,
+      inv.tmuxArg, // "bash '<scratchDir>/wrapper.sh'" — the ONLY thing on the cmd line
+    ]);
+  } catch (e) {
+    console.warn(`[agentic] tmux spawn failed (${sessionName}): ${e.message}`);
+    // A remote ssh drop can leave the session actually created despite the
+    // thrown error; best-effort kill (idempotent, agrun- only) so we never
+    // orphan a run session before marking the node failed.
+    await tmuxKill(server, sessionName);
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `spawn failed: ${e && e.message}`,
+    });
+  }
+}
+
+// Kill every RUNNING (or waiting-approval — iter3: a parked node's underlying
+// tmux job is still alive, blocked inside the CLI's MCP tool call, so a cancel
+// must kill it too or the job leaks) node's agrun- session and mark it
+// skipped (fail-fast / cancel path). Only ever kills agrun- names derived from
+// the run.
+async function killRunningJobs(run) {
+  const server = runServer(run);
+  for (const ne of run.nodeExecutions || []) {
+    if (ne.status !== "running" && ne.status !== "waiting-approval") continue;
+    // FIX 5: a node parked on an MCP tool-call approval carries a still-pending
+    // pendingToolCall. Marking the node "skipped" WITHOUT resolving it leaves an
+    // impossible shape (skipped node w/ pending ptc) and lets a post-cancel
+    // approve appear to succeed against a live pending record. Resolve it first
+    // — the store has no "cancelled" disposition, so "timed_out" is the correct
+    // terminal disposition for a cancel (it means "no human decision arrived").
+    // resolvePendingToolCall is idempotent and won't resurrect a terminal run
+    // (it only un-parks a node/run that is still waiting-approval).
+    const ptc = ne.pendingToolCall;
+    if (ne.status === "waiting-approval" && ptc && ptc.status === "pending") {
+      agentic.resolvePendingToolCall(run.id, ne.nodeId, ptc.id, "timed_out");
+    }
+    if (server) await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
+    agentic.recordNodeResult(run.id, ne.nodeId, {
+      status: "skipped",
+      finishedAt: Date.now(),
+    });
+  }
+}
+
+// Defensive sweep: kill the agrun- session for EVERY node of a run (idempotent).
+async function killAllRunSessions(run) {
+  const server = runServer(run);
+  if (!server) return;
+  for (const ne of run.nodeExecutions || [])
+    await tmuxKill(server, nodeSessionName(run.id, ne.nodeId));
+}
+
+function retryPolicyForNode(cfg, nodeId) {
+  const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
+  // agent-task AND router may carry a retryPolicy (resolveWorkflow allows both);
+  // a router that keeps exiting nonzero retries, then fail-fasts on exhaustion.
+  return node?.type === "agent-task" || node?.type === "router"
+    ? node.retryPolicy || {
+        maxAttempts: 1,
+        backoffMs: 0,
+        retryOn: "failure",
+      }
+    : { maxAttempts: 1, backoffMs: 0, retryOn: "failure" };
+}
+
+// A ran-and-failed attempt stays RUNNING while the driver commits its retry,
+// clears stale attempt artifacts, waits the fixed backoff, and respawns. The
+// reducer therefore never observes a transient failed node.
+async function retryOrFailNode(run, cfg, nodeId) {
+  const policy = retryPolicyForNode(cfg, nodeId);
+  const retryState = agentic.getRetryState(run.id, nodeId);
+  if (!retryState.retryPending) {
+    const attemptsSoFar = retryState.retryCount + 1;
+    if (attemptsSoFar >= policy.maxAttempts) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "failed",
+        finishedAt: Date.now(),
+      });
+      return;
+    }
+    agentic.recordRetryAttempt(run.id, nodeId);
+  }
+
+  const server = runServer(run);
+  const base = await scratchBaseFor(server);
+  const scratchDir = path.posix.join(base, run.id, nodeId);
+  await serverCmd(server, [
+    "rm",
+    "-f",
+    "--",
+    path.posix.join(scratchDir, "start.marker"),
+    path.posix.join(scratchDir, "exit.marker"),
+    path.posix.join(scratchDir, "out.log"),
+  ]);
+  if (policy.backoffMs > 0)
+    await new Promise((resolve) => setTimeout(resolve, policy.backoffMs));
+
+  // A cancellation can land during backoff. Do not resurrect its skipped node.
+  const liveRun = agentic.getRun(run.id);
+  const liveNode = liveRun?.nodeExecutions?.find((n) => n.nodeId === nodeId);
+  if (
+    !liveRun ||
+    (liveRun.status !== "running" &&
+      liveRun.status !== "queued" &&
+      liveRun.status !== "waiting-approval") ||
+    liveNode?.status !== "running"
+  )
+    return;
+  await spawnNode(liveRun, cfg, nodeId);
+}
+
+async function loopRespawn(run, cfg, nodeId, verdict) {
+  agentic.commitLoopIteration(run.id, nodeId, { verdict });
+
+  const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
+  const server = runServer(run);
+  const base = await scratchBaseFor(server);
+  const scratchDir = path.posix.join(base, run.id, nodeId);
+  await serverCmd(server, [
+    "rm",
+    "-f",
+    "--",
+    path.posix.join(scratchDir, "start.marker"),
+    path.posix.join(scratchDir, "exit.marker"),
+    path.posix.join(scratchDir, "out.log"),
+  ]);
+  if (node?.loopPolicy?.backoffMs > 0)
+    await new Promise((resolve) =>
+      setTimeout(resolve, node.loopPolicy.backoffMs),
+    );
+
+  const liveRun = agentic.getRun(run.id);
+  const liveNode = liveRun?.nodeExecutions?.find((n) => n.nodeId === nodeId);
+  if (
+    !liveRun ||
+    (liveRun.status !== "running" &&
+      liveRun.status !== "queued" &&
+      liveRun.status !== "waiting-approval") ||
+    liveNode?.status !== "running"
+  )
+    return;
+  await spawnNode(liveRun, cfg, nodeId);
+}
+
+async function recordTerminalDone(run, cfg, nodeId) {
+  const node = (cfg.workflow?.nodes || []).find((n) => n.id === nodeId);
+  if (node?.loopPolicy) {
+    const logTail = await agenticNodeLogTail(run, nodeId);
+    const { branch } = agentRuntime.parseResult(logTail, 0);
+    const agent = cfg.agents?.[node.agentId];
+    if (agent?.runtimeProvider === "claude-cli")
+      agentic.markSessionEstablished(run.id, nodeId);
+    const lastVerdict = branch ?? "";
+    if (branch === node.loopPolicy.until) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "done",
+        finishedAt: Date.now(),
+        lastVerdict,
+      });
+    } else if (
+      agentic.getLoopState(run.id, nodeId).iterationCount >=
+      node.loopPolicy.maxIterations
+    ) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "done",
+        finishedAt: Date.now(),
+        loopExhausted: true,
+        lastVerdict,
+      });
+    } else if (budgetExhausted(run, cfg)) {
+      agentic.recordLoopBudgetHalt(run.id, nodeId, {
+        finishedAt: Date.now(),
+      });
+      return;
+    } else {
+      await loopRespawn(run, cfg, nodeId, branch);
+    }
+  } else if (node?.type === "router") {
+    const logTail = await agenticNodeLogTail(run, nodeId);
+    const { branch, score } = agentRuntime.parseResult(logTail, 0);
+    const outs = (cfg.workflow.edges || []).filter(
+      (edge) => edge.from === nodeId,
+    );
+    const match =
+      outs.find((edge) => edge.when === branch) ||
+      outs.find((edge) => edge.when === "default");
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "done",
+      finishedAt: Date.now(),
+      chosenEdges: [`${match.from}->${match.to}`],
+      ...(Number.isFinite(score) ? { score } : {}),
+    });
+  } else {
+    agentic.recordNodeResult(run.id, nodeId, {
+      status: "done",
+      finishedAt: Date.now(),
+    });
+  }
+}
+
+// Reap the reap table (§D) for every currently-running node. Reads
+// {hasSession, exit.marker, start.marker} on the run's server. Returns true if
+// any node changed (so advanceRun re-reads the ledger). This is where
+// restart-safety is ENFORCED — every running node is reaped on every advance /
+// poll / boot, so a step is never lost, never double-spawned, never duplicated.
+async function reapRunningNodes(run, cfg) {
+  const server = runServer(run);
+  let base;
+  try {
+    base = await scratchBaseFor(server);
+  } catch {
+    return false; // couldn't resolve remote base this tick — leave untouched
+  }
+  let changed = false;
+  for (const ne of run.nodeExecutions || []) {
+    if (ne.status !== "running") continue;
+    const nodeId = ne.nodeId;
+
+    // A committed-but-not-yet-respawned phase (retry / loop / crash-recovery) is
+    // AUTHORITATIVE over any STALE markers the prior attempt left behind: the
+    // verdict/decision was already counted, so resume the respawn rather than
+    // re-interpret the old markers — which would re-decide/double-count a loop
+    // iteration (loopRespawn commits loopPending BEFORE clearing the old
+    // exit.marker; a crash in that window must NOT re-enter recordTerminalDone).
+    // (F-R2 / F-R4: check the *Pending phase flags before reading any marker.)
+    if (agentic.getLoopState(run.id, nodeId).loopPending) {
+      await spawnNode(run, cfg, nodeId); // recordSpawned clears loopPending
+      changed = true;
+      continue;
+    }
+    if (agentic.getRetryState(run.id, nodeId).retryPending) {
+      await retryOrFailNode(run, cfg, nodeId); // idempotent on retryPending
+      changed = true;
+      continue;
+    }
+    if (agentic.getNeverRanState(run.id, nodeId).neverRanPending) {
+      await spawnNode(run, cfg, nodeId); // recordSpawned clears neverRanPending
+      changed = true;
+      continue;
+    }
+
+    const sessionName = nodeSessionName(run.id, nodeId);
+    const scratchDir = path.posix.join(base, run.id, nodeId);
+    const hasSession = await tmuxHasSession(server, sessionName);
+    const exitVal = await readMarker(
+      server,
+      path.posix.join(scratchDir, "exit.marker"),
+    );
+    const startVal = await readMarker(
+      server,
+      path.posix.join(scratchDir, "start.marker"),
+    );
+    const started = startVal !== null;
+    const elapsed = Date.now() - (ne.startedAt || Date.now());
+
+    if (hasSession) {
+      if (exitVal == null) {
+        // Alive, not yet finished. Timeout -> kill + fail; else leave running.
+        if (elapsed > AGENT_RUN_TIMEOUT_MS) {
+          await tmuxKill(server, sessionName);
+          await retryOrFailNode(run, cfg, nodeId);
+          changed = true;
+        }
+        continue;
+      }
+      // Session lingering but exit.marker already written (rare) — treat as done.
+      await tmuxKill(server, sessionName);
+      const code = parseInt(String(exitVal).trim(), 10);
+      if (code === 0) await recordTerminalDone(run, cfg, nodeId);
+      else await retryOrFailNode(run, cfg, nodeId);
+      changed = true;
+      continue;
+    }
+
+    // No live session.
+    if (exitVal != null) {
+      // Finished (possibly during downtime): exit.marker is the verdict.
+      const code = parseInt(String(exitVal).trim(), 10);
+      if (code === 0) await recordTerminalDone(run, cfg, nodeId);
+      else await retryOrFailNode(run, cfg, nodeId);
+      changed = true;
+      continue;
+    }
+    if (started) {
+      // Started then died without finishing (reboot/OOM/killed) — FAIL, do NOT
+      // auto-respawn (avoids a duplicate workspace-write).
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "failed",
+        finishedAt: Date.now(),
+      });
+      changed = true;
+      continue;
+    }
+    // No session, no markers => the node NEVER actually ran (crash between
+    // persist-running and spawn). The *Pending phases were already handled at
+    // the top of the loop, so here neither retry/loop/neverRan is pending:
+    // re-spawn idempotently ONCE, unless the single crash-recovery is spent.
+    const neverRanState = agentic.getNeverRanState(run.id, nodeId);
+    if (neverRanState.neverRanRecoveryCount >= 1) {
+      agentic.recordNodeResult(run.id, nodeId, {
+        status: "failed",
+        finishedAt: Date.now(),
+      });
+      changed = true;
+      continue;
+    }
+    agentic.commitNeverRanRecovery(run.id, nodeId);
+    await spawnNode(run, cfg, nodeId);
+    changed = true;
+  }
+  return changed;
+}
+
+// Reducer-side guarantee behind hard-constraint #4 ("a pending approval must
+// always resolve"): resolve any node's pending MCP tool-call approval that has
+// sat past AGENT_MCP_APPROVAL_TIMEOUT_MS (+ a grace window) — even if the
+// proxy's own best-effort timeout POST never arrives (the proxy process died
+// mid-hold, or a gateway restart happened during the hold). Runs on every
+// advance/poll tick AND at boot rediscovery (both funnel through advanceRun),
+// so a parked node can never be stuck with no path forward. Returns true if
+// any node changed (so advanceRun's while-loop re-reads the ledger).
+function sweepStalePendingApprovals(run) {
+  let changed = false;
+  for (const ne of run.nodeExecutions || []) {
+    if (ne.status !== "waiting-approval") continue;
+    const ptc = ne.pendingToolCall;
+    if (!ptc || ptc.status !== "pending") continue;
+    if (Date.now() - ptc.createdAt > AGENT_MCP_APPROVAL_TIMEOUT_MS + 5000) {
+      agentic.resolvePendingToolCall(run.id, ne.nodeId, ptc.id, "timed_out");
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// Whole-run max-age reminder (D3): notify ONCE, NEVER auto-cancel.
+function maybeNotifyMaxAge(run) {
+  if (!run.startedAt) return;
+  if (Date.now() - run.startedAt < AGENTIC_RUN_MAX_AGE_MS) return;
+  if (agenticAgeNotified.has(run.id)) return;
+  agenticAgeNotified.add(run.id);
+  if (!push.isConfigured()) return;
+  emitNotify(
+    {
+      title: "Agentic run still active",
+      body: `A run has been active for over ${Math.round(
+        AGENTIC_RUN_MAX_AGE_MS / 3_600_000,
+      )}h.`,
+      tag: `agentic-age-${run.id}`,
+    },
+    { runId: run.id, kind: "agentic-age" },
+  );
+}
+
+// ---- DRIVER: startRun ----
+// Freezes resolvedConfig + agenticAiVersion (D9), validates the target session +
+// dangling refs, creates the Run (+ pending nodeExecutions), starts the poll loop,
+// and advances once to spawn the entry/ready node(s). Returns the shaped Run.
+async function startRun({
+  agenticAiId,
+  sessionId,
+  serverId,
+  cwd: requestedCwd,
+  objective,
+  unattended,
+  scheduleId,
+  expectedFingerprint,
+} = {}) {
+  // Shared reservation for both human and scheduler starts. This is deliberately
+  // the first operation before any await: JS's single thread makes the check +
+  // increment atomic across callers while target resolution is in flight.
+  if (
+    agentic.listActiveRuns().length + startReservations >=
+    AGENT_MAX_CONCURRENT_RUNS
+  )
+    throw agenticErr(
+      "too_many_runs",
+      `at most ${AGENT_MAX_CONCURRENT_RUNS} concurrent runs`,
+    );
+  startReservations++;
+  let reservationHeld = true;
+  const releaseReservation = () => {
+    if (reservationHeld) {
+      reservationHeld = false;
+      startReservations--;
+    }
+  };
+
+  try {
+    const app = agentic.getAgenticAi(agenticAiId);
+    if (!app) throw agenticErr("not_found", "agentic AI not found");
+    if (app.status === "archived")
+      throw agenticErr("bad_request", "cannot run an archived agentic AI");
+
+    // Scheduled starts provide a frozen target directly and never resolve a
+    // human tmux session. Human starts retain the existing session path.
+    let ref = null;
+    let resolvedServerId;
+    let server;
+    let cwd;
+    const directTarget = serverId !== undefined || requestedCwd !== undefined;
+    if (directTarget) {
+      if (typeof serverId !== "string" || !isAbsPath(requestedCwd))
+        throw agenticErr(
+          "bad_request",
+          "scheduled runs require serverId and an absolute cwd",
+        );
+      resolvedServerId = serverId;
+      cwd = requestedCwd;
+      server = registry.get(resolvedServerId);
+      if (!server)
+        throw agenticErr("bad_request", `unknown server: ${resolvedServerId}`);
+      const probe = await probeServer(server);
+      if (probe.reachability !== "ok")
+        throw agenticErr("session_unreachable", "target server is unreachable");
+    } else {
+      ref = String(sessionId || "");
+      const parsed = parseSessionRef(ref);
+      resolvedServerId = parsed.serverId;
+      if (!ID_RE.test(parsed.tmuxName))
+        throw agenticErr("bad_request", "invalid sessionId");
+      server = registry.get(resolvedServerId);
+      if (!server)
+        throw agenticErr("bad_request", `unknown server: ${resolvedServerId}`);
+      const probe = await probeServer(server);
+      if (probe.reachability !== "ok")
+        throw agenticErr("session_unreachable", "target server is unreachable");
+
+      // Resolve and freeze the human session cwd. Scheduled runs already froze
+      // cwd above and skip this tmux lookup entirely.
+      try {
+        const r = await serverExec(server, [
+          "display-message",
+          "-p",
+          "-t",
+          parsed.tmuxName,
+          "#{pane_current_path}",
+        ]);
+        cwd = r.stdout.trim();
+      } catch {
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+      }
+      if (!isAbsPath(cwd))
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+    }
+
+    // Re-pin after the final target-resolution await. No definition lookup or
+    // run creation can race past this TOCTOU check.
+    if (
+      expectedFingerprint !== undefined &&
+      agentic.fingerprintExecutableDefinition(agenticAiId) !==
+        expectedFingerprint
+    ) {
+      throw agenticErr(
+        "definition_changed",
+        "agentic AI executable definition changed since schedule approval",
+      );
+    }
+
+    // Build the frozen workflow from the orchestration mode + validate agents.
+    const agentIds = (app.agentIds || []).filter(Boolean);
+    if (!agentIds.length)
+      throw agenticErr("invalid_workflow", "agentic AI has no agents");
+    const { workflow, resolvedAgents } = buildResolvedWorkflow(app);
+    for (const n of workflow.nodes) {
+      if (n.type === "human-approval") continue;
+      if (!n.agentId || !resolvedAgents[n.agentId])
+        throw agenticErr(
+          "invalid_workflow",
+          `node ${n.id} has no resolvable agent`,
+          {
+            node: n.id,
+          },
+        );
+    }
+    for (const n of workflow.nodes) {
+      const agent = n.agentId && resolvedAgents[n.agentId];
+      if (n.loopPolicy && agent?.runtimeProvider === "codex-cli") {
+        throw agenticErr(
+          "invalid_workflow",
+          "loopPolicy requires claude-cli (codex has no resume)",
+          { node: n.id },
+        );
+      }
+    }
+    for (const agent of Object.values(resolvedAgents)) {
+      if (
+        agent.runtimeProvider === "codex-cli" &&
+        Array.isArray(agent.toolPolicies) &&
+        agent.toolPolicies.length > 0
+      ) {
+        throw agenticErr(
+          "codex_mcp_unsupported",
+          "codex-cli agents cannot use artifact connections yet (MCP mediation unavailable) — remove the connection or use a claude-cli agent",
+        );
+      }
+    }
+    // parallel + any workspace-write agent -> 422 (§9): concurrent writers to one
+    // cwd are unsafe.
+    if (app.orchestrationMode === "parallel") {
+      for (const n of workflow.nodes) {
+        if (n.type === "human-approval") continue;
+        const ag = resolvedAgents[n.agentId];
+        if (ag && ag.sandboxMode === "workspace-write")
+          throw agenticErr(
+            "parallel_write_forbidden",
+            "parallel mode forbids workspace-write agents",
+            { node: n.id },
+          );
+      }
+    }
+    if (app.orchestrationMode === "custom") {
+      const inDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+      const plainInDegree = new Map(workflow.nodes.map((node) => [node.id, 0]));
+      const plainOutDegree = new Map(
+        workflow.nodes.map((node) => [node.id, 0]),
+      );
+      for (const edge of workflow.edges) {
+        inDegree.set(edge.to, (inDegree.get(edge.to) || 0) + 1);
+        if (!edge.on && !edge.when) {
+          plainOutDegree.set(
+            edge.from,
+            (plainOutDegree.get(edge.from) || 0) + 1,
+          );
+          plainInDegree.set(edge.to, (plainInDegree.get(edge.to) || 0) + 1);
+        }
+      }
+      const isBranching =
+        [...plainOutDegree.values()].some((degree) => degree > 1) ||
+        [...plainInDegree.values()].some((degree) => degree > 1) ||
+        [...inDegree.values()].filter((degree) => degree === 0).length > 1;
+      if (isBranching) {
+        for (const n of workflow.nodes) {
+          if (n.type === "human-approval") continue;
+          const ag = resolvedAgents[n.agentId];
+          if (ag && ag.sandboxMode === "workspace-write")
+            throw agenticErr(
+              "parallel_write_forbidden",
+              "a branching custom workflow forbids workspace-write agents (they could run concurrently on the same cwd) — make the graph a linear chain or use read-only agents",
+              { node: n.id },
+            );
+        }
+      }
+    }
+
+    // Prompt byte cap at start (all nodes share the prompt in iter2) -> 400.
+    const promptText = composePromptText(
+      { objective },
+      { objectiveTemplate: app.objectiveTemplate },
+    );
+    const promptBytes = Buffer.byteLength(promptText, "utf8");
+    if (promptBytes > agentRuntime.AGENT_PROMPT_MAX_BYTES)
+      throw agenticErr(
+        "bad_request",
+        `prompt exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
+      );
+
+    // D9 freeze (iter3): connection targetTypes, frozen alongside the rest of
+    // resolvedConfig so a boot re-spawn or a later connection edit/delete can
+    // never change what an in-flight node's MCP proxy manifest was built from.
+    // Only targetType is needed here — the per-node manifest's toolPolicies come
+    // from each agent's OWN toolPolicies[] (already frozen verbatim in
+    // resolvedAgents above); this map exists so the manifest-builder can resolve
+    // a connectionId -> targetType without a live store lookup at spawn time.
+    const connections = {};
+    for (const connId of app.connectionIds || []) {
+      const c = agentic.getConnection(connId);
+      if (c) connections[connId] = { targetType: c.targetType };
+    }
+
+    // Scheduled runs may never fall back to the broad gateway bearer. Preflight
+    // every executable node now, before a durable run record exists; the token
+    // helper repeats this check defensively at actual mint time.
+    if (unattended && Object.keys(connections).length > 0) {
+      const executableAgents = new Set(
+        workflow.nodes
+          .filter((node) => node.type !== "human-approval")
+          .map((node) => resolvedAgents[node.agentId])
+          .filter(Boolean),
+      );
+      if (
+        !AGENT_MCP_SCOPED_TOKENS ||
+        [...executableAgents].some(
+          (agent) => scopedMcpPrefixes({ connections }, agent).length === 0,
+        )
+      ) {
+        throw agenticErr(
+          "unattended_no_scoped_token",
+          "unattended runs with artifact connections require scoped MCP tokens",
+        );
+      }
+    }
+
+    const budget = { ...(app.budget || {}) };
+    if (budget.maxSpawns == null && AGENT_DEFAULT_MAX_SPAWNS !== undefined) {
+      budget.maxSpawns = AGENT_DEFAULT_MAX_SPAWNS;
+    }
+
+    const resolvedConfig = {
+      agents: resolvedAgents,
+      workflow,
+      connections,
+      // toolPolicies are DEFINED-but-UNUSED at runtime in iter2 (the per-run MCP
+      // proxy is iter3); copied for provenance only.
+      toolPolicies: {},
+      // Frozen execution context (not in shared-types; internal to the run).
+      cwd,
+      serverId: resolvedServerId,
+      objectiveTemplate: app.objectiveTemplate || "",
+      budget: Object.keys(budget).length > 0 ? budget : undefined,
+    };
+
+    const run = agentic.createRunRecord({
+      agenticAiId,
+      sessionId: ref,
+      objective: typeof objective === "string" ? objective : "",
+      resolvedConfig,
+      agenticAiVersion: app.version,
+      nodeExecutions: workflow.nodes.map((n) => ({ nodeId: n.id })),
+      ...(unattended ? { unattended: true, scheduleId } : {}),
+    });
+    releaseReservation();
+
+    startAgenticLoop();
+    await advanceRun(run.id);
+    return agentic.getRun(run.id);
+  } finally {
+    releaseReservation();
+  }
+}
+
+// ---- DRIVER: advanceRun (idempotent, re-entrancy-guarded) ----
+// Recomputed fresh from the persisted ledger on every call — the gateway holds
+// NO run progress in memory. Loop: reap running -> decide -> spawn ready / apply
+// terminal, re-looping while the ledger changes. The advancing Set is pure
+// concurrency control (a mid-advance re-invocation coalesces into ONE rerun).
+function budgetExhausted(run, cfg) {
+  const budget = cfg.budget;
+  if (!budget) return false;
+  const spawnsUsed = run.spawnsUsed || 0;
+  if (budget.maxSpawns != null && spawnsUsed >= budget.maxSpawns) return true;
+  if (
+    budget.maxWallClockMs != null &&
+    run.startedAt &&
+    Date.now() - run.startedAt >= budget.maxWallClockMs
+  )
+    return true;
+  return false;
+}
+
+async function advanceRun(runId) {
+  if (advancing.has(runId)) {
+    rerunRequested.set(runId, true);
+    return;
+  }
+  advancing.add(runId);
+  try {
+    // Reachability gate (mirrors the push loop's `if (!s.reachable) continue`):
+    // a transient ssh blip must NOT let reap read "no session" and wrongly fail /
+    // respawn a live remote job. Apart from the store-local approval sweep,
+    // leave the ledger untouched this tick. Local is always ok.
+    const first = agentic.getRun(runId);
+    if (!first) return;
+    sweepStalePendingApprovals(first);
+    if (
+      first.status === "running" ||
+      first.status === "queued" ||
+      first.status === "waiting-approval"
+    ) {
+      const srv = runServer(first);
+      // Server removed from the registry mid-run: we cannot safely act (running
+      // tmux commands "locally" for a remote run could mis-spawn). Leave the
+      // ledger untouched this tick.
+      if (!srv) return;
+      const probe = await probeServer(srv);
+      if (probe.reachability !== "ok") return;
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const run = agentic.getRun(runId);
+      if (!run) break;
+      if (
+        run.status !== "running" &&
+        run.status !== "queued" &&
+        run.status !== "waiting-approval"
+      )
+        break;
+      const cfg = run.resolvedConfig || {};
+      try {
+        // 1) reap running nodes (finished/died/timed-out/never-ran).
+        if (await reapRunningNodes(run, cfg)) {
+          changed = true;
+          continue;
+        }
+        // 2) whole-run age reminder (notify-only).
+        maybeNotifyMaxAge(run);
+        // 3) decide from the fresh ledger.
+        const decision = agentic.decide(run, cfg);
+        if (decision.toSkip.length) {
+          for (const nodeId of decision.toSkip) {
+            agentic.recordNodeResult(runId, nodeId, {
+              status: "skipped",
+              finishedAt: Date.now(),
+            });
+          }
+          changed = true;
+          continue;
+        }
+        if (decision.terminal === "failed") {
+          await killRunningJobs(run); // fail-fast: no orphan jobs
+          agentic.setRunStatus(runId, "failed", { finishedAt: Date.now() });
+          revokeScopedMcpTokensForRun(runId);
+          changed = true;
+          continue;
+        }
+        if (run.budgetHalt) {
+          const anyInFlight = (run.nodeExecutions || []).some(
+            (ne) => ne.status === "running" || ne.status === "waiting-approval",
+          );
+          if (!anyInFlight) {
+            agentic.setRunStatus(runId, "budget_exhausted", {
+              finishedAt: Date.now(),
+            });
+            revokeScopedMcpTokensForRun(runId);
+          }
+          break;
+        }
+        if (decision.terminal === "completed") {
+          agentic.setRunStatus(runId, "completed", { finishedAt: Date.now() });
+          revokeScopedMcpTokensForRun(runId);
+          changed = true;
+          continue;
+        }
+        if (budgetExhausted(run, cfg)) {
+          const anyInFlight = (run.nodeExecutions || []).some(
+            (ne) => ne.status === "running" || ne.status === "waiting-approval",
+          );
+          if (!anyInFlight) {
+            agentic.setRunStatus(runId, "budget_exhausted", {
+              finishedAt: Date.now(),
+            });
+            revokeScopedMcpTokensForRun(runId);
+          }
+          break;
+        }
+        // 4) spawn ready nodes (fan-out already capped by decide).
+        if (decision.toSpawn.length) {
+          const spawnsUsed = run.spawnsUsed || 0;
+          const spawnLimit =
+            cfg.budget?.maxSpawns != null
+              ? Math.max(0, cfg.budget.maxSpawns - spawnsUsed)
+              : decision.toSpawn.length;
+          for (const nodeId of decision.toSpawn.slice(0, spawnLimit)) {
+            // FIX 4 (kill/cancel race): a concurrent killRun can flip the run
+            // terminal BETWEEN fan-out iterations (spawnNode awaits slow ssh
+            // I/O). Re-read the live status each iteration and stop spawning if
+            // the run is no longer active, so we never materialize an orphan job
+            // for a cancelled run. spawnNode itself re-checks again just before
+            // the tmux new-session (belt-and-suspenders for the slow-materialize
+            // window inside a single iteration).
+            const cur = agentic.getRun(runId);
+            if (
+              !cur ||
+              (cur.status !== "running" &&
+                cur.status !== "queued" &&
+                cur.status !== "waiting-approval")
+            )
+              break;
+            const workflowNode = (cfg.workflow?.nodes || []).find(
+              (node) => node.id === nodeId,
+            );
+            if (workflowNode?.type === "human-approval") {
+              if (cfg.unattended) {
+                agentic.recordNodeResult(runId, nodeId, {
+                  status: "failed",
+                  finishedAt: Date.now(),
+                  error: "unattended: no human to approve",
+                });
+              } else {
+                agentic.gateApprovalNode(run.id, nodeId);
+              }
+            } else {
+              await spawnNode(run, cfg, nodeId);
+            }
+          }
+          changed = true;
+          continue;
+        }
+        // else: running nodes still in flight — nothing to do this tick.
+      } catch (e) {
+        // A transient error retries on the next tick (fire-and-forget caller).
+        console.warn(`[agentic] advance ${runId} error: ${e.message}`);
+        break;
+      }
+    }
+  } finally {
+    advancing.delete(runId);
+    const rerun = rerunRequested.get(runId);
+    if (rerun) {
+      rerunRequested.delete(runId);
+      void advanceRun(runId);
+    } else if (agentic.listActiveRuns().length === 0) {
+      stopAgenticLoop();
+    }
+  }
+}
+
+// Wait out an in-flight advance for a run (bounded), so killRun's final sweep
+// can catch a straggler node spawned during the race.
+async function waitForAdvanceIdle(runId, tries = 100) {
+  while (advancing.has(runId) && tries-- > 0)
+    await new Promise((r) => setTimeout(r, 20));
+}
+
+// Resume a completed claude-cli node as another turn in the same provider
+// conversation. The bounded idle wait avoids racing a currently-running
+// reducer pass; recordGuidanceTurn then performs the node transition atomically.
+async function sendGuidance(runId, nodeId, text) {
+  await waitForAdvanceIdle(runId);
+
+  const run = agentic.getRun(runId);
+  if (!run) throw agenticErr("not_found", "run not found");
+  // A failed/cancelled run is dead: reopening only handles "completed", so a
+  // done node inside one would go "running" with nothing to advance it (stuck).
+  if (run.status === "failed" || run.status === "cancelled")
+    throw agenticErr(
+      "bad_request",
+      "run is not resumable (failed or cancelled)",
+    );
+  const nodeExecution = agentic.getNode(runId, nodeId);
+  if (nodeExecution.status !== "done")
+    throw agenticErr(
+      "bad_request",
+      "guidance is only allowed on a completed step",
+    );
+
+  const cfg = run.resolvedConfig || {};
+  const workflowNode = (cfg.workflow?.nodes || []).find(
+    (node) => node.id === nodeId,
+  );
+  const agent = workflowNode && cfg.agents?.[workflowNode.agentId];
+  if (!agent)
+    throw agenticErr("not_found", `node execution not found: ${nodeId}`);
+  if (agent.runtimeProvider !== "claude-cli")
+    throw agenticErr(
+      "bad_request",
+      "guidance is only supported for claude-cli agents",
+    );
+  if (!nodeExecution.providerSessionId)
+    throw agenticErr("bad_request", "provider session id is missing");
+  if (typeof text !== "string" || text.trim().length === 0)
+    throw agenticErr("bad_request", "guidance text is required");
+  const promptBytes = Buffer.byteLength(text, "utf8");
+  if (promptBytes > agentRuntime.AGENT_PROMPT_MAX_BYTES)
+    throw agenticErr(
+      "bad_request",
+      `guidance exceeds ${agentRuntime.AGENT_PROMPT_MAX_BYTES} bytes`,
+    );
+
+  const server = runServer(run);
+  if (!server) throw agenticErr("bad_request", "run server not found");
+  let scratchDir;
+  try {
+    const base = await scratchBaseFor(server);
+    scratchDir = path.posix.join(base, run.id, nodeId);
+  } catch (e) {
+    throw agenticErr("backend_unavailable", e && e.message);
+  }
+  const sessionName = nodeSessionName(run.id, nodeId);
+
+  const failGuidanceSpawn = async (error) => {
+    const current = agentic.getRun(runId);
+    if (current?.status === "completed")
+      agentic.setRunStatus(runId, "running", {});
+    agentic.recordNodeResult(runId, nodeId, {
+      status: "failed",
+      finishedAt: Date.now(),
+      error: `guidance spawn failed: ${error && error.message}`,
+    });
+    startAgenticLoop();
+    return agentic.getRun(runId);
+  };
+
+  let inv;
+  try {
+    await serverCmd(server, [
+      "rm",
+      "-f",
+      "--",
+      path.posix.join(scratchDir, "start.marker"),
+      path.posix.join(scratchDir, "exit.marker"),
+      path.posix.join(scratchDir, "out.log"),
+    ]);
+    const invocationAgent = invocationAgentForRun(run, agent);
+    inv = agentRuntime.buildInvocation({
+      runId: run.id,
+      nodeId,
+      agent: invocationAgent,
+      cwd: cfg.cwd,
+      promptText: text,
+      scratchDir,
+      server,
+      connections: cfg.connections,
+      gatewayApiToken: gatewayApiTokenForNode(
+        run,
+        cfg,
+        nodeId,
+        invocationAgent,
+      ),
+      gatewayBaseUrl: `http://127.0.0.1:${PORT}`,
+      agentSessionId: nodeExecution.providerSessionId,
+      resume: true,
+    });
+    await serverCmd(server, ["mkdir", "-p", "--", scratchDir]);
+    for (const f of inv.files) {
+      const dest = path.posix.join(scratchDir, f.relPath);
+      await serverCmdStdin(server, ["tee", "--", dest], f.content);
+      await serverCmd(server, ["chmod", f.mode, "--", dest]);
+    }
+  } catch (e) {
+    console.warn(
+      `[agentic] guidance materialize failed (${nodeId}): ${e.message}`,
+    );
+    return failGuidanceSpawn(e);
+  }
+
+  agentic.recordGuidanceTurn(runId, nodeId, {
+    agentRunId: sessionName,
+    startedAt: Date.now(),
+  });
+  if (agentic.getRun(runId)?.status === "completed")
+    agentic.setRunStatus(runId, "running", {});
+
+  try {
+    await serverExec(server, [
+      "new-session",
+      "-d",
+      "-s",
+      sessionName,
+      "-c",
+      cfg.cwd,
+      inv.tmuxArg,
+    ]);
+  } catch (e) {
+    console.warn(
+      `[agentic] guidance spawn failed (${sessionName}): ${e.message}`,
+    );
+    await tmuxKill(server, sessionName);
+    return failGuidanceSpawn(e);
+  }
+
+  startAgenticLoop();
+  return agentic.getRun(runId);
+}
+
+// ---- DRIVER: killRun ----
+// Kills the run's live agrun- job(s) — the ONLY kill path, always an agrun- name
+// derived from the run, NEVER a web- id (HARD-constraint #2 by construction) —
+// then marks the run cancelled. Idempotent on an already-terminal run (sweep,
+// leave status untouched — never clobber a completed run to cancelled).
+async function killRun(runId) {
+  const run = agentic.getRun(runId);
+  if (!run) throw agenticErr("not_found", "run not found");
+  // "waiting-approval" (iter3) is an ACTIVE status too — a node parked on an
+  // MCP tool-call approval still has a live tmux job blocked inside the CLI,
+  // so it must go through the real cancel path below, not the idempotent
+  // already-terminal sweep (otherwise DELETE on a parked run would leave that
+  // job orphaned forever).
+  if (
+    run.status !== "running" &&
+    run.status !== "queued" &&
+    run.status !== "waiting-approval"
+  ) {
+    revokeScopedMcpTokensForRun(runId);
+    await killAllRunSessions(run); // idempotent sweep; DO NOT touch status
+    return agentic.getRun(runId);
+  }
+  // Mark cancelled synchronously FIRST so a racing advanceRun's status guard
+  // bails before it can spawn anything new.
+  agentic.setRunStatus(runId, "cancelled", { finishedAt: Date.now() });
+  revokeScopedMcpTokensForRun(runId);
+  await killRunningJobs(run);
+  // Catch a node the in-flight advance may have spawned during the race.
+  await waitForAdvanceIdle(runId);
+  const after = agentic.getRun(runId);
+  if (after) await killAllRunSessions(after);
+  if (agentic.listActiveRuns().length === 0) stopAgenticLoop();
+  return agentic.getRun(runId);
+}
+
+// ---- Poll loop (mirrors the push loop) + boot rediscovery ----
+// Gated on there being >=1 active run so it NEVER runs idle. Each tick advances
+// every active run; the loop stops itself when the last run goes terminal.
+function agenticPollTick() {
+  const ids = agentic.listActiveRuns();
+  if (ids.length === 0) {
+    stopAgenticLoop();
+    return;
+  }
+  for (const id of ids) void advanceRun(id);
+}
+function startAgenticLoop() {
+  if (agenticPollTimer) return;
+  if (agentic.listActiveRuns().length === 0) return;
+  agenticPollTimer = setInterval(agenticPollTick, AGENTIC_POLL_INTERVAL_MS);
+  if (agenticPollTimer.unref) agenticPollTimer.unref();
+  console.log("[agentic] run poll loop started");
+}
+function stopAgenticLoop() {
+  if (!agenticPollTimer) return;
+  clearInterval(agenticPollTimer);
+  agenticPollTimer = null;
+  console.log("[agentic] run poll loop stopped");
+}
+
+// Boot rediscovery: for every active run, advanceRun runs the reap table — a
+// still-alive job resumes (has-session), a job that finished during downtime is
+// reaped via its exit.marker, a never-ran step is re-spawned, a started-then-died
+// step fails. Same idiom as the session-level `tmux ls`-on-boot rediscovery.
+function bootRediscoverRuns() {
+  const active = agentic.listActiveRuns();
+  for (const id of active) void advanceRun(id);
+  if (active.length) startAgenticLoop();
+  if (active.length)
+    console.log(
+      `[agentic] ${active.length} active run(s) rediscovered at boot.`,
+    );
+}
+
+// ---- Scheduled-run poll loop ----
+// Like push polling, this exists only while at least one enabled schedule is
+// persisted. A tick claims each due occurrence synchronously before awaiting
+// startRun, giving crash-safe at-most-once behavior. Due schedules are handled
+// sequentially so overlap/capacity outcomes are deterministic.
+async function schedulePollTick() {
+  if (scheduleTicking) return;
+  if (schedules.count() === 0) {
+    stopScheduleLoop();
+    return;
+  }
+  scheduleTicking = true;
+  try {
+    const now = Date.now();
+    for (const schedule of schedules.list()) {
+      if (
+        !schedule.enabled ||
+        !Number.isFinite(schedule.nextFireAt) ||
+        now < schedule.nextFireAt
+      ) {
+        continue;
+      }
+
+      const nextFireAt = schedules.computeNextFireAt(
+        schedule.spec,
+        now,
+        schedule.createdAt,
+      );
+      if (agentic.activeRunsForSchedule(schedule.id).length > 0) {
+        schedules.update(schedule.id, {
+          nextFireAt,
+          lastAttemptAt: now,
+          lastOutcome: "overlap_skipped",
+          lastError: null,
+        });
+        continue;
+      }
+
+      // Claim and persist before starting. A process crash after this point
+      // intentionally loses this one occurrence rather than double-starting it.
+      schedules.update(schedule.id, { nextFireAt });
+      try {
+        await startRun({
+          agenticAiId: schedule.agenticId,
+          serverId: schedule.serverId,
+          cwd: schedule.cwd,
+          objective: schedule.objective,
+          unattended: true,
+          scheduleId: schedule.id,
+          expectedFingerprint: schedule.defFingerprint,
+        });
+        schedules.update(schedule.id, {
+          lastFiredAt: now,
+          lastAttemptAt: now,
+          lastOutcome: "started",
+          lastError: null,
+        });
+      } catch (error) {
+        schedules.update(schedule.id, {
+          lastAttemptAt: now,
+          lastOutcome:
+            error?.code === "too_many_runs"
+              ? "capacity_skipped"
+              : error?.code === "definition_changed"
+                ? "definition_changed"
+                : "target_error",
+          lastError: error?.message || String(error),
+        });
+      }
+    }
+  } finally {
+    scheduleTicking = false;
+    if (schedules.count() === 0) stopScheduleLoop();
+  }
+}
+
+function startScheduleLoop() {
+  if (schedulePollTimer || schedules.count() === 0) return;
+  schedulePollTimer = setInterval(
+    () => void schedulePollTick(),
+    AGENT_SCHEDULE_POLL_INTERVAL_MS,
+  );
+  if (schedulePollTimer.unref) schedulePollTimer.unref();
+  console.log("[agentic] schedule poll loop started");
+}
+
+function stopScheduleLoop() {
+  if (!schedulePollTimer) return;
+  clearInterval(schedulePollTimer);
+  schedulePollTimer = null;
+  console.log("[agentic] schedule poll loop stopped");
+}
+
+function syncScheduleLoop() {
+  if (schedules.count() > 0) startScheduleLoop();
+  else stopScheduleLoop();
+}
+
+// Read a bounded tail of a node's out.log (display-only; injected by the GET
+// /api/agentic/runs/:id route in BE-3's routing work — exported below).
+async function agenticNodeLogTail(run, nodeId) {
+  const server = runServer(run);
+  if (!server) return "";
+  try {
+    const base = await scratchBaseFor(server);
+    const log = path.posix.join(base, run.id, nodeId, "out.log");
+    const { stdout } = await serverCmd(server, [
+      "tail",
+      "-c",
+      String(AGENT_OUTPUT_MAX_BYTES),
+      "--",
+      log,
+    ]);
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
+// ---- Agentic AI Creator (/api/agentic/*) ----
+// The Creator artifact (docs/AGENTIC-AI-CREATOR-PLAN.md §3). Store: src/agentic.js
+// (synchronous mutators => atomic). Coded store errors map via agenticErrorStatus().
+// `seg` = path after /api/agentic. ITERATION 1: CRUD only. The run-lifecycle
+// write routes (POST .../run, DELETE .../runs/:id, GET logTail) are wired by BE-3
+// on top of the startRun/advanceRun/killRun drivers above.
+function validateScheduleBody(body, { partial = false } = {}) {
+  const fields = [
+    "agenticId",
+    "serverId",
+    "cwd",
+    "objective",
+    "spec",
+    "enabled",
+  ];
+  const out = {};
+  for (const field of fields) {
+    if (body[field] !== undefined) out[field] = body[field];
+  }
+  if (partial && Object.keys(out).length === 0)
+    throw agenticErr("bad_request", "schedule patch is empty");
+  for (const field of ["agenticId", "serverId", "cwd", "objective"]) {
+    if (
+      (!partial || out[field] !== undefined) &&
+      typeof out[field] !== "string"
+    )
+      throw agenticErr("bad_request", `schedule ${field} must be a string`);
+  }
+  if (
+    (!partial || out.enabled !== undefined) &&
+    typeof out.enabled !== "boolean"
+  )
+    throw agenticErr("bad_request", "schedule enabled must be a boolean");
+  if (!partial || out.spec !== undefined) {
+    try {
+      const validationNow = Date.now();
+      schedules.computeNextFireAt(out.spec, validationNow, validationNow);
+    } catch (error) {
+      throw agenticErr("bad_request", error.message);
+    }
+  }
+  return out;
+}
+
+async function handleAgentic(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // ---- Scheduled runs ----
+    // Reads inherit the normal cookie-or-bearer Agentic gate and are Origin
+    // exempt. Every mutation adds the stronger human-cookie-only gate here;
+    // handleApi's standard Origin/CSRF check has already run for write methods.
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "schedules") {
+      return sendJson(res, 200, { schedules: schedules.list() });
+    }
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "schedules") {
+      const schedule = schedules.get(seg[1]);
+      if (!schedule) return sendJson(res, 404, { error: "schedule not found" });
+      return sendJson(res, 200, schedule);
+    }
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "schedules") {
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "human session required" });
+      const parsed = await readJsonObject(req);
+      if (!parsed.ok)
+        return sendJson(res, parsed.status, { error: parsed.error });
+      const body = validateScheduleBody(parsed.body);
+      const fingerprint = agentic.fingerprintExecutableDefinition(
+        body.agenticId,
+      );
+      const schedule = schedules.create(body, fingerprint);
+      syncScheduleLoop();
+      return sendJson(res, 201, schedule);
+    }
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "schedules") {
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "human session required" });
+      const current = schedules.get(seg[1]);
+      if (!current) return sendJson(res, 404, { error: "schedule not found" });
+      const parsed = await readJsonObject(req);
+      if (!parsed.ok)
+        return sendJson(res, parsed.status, { error: parsed.error });
+      const patch = validateScheduleBody(parsed.body, { partial: true });
+      const nextAgenticId = patch.agenticId ?? current.agenticId;
+      const fingerprint =
+        agentic.fingerprintExecutableDefinition(nextAgenticId);
+      const schedule = schedules.update(seg[1], patch, fingerprint);
+      syncScheduleLoop();
+      return sendJson(res, 200, schedule);
+    }
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "schedules") {
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "human session required" });
+      if (!schedules.delete(seg[1]))
+        return sendJson(res, 404, { error: "schedule not found" });
+      syncScheduleLoop();
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- Agents ----
+    // GET /api/agentic/agents — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "agents") {
+      return sendJson(res, 200, { agents: agentic.listAgents() });
+    }
+    // GET /api/agentic/agents/:id — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "agents") {
+      const a = agentic.getAgent(seg[1]);
+      if (!a) return sendJson(res, 404, { error: "agent not found" });
+      return sendJson(res, 200, a);
+    }
+    // POST /api/agentic/agents — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "agents") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(res, 201, agentic.createAgent(r.body));
+    }
+    // PATCH /api/agentic/agents/:id — update (partial)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "agents") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { expectedRev, ...patch } = r.body;
+      return sendJson(
+        res,
+        200,
+        agentic.updateAgent(seg[1], patch, expectedRev),
+      );
+    }
+    // DELETE /api/agentic/agents/:id — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "agents") {
+      if (!agentic.deleteAgent(seg[1])) {
+        return sendJson(res, 404, { error: "agent not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- Connections (POST/DELETE only — no PATCH, plan §3) ----
+    // GET /api/agentic/connections — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "connections") {
+      return sendJson(res, 200, { connections: agentic.listConnections() });
+    }
+    // POST /api/agentic/connections — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "connections") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(res, 201, agentic.createConnection(r.body));
+    }
+    // DELETE /api/agentic/connections/:id — delete
+    if (
+      req.method === "DELETE" &&
+      seg.length === 2 &&
+      seg[0] === "connections"
+    ) {
+      if (!agentic.deleteConnection(seg[1])) {
+        return sendJson(res, 404, { error: "connection not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- MCP servers (connection picker) ----
+    // GET /api/agentic/mcp-servers — the registered artifact MCP targets
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "mcp-servers") {
+      return sendJson(res, 200, { servers: AGENTIC_MCP_SERVERS });
+    }
+
+    // ---- Agentic AIs (the catalog, D8) ----
+    // GET /api/agentic/apps — list (summaries)
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "apps") {
+      return sendJson(res, 200, { apps: agentic.listAgenticAis() });
+    }
+    // GET /api/agentic/apps/:id/export — portable, instance-free template
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "export"
+    ) {
+      const app = agentic.getAgenticAi(seg[1]);
+      if (!app) return sendJson(res, 404, { error: "agentic AI not found" });
+      return sendJson(res, 200, { template: buildAgenticTemplate(app) });
+    }
+    // GET /api/agentic/apps/:id — get (full, incl. workflow)
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "apps") {
+      const aa = agentic.getAgenticAi(seg[1]);
+      if (!aa) return sendJson(res, 404, { error: "agentic AI not found" });
+      return sendJson(res, 200, aa);
+    }
+    // POST /api/agentic/apps — create (v=1, status=draft)
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "apps") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(res, 201, agentic.createAgenticAi(r.body));
+    }
+    // POST /api/agentic/apps/import — a very large v1 template may exceed the
+    // standard 64 KB readBody cap.
+    if (
+      req.method === "POST" &&
+      seg.length === 2 &&
+      seg[0] === "apps" &&
+      seg[1] === "import"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const template =
+        r.body.kind === "agentic-ai-template" ? r.body : r.body.template;
+      const app = importAgenticTemplate(template, r.body.name);
+      return sendJson(res, 201, { app });
+    }
+    // POST /api/agentic/apps/:id/clone — export and re-import with fresh ids
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "clone"
+    ) {
+      const source = agentic.getAgenticAi(seg[1]);
+      if (!source) return sendJson(res, 404, { error: "agentic AI not found" });
+      const app = importAgenticTemplate(
+        buildAgenticTemplate(source),
+        `${source.name} (copy)`,
+      );
+      return sendJson(res, 201, { app });
+    }
+    // PATCH /api/agentic/apps/:id/status — "publish" (D8): status-only, bumps rev
+    if (
+      req.method === "PATCH" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "status"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.status !== "string") {
+        return sendJson(res, 400, { error: "status is required" });
+      }
+      return sendJson(
+        res,
+        200,
+        agentic.setAgenticAiStatus(seg[1], r.body.status, r.body.expectedRev),
+      );
+    }
+    // PATCH /api/agentic/apps/:id — update (partial; bumps version, D9)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "apps") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { expectedRev, ...patch } = r.body;
+      return sendJson(
+        res,
+        200,
+        agentic.updateAgenticAi(seg[1], patch, expectedRev),
+      );
+    }
+    // DELETE /api/agentic/apps/:id — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "apps") {
+      if (!agentic.deleteAgenticAi(seg[1])) {
+        return sendJson(res, 404, { error: "agentic AI not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- Runs (read-only in iteration 1) ----
+    // GET /api/agentic/runs — list (summaries)
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "runs") {
+      return sendJson(res, 200, { runs: agentic.listRuns() });
+    }
+    // GET /api/agentic/runs/:id — get (full, incl. nodeExecutions[] + a bounded
+    // tailed log excerpt per step). logTail is DISPLAY-ONLY (never persisted): we
+    // inject it here by tailing each node's out.log (capped at AGENT_OUTPUT_MAX_BYTES
+    // by agenticNodeLogTail). Only nodes past `pending` have a scratch dir, so we
+    // skip pending ones (no wasted SSH round-trip) and Promise.all the rest so a
+    // multi-node run doesn't serialize per-node SSH latency.
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "runs") {
+      const run = agentic.getRun(seg[1]);
+      if (!run) return sendJson(res, 404, { error: "run not found" });
+      const nodes = run.nodeExecutions || [];
+      await Promise.all(
+        nodes.map(async (ne) => {
+          if (ne.status === "pending") return;
+          ne.logTail = await agenticNodeLogTail(run, ne.nodeId);
+        }),
+      );
+      return sendJson(res, 200, run);
+    }
+
+    // GET /api/agentic/session-cwd?sessionId=<qualified-or-bare> — resolve the
+    // working directory a run WOULD execute in (pane_current_path), the SAME way
+    // startRun resolves + freezes resolvedConfig.cwd, so the Run view can show it
+    // before Start run (and surface an unreachable target up front). Read-only:
+    // origin-exempt + bearer-or-cookie, exactly like the other agentic GETs.
+    // Errors mirror startRun: bad/blank sessionId or unknown server -> 400
+    // (bad_request); server unreachable / no such tmux session -> 502
+    // (cwd_unresolved). serverExec already carries the SSH ConnectTimeout, so this
+    // is bounded — no probe/blocking loop.
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "session-cwd") {
+      const ref = String(url.searchParams.get("sessionId") || "");
+      const { serverId, tmuxName } = parseSessionRef(ref);
+      if (!ID_RE.test(tmuxName))
+        throw agenticErr("bad_request", "invalid sessionId");
+      const server = registry.get(serverId);
+      if (!server)
+        throw agenticErr("bad_request", `unknown server: ${serverId}`);
+      let cwd;
+      try {
+        const r = await serverExec(server, [
+          "display-message",
+          "-p",
+          "-t",
+          tmuxName,
+          "#{pane_current_path}",
+        ]);
+        cwd = r.stdout.trim();
+      } catch {
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+      }
+      if (!isAbsPath(cwd))
+        throw agenticErr("cwd_unresolved", "failed to resolve session cwd");
+      return sendJson(res, 200, { sessionId: ref, serverId, cwd });
+    }
+
+    // ---- Run-lifecycle write routes (iteration 2) ----
+    // These call the async drivers in this module (startRun/killRun), which own
+    // the tmux/marker I/O. Origin/CSRF + auth parity is enforced upstream in
+    // handleApi (A1 checks Origin on POST/DELETE; A2 requires cookie-or-bearer).
+    // Coded driver errors flow through the shared catch → agenticErrorStatus
+    // (too_many_runs→429, session_unreachable/cwd_unresolved→502, dangling ref /
+    // parallel-write→422, not_found→404, bad_request→400, backend_unavailable→503).
+
+    // POST /api/agentic/apps/:id/run {sessionId, objective} — freeze resolvedConfig
+    // + spawn the entry node(s). 202 (accepted; the run advances asynchronously).
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "apps" &&
+      seg[2] === "run"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const run = await startRun({
+        agenticAiId: seg[1],
+        sessionId: r.body.sessionId,
+        objective: r.body.objective,
+      });
+      return sendJson(res, 202, run);
+    }
+
+    // DELETE /api/agentic/runs/:id — kill the run's live agrun- job(s) and mark it
+    // cancelled. The ONLY kill path, always an agrun- name derived from the run —
+    // never a web- session (HARD-constraint #2 by construction). 204.
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "runs") {
+      await killRun(seg[1]);
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // ---- MCP tool-call approval mediation (iteration 3, D5) ----
+    // Called by the per-run MCP proxy (tools/agentic-proxy/server.mjs) as a
+    // bearer client, and by the human (FE) approve/reject actions over the
+    // cookie session. Both auth channels already flow through the SAME
+    // bearer-or-cookie gate as every other /api/agentic/* route, enforced
+    // upstream in handleApi/isArtifactBearerAuthorized — no new auth path here.
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/pending-tool-call — the proxy
+    // registers a NEW approval-tier tool call. Flips the node (and the run,
+    // unless already terminal) to "waiting-approval". 201 {pendingId}.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "pending-tool-call"
+    ) {
+      const run = agentic.getRun(seg[1]);
+      if (run?.resolvedConfig?.unattended) {
+        return sendJson(res, 403, {
+          status: "rejected",
+          disposition: "deny",
+          reason: "unattended run: approvals are disabled",
+        });
+      }
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const result = agentic.recordPendingToolCall(seg[1], seg[3], {
+        toolName: r.body.toolName,
+        connectionId: r.body.connectionId,
+        argsPreview: r.body.argsPreview,
+      });
+      return sendJson(res, 201, result);
+    }
+
+    // GET /api/agentic/runs/:id/nodes/:nodeId/pending-tool-call/:pendingId —
+    // the proxy polls this for a decision (~1s interval, up to
+    // AGENT_MCP_APPROVAL_TIMEOUT_MS). 200 {status, reason?}; 404 if the id
+    // doesn't match the node's CURRENT pending record (superseded/never
+    // existed — the proxy treats a 404 the same as "not yet decided", per its
+    // own network-error tolerance).
+    if (
+      req.method === "GET" &&
+      seg.length === 6 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "pending-tool-call"
+    ) {
+      const found = agentic.getPendingToolCall(seg[1], seg[3], seg[5]);
+      if (!found)
+        return sendJson(res, 404, { error: "pending tool call not found" });
+      return sendJson(res, 200, found);
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/pending-tool-call/:pendingId
+    // {decision:"timed_out"} — the proxy's OWN best-effort timeout notice,
+    // sent (fire-and-forget, errors swallowed on ITS end) when its local
+    // AGENT_MCP_APPROVAL_TIMEOUT_MS hold elapses with no decision. This is a
+    // FASTER PATH only — the actual guarantee behind hard-constraint #4 ("a
+    // pending approval must always resolve") is sweepStalePendingApprovals in
+    // the advanceRun loop, which resolves the SAME pending record even if this
+    // notice never arrives (proxy crash, network partition). Idempotent via
+    // resolvePendingToolCall; always 204 (a store error here — e.g. the
+    // record was already resolved by the sweep first — must never surface as
+    // a failure to an already-timed-out, best-effort caller).
+    if (
+      req.method === "POST" &&
+      seg.length === 6 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "pending-tool-call"
+    ) {
+      const r = await readJsonObject(req);
+      if (r.ok && r.body.decision === "timed_out") {
+        try {
+          agentic.resolvePendingToolCall(
+            seg[1],
+            seg[3],
+            seg[5],
+            "timed_out",
+            null,
+          );
+        } catch (e) {
+          console.warn(`[agentic] proxy timeout notice failed: ${e.message}`);
+        }
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/tool-call-log — fire-and-forget
+    // audit-log append for allow/deny dispositions (the approval-tier
+    // approved/rejected/timed_out dispositions are appended internally by
+    // resolvePendingToolCall instead). A log-append failure must NEVER surface
+    // as a broken tool call to the CLI — the proxy does not even await this
+    // POST — so any store error is swallowed here too; always 204.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "tool-call-log"
+    ) {
+      const r = await readJsonObject(req);
+      if (r.ok) {
+        try {
+          agentic.appendToolCallLog(seg[1], {
+            nodeId: seg[3],
+            toolName: r.body.toolName,
+            connectionId: r.body.connectionId,
+            targetType: r.body.targetType,
+            disposition: r.body.disposition,
+            argsPreview: r.body.argsPreview,
+          });
+        } catch (e) {
+          console.warn(`[agentic] tool-call-log append failed: ${e.message}`);
+        }
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/guidance {text} — human-only
+    // follow-up turn for a completed claude-cli node.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "guidance"
+    ) {
+      // Resuming a CLI conversation is a human action. A scoped/bearer token
+      // available to the agent must never be able to trigger another turn.
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "guidance_requires_human" });
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      return sendJson(
+        res,
+        200,
+        await sendGuidance(seg[1], seg[3], r.body.text),
+      );
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/approve {pendingId?} — human
+    // (FE) decision. Resolves the node's current pending call (or an explicit
+    // pendingId, defense-in-depth) as approved, kicks advanceRun in the
+    // background (the node's tmux job is already running — advanceRun's next
+    // tick just re-reads a ledger that's no longer parked), and returns the
+    // Run as it stands right now (200), matching plan §3's documented shape.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "approve"
+    ) {
+      // FIX 1 (self-approval defense): approval is human-only (D7). Reject a
+      // bearer-only caller BEFORE reading the body or touching the store — the
+      // agent must never approve its own gated tool call with the token it can
+      // read out of its own --mcp-config. The proxy never calls approve/reject
+      // (it only uses pending-tool-call), so this cannot break the proxy; the FE
+      // artifact carries the gw_session cookie through the Next proxy.
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "approval_requires_human" });
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const runId = seg[1];
+      const nodeId = seg[3];
+      const run = agentic.getRun(runId);
+      const node = agentic.getNode(runId, nodeId);
+      const workflowNode = run.resolvedConfig?.workflow?.nodes?.find(
+        (candidate) => candidate.id === nodeId,
+      );
+      if (node.pendingToolCall) {
+        agentic.approveAction(runId, nodeId, { pendingId: r.body.pendingId });
+      } else if (
+        workflowNode?.type === "human-approval" &&
+        node.status === "waiting-approval"
+      ) {
+        agentic.recordNodeResult(runId, nodeId, {
+          status: "done",
+          finishedAt: Date.now(),
+        });
+      } else {
+        agentic.approveAction(runId, nodeId, { pendingId: r.body.pendingId });
+      }
+      void advanceRun(runId);
+      return sendJson(res, 200, agentic.getRun(runId));
+    }
+
+    // POST /api/agentic/runs/:id/nodes/:nodeId/reject {pendingId?, reason?} —
+    // human (FE) decision. Same shape as approve.
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "runs" &&
+      seg[2] === "nodes" &&
+      seg[4] === "reject"
+    ) {
+      // FIX 1 (self-approval defense): reject is human-only too (D7). Same gate
+      // as approve — a bearer-only caller is rejected before touching the store.
+      if (!isHumanCookieSession(req))
+        return sendJson(res, 403, { error: "approval_requires_human" });
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const runId = seg[1];
+      const nodeId = seg[3];
+      const run = agentic.getRun(runId);
+      const node = agentic.getNode(runId, nodeId);
+      const workflowNode = run.resolvedConfig?.workflow?.nodes?.find(
+        (candidate) => candidate.id === nodeId,
+      );
+      if (node.pendingToolCall) {
+        agentic.rejectAction(runId, nodeId, {
+          pendingId: r.body.pendingId,
+          reason: r.body.reason,
+        });
+      } else if (
+        workflowNode?.type === "human-approval" &&
+        node.status === "waiting-approval"
+      ) {
+        agentic.recordNodeResult(runId, nodeId, {
+          status: "failed",
+          finishedAt: Date.now(),
+          error: "rejected by human",
+        });
+      } else {
+        agentic.rejectAction(runId, nodeId, {
+          pendingId: r.body.pendingId,
+          reason: r.body.reason,
+        });
+      }
+      void advanceRun(runId);
+      return sendJson(res, 200, agentic.getRun(runId));
+    }
+
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      return sendJson(res, agenticErrorStatus(e.code), {
+        error: e.message,
+        ...(e.details || {}),
+      });
+    }
+    throw e;
+  }
+}
+
 // ---- File Explorer (fs/*) helpers ----
 // Read cap for text preview (bytes). Binary/oversized files are downloaded.
 const FS_READ_CAP = 256 * 1024;
@@ -1413,9 +5142,33 @@ async function handleApi(req, res, url) {
     return true;
   }
 
-  // A2: All other /api/* routes require a valid session (or open mode).
-  if (!isAuthenticated(req)) {
+  // A2: All other /api/* routes require a valid session (or open mode). The
+  // artifact prefixes (/api/kanban/*, /api/pm/*, /api/agentic/*) additionally
+  // accept a scoped bearer token so an external AI CLI can drive them without a
+  // cookie login.
+  if (
+    !isAuthenticated(req) &&
+    !(
+      (parts[1] === "kanban" || parts[1] === "pm" || parts[1] === "agentic") &&
+      (isArtifactBearerAuthorized(req) || isScopedMcpAuthorized(req, url))
+    )
+  ) {
     return sendJson(res, 401, { error: "unauthorized" });
+  }
+
+  // ---- Kanban: /api/kanban/* ----
+  if (parts[1] === "kanban") {
+    return handleKanban(req, res, url);
+  }
+
+  // ---- Project-management tool: /api/pm/* ----
+  if (parts[1] === "pm") {
+    return handlePm(req, res, url);
+  }
+
+  // ---- Agentic AI Creator: /api/agentic/* ----
+  if (parts[1] === "agentic") {
+    return handleAgentic(req, res, url);
   }
 
   // ---- Web Push: /api/push/* ----
@@ -3096,6 +6849,7 @@ wss.on("connection", async (ws, req) => {
 // A3: Bind to HOST (default 127.0.0.1).
 server.listen(PORT, HOST, () => {
   console.log(`web-terminal gateway listening on http://${HOST}:${PORT}`);
+  schedules.load();
   // If subscriptions persisted across a restart AND VAPID is configured, boot
   // the poll loop now (its first tick re-baselines and notifies nothing).
   if (push.isConfigured() && push.count() > 0) {
@@ -3104,4 +6858,30 @@ server.listen(PORT, HOST, () => {
       `[push] ${push.count()} persisted subscription(s); loop active.`,
     );
   }
+  // Agentic run-engine boot rediscovery: reap finished/died steps, re-spawn
+  // never-ran steps, resume still-alive jobs, and advance every active run.
+  bootRediscoverRuns();
+  // Persisted schedules are loaded after the other stores and only caught up
+  // after active runs have been counted. The guarded tick claims each overdue
+  // schedule at most once, then the normal interval handles future fires.
+  if (schedules.count() > 0) {
+    startScheduleLoop();
+    void schedulePollTick();
+    console.log(
+      `[agentic] ${schedules.count()} enabled schedule(s) loaded at boot.`,
+    );
+  }
 });
+
+// Test/BE-3 seam: the run-engine drivers live in server.js (they own the async
+// tmux/marker I/O). These are NOT routes — BE-3's /api/agentic/*/run routes live
+// in the same module and call them directly. The export exists only so the
+// out-of-process smoke/acceptance test can drive the REAL drivers.
+export {
+  startRun,
+  advanceRun,
+  killRun,
+  startAgenticLoop,
+  stopAgenticLoop,
+  agenticNodeLogTail,
+};

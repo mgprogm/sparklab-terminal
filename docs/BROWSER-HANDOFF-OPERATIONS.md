@@ -53,8 +53,10 @@ must never be added to the public handoff protocol.
 
 ## Virtual Mouse Semantics
 
-The virtual cursor is intentionally local and contains no page or secret data.
-Its coordinates are the bounded browser coordinates sent by the frontend.
+The virtual cursor is an arrow rendered locally and contains no page or secret
+data. Its tip is the exact bounded browser coordinate sent by the frontend.
+Its color reflects connection/pressed/ACK state; the label remains the
+authoritative coordinate display.
 
 | Signal                     | Proven                                                                 | Not proven                                                                                                                       |
 | -------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -112,8 +114,14 @@ Run the checks in order. Do not jump from “the image did not visibly change”
 The interactive canvas should contain all of these markers:
 
 ```html
-aria-label="Interactive isolated browser" aria-disabled="false" class="...
-cursor-none ..." data-testid="virtual-mouse"
+<canvas
+  aria-label="Interactive isolated browser"
+  aria-disabled="false"
+  class="cursor-none ..."
+></canvas>
+<div data-testid="virtual-mouse">
+  <svg data-testid="virtual-mouse-arrow"></svg>
+</div>
 ```
 
 If `cursor-none`, `aria-disabled`, or the virtual-mouse sibling is absent, the
@@ -184,16 +192,17 @@ Frame dropping under load is intentional; a permanently frozen frame is not.
 
 ## Decision Table
 
-| Observation                                                  | Most likely layer                              | Next check                                                                         |
-| ------------------------------------------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
-| No virtual cursor                                            | Stale bundle or canvas event/overlay issue     | Bundle markers and DOM stacking                                                    |
-| Cursor moves, says `connecting...`                           | Handoff socket/auth                            | Banner, WebSocket route, cookie, Origin                                            |
-| Cursor moves, no ACK, socket remains open                    | Client send or broker processing               | WS text frames, schema, queue/rate limit                                           |
-| `✓`, but blank-space click changes nothing                   | Expected page behavior                         | Click a controlled input/button                                                    |
-| `✓`, known target will not focus                             | Wrong target or coordinate mapping             | Canvas bitmap/CSS dimensions and active target                                     |
-| Known input accepts typing but canvas stays unchanged        | Server-to-client frame path                    | Binary frames, decode, canvas paint                                                |
-| Canvas changes in a fresh E2E session but not the user's tab | Client-specific stale state/browser behavior   | Hard reload, new handoff, browser console/network                                  |
-| Reopen request reports handoff active but no view appears    | Chat/client ownership or stale ephemeral store | Use the same active chat client; otherwise finish/cancel and start a fresh handoff |
+| Observation                                                  | Most likely layer                              | Next check                                                         |
+| ------------------------------------------------------------ | ---------------------------------------------- | ------------------------------------------------------------------ |
+| No virtual cursor                                            | Stale bundle or canvas event/overlay issue     | Bundle markers and DOM stacking                                    |
+| Cursor moves, says `connecting...`                           | Handoff socket/auth                            | Banner, WebSocket route, cookie, Origin                            |
+| Cursor moves, no ACK, socket remains open                    | Client send or broker processing               | WS text frames, schema, queue/rate limit                           |
+| `✓`, but blank-space click changes nothing                   | Expected page behavior                         | Click a controlled input/button                                    |
+| `✓`, known target will not focus                             | Wrong target or coordinate mapping             | Canvas bitmap/CSS dimensions and active target                     |
+| Known input accepts typing but canvas stays unchanged        | Server-to-client frame path                    | Binary frames, decode, canvas paint                                |
+| Canvas changes in a fresh E2E session but not the user's tab | Client-specific stale state/browser behavior   | Hard reload, new handoff, browser console/network                  |
+| Reload returns only recovery controls                        | Expected loss of memory-only media credentials | Use Done to return control, or Cancel and start a fresh handoff    |
+| Reopen request reports active but no recovery view appears   | Chat/client ownership or control-frame failure | Verify the same chat and inspect the authenticated `/agent` socket |
 
 ## Reproducible Tests
 

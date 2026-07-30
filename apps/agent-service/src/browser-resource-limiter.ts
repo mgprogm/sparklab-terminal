@@ -1,4 +1,8 @@
 import { config } from "./config.js";
+import {
+  browserPerformanceMetrics,
+  type BrowserPerformanceMetrics,
+} from "./browser-performance-metrics.js";
 
 /** Process-wide bounds for Chromium trees and expensive concurrent launches. */
 export class BrowserResourceLimiter {
@@ -9,6 +13,8 @@ export class BrowserResourceLimiter {
   constructor(
     private readonly maxSessions: number,
     private readonly maxLaunches: number,
+    private readonly metrics: BrowserPerformanceMetrics = browserPerformanceMetrics,
+    private readonly now: () => number = Date.now,
   ) {}
 
   reserveSession(): () => void {
@@ -25,7 +31,10 @@ export class BrowserResourceLimiter {
 
   async acquireLaunch(): Promise<() => void> {
     if (this.launches >= this.maxLaunches) {
+      const queuedAt = this.now();
+      this.metrics.launchQueued();
       await new Promise<void>((resolve) => this.launchWaiters.push(resolve));
+      this.metrics.launchDequeued(this.now() - queuedAt);
     } else {
       this.launches++;
     }

@@ -1,0 +1,4328 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentic AI Creator</title>
+<!--
+  Pluggable Agentic AI Creator artifact (AGENTIC-AI-CREATOR-PLAN.md D8: ONE
+  artifact, an in-app catalog — NOT a per-app artifact).
+
+  SCOPE: a catalog + a team-builder + a minimal Run view, across three tabbed
+  views:
+    · Agentic AIs — the catalog. Lists apps from GET /api/agentic/apps (name +
+      status badge + agent/connection counts), offers a "New Agentic AI" form
+      (POST /api/agentic/apps), a publish/unpublish toggle
+      (PATCH /api/agentic/apps/:id/status), and a per-app TEAM editor (a modal
+      that GETs /api/agentic/apps/:id and PATCHes {agentIds, connectionIds,
+      orchestrationMode, workflow}). The team editor is what lets an app actually run —
+      without ≥1 agent, POST /apps/:id/run rejects with "agentic AI has no
+      agents".
+    · Agents — the reusable agent library. Lists GET /api/agentic/agents,
+      creates (POST) / edits (PATCH) / deletes (DELETE) agents, and edits each
+      agent's per-connection tool policy (toolPolicies[], tools:"all").
+    · Connections — scoped MCP access to other artifacts. Lists / creates / deletes
+      GET|POST|DELETE /api/agentic/connections; targetType choices come from
+      GET /api/agentic/mcp-servers.
+  The Run view picks a target terminal session, starts a run (POST /apps/:id/run),
+  polls GET /runs/:id to render per-node status + tailed logs + tool-call
+  approvals, and can Kill (DELETE /runs/:id).
+
+  Built-in workflow/DAG modes are derived by the backend from agentIds +
+  orchestrationMode. Custom mode uses the Team editor's form-based DAG builder.
+  Team order matters for built-in supervisor/pipeline modes, so agentIds preserve
+  list order.
+
+  A SINGLE self-contained document — inline <style> + inline <script>, ZERO
+  external requests (no CDN, no fetched web fonts, no imports). Loaded into a
+  same-origin sandboxed <iframe> by components/agentic-dialog.tsx; it talks to
+  the gateway over relative /api/agentic/* fetches, which carry the app-origin
+  gw_session cookie through the Next proxy.
+
+  Palette/type are hardcoded to mirror DESIGN.md (a documented exception to the
+  "use Tailwind tokens" rule — this isolated document has no access to the
+  app's theme tokens).
+
+  Safety: all user-supplied text is injected via textContent / DOM nodes, never
+  innerHTML, so names/descriptions cannot inject markup.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --ok: #8fb98a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  select,
+  input,
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    flex-wrap: wrap;
+  }
+
+  .topbar .title {
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: -0.2px;
+  }
+
+  .topbar .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* ---- Tabs ---- */
+  .tabs {
+    display: flex;
+    gap: 2px;
+  }
+
+  .tab {
+    background: transparent;
+    color: var(--mute);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 5px 11px;
+    transition: background 0.12s ease, color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .tab:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .tab.active {
+    color: var(--ink);
+    background: var(--canvas-soft);
+    border-color: var(--hairline);
+  }
+
+  .btn {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--canvas-softer);
+  }
+
+  .btn-primary {
+    background: var(--ink);
+    color: var(--canvas);
+    border-color: var(--ink);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--mute);
+    padding: 4px 8px;
+  }
+
+  .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* ---- Banner ---- */
+  .banner {
+    display: none;
+    padding: 8px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--danger);
+    font-size: 13px;
+  }
+
+  .banner.show {
+    display: block;
+  }
+
+  /* ---- Catalog ---- */
+  .catalog {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    align-content: start;
+  }
+
+  .app-card {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .app-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .app-name {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.3;
+    word-break: break-word;
+    flex: 1 1 auto;
+  }
+
+  .badge {
+    display: inline-block;
+    border-radius: 9999px;
+    padding: 1px 9px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+    border: 1px solid var(--hairline);
+    background: var(--canvas);
+    color: var(--body);
+    text-transform: capitalize;
+  }
+
+  .badge-published {
+    color: var(--ok);
+    border-color: rgba(143, 185, 138, 0.5);
+  }
+
+  .badge-draft {
+    color: var(--mute);
+  }
+
+  .badge-paused,
+  .badge-archived {
+    color: var(--accent);
+  }
+
+  .app-meta {
+    display: flex;
+    gap: 14px;
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .app-mode {
+    color: var(--body);
+    font-size: 12px;
+    text-transform: capitalize;
+  }
+
+  .app-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .app-actions .grow {
+    flex: 1 1 auto;
+  }
+
+  /* ---- Empty / loading states ---- */
+  .placeholder {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--mute);
+    text-align: center;
+    padding: 48px 32px;
+  }
+
+  .placeholder h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--body);
+  }
+
+  /* ---- Library views (agents / connections) ---- */
+  .library {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .library.show {
+    display: flex;
+  }
+
+  .lib-row {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 12px 14px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .lib-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .lib-name {
+    font-size: 14px;
+    font-weight: 500;
+    word-break: break-word;
+  }
+
+  .lib-sub {
+    color: var(--mute);
+    font-size: 12px;
+    word-break: break-word;
+  }
+
+  .lib-badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+  }
+
+  .lib-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+
+  .badge-codex-cli {
+    color: var(--accent);
+  }
+
+  .badge-claude-cli {
+    color: var(--ok);
+    border-color: rgba(143, 185, 138, 0.5);
+  }
+
+  /* ---- Team / policy editor bits (inside modals) ---- */
+  .team-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .team-item {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .team-item .team-idx {
+    color: var(--mute);
+    font-size: 11px;
+    min-width: 16px;
+    text-align: right;
+  }
+
+  .team-item .team-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .team-item .team-role {
+    color: var(--mute);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .schedule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .schedule-item {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 9px;
+  }
+
+  .schedule-head,
+  .schedule-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .schedule-summary {
+    flex: 1 1 auto;
+    color: var(--ink);
+  }
+
+  .schedule-meta,
+  .schedule-objective {
+    color: var(--mute);
+    font-size: 12px;
+    margin-top: 5px;
+    overflow-wrap: anywhere;
+  }
+
+  .schedule-error {
+    color: var(--danger);
+  }
+
+  .schedule-actions {
+    margin-top: 8px;
+  }
+
+  .picker-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .picker-row .field {
+    flex: 1 1 auto;
+  }
+
+  .workflow-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .workflow-row select.field {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+  }
+
+  .workflow-node-id {
+    min-width: 28px;
+    color: var(--body);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+
+  .workflow-arrow {
+    color: var(--mute);
+  }
+
+  .workflow-retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+  }
+
+  .workflow-retry-num {
+    width: 56px;
+    flex: 0 0 auto;
+  }
+
+  .workflow-edge-label {
+    flex: 0 1 120px;
+    min-width: 90px;
+  }
+
+  .check-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 5px 0;
+  }
+
+  .check-row input {
+    margin-top: 3px;
+  }
+
+  .check-row label {
+    margin: 0;
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .policy-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+  }
+
+  .policy-row .policy-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 13px;
+    word-break: break-word;
+  }
+
+  .policy-row select.field {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .section-label {
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 6px;
+  }
+
+  .icon-btn {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    line-height: 1.2;
+  }
+
+  .icon-btn:hover {
+    background: var(--canvas-softer);
+    color: var(--ink);
+  }
+
+  .icon-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .modal-scroll {
+    overflow-y: auto;
+    max-height: 62vh;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: -4px 0;
+    padding: 4px 2px;
+  }
+
+  .inline-hint {
+    font-size: 12px;
+    color: var(--accent);
+    background: rgba(218, 210, 193, 0.1);
+    border: 1px solid rgba(218, 210, 193, 0.35);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  .modal-error {
+    display: none;
+    font-size: 12px;
+    color: var(--danger);
+  }
+
+  .modal-error.show {
+    display: block;
+  }
+
+  /* ---- Modal ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 10;
+  }
+
+  .overlay.show {
+    display: flex;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 460px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal-wide {
+    max-width: 540px;
+  }
+
+  .modal h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  textarea.field {
+    resize: vertical;
+    min-height: 68px;
+    line-height: 1.45;
+  }
+
+  select.field {
+    text-transform: capitalize;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--mute);
+    margin-top: 4px;
+  }
+
+  .run-cwd {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    font-size: 12px;
+  }
+  .run-cwd .run-cwd-label {
+    color: var(--mute);
+    margin-right: 6px;
+  }
+  .run-cwd .run-cwd-path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink);
+    word-break: break-all;
+  }
+  .run-cwd.is-error .run-cwd-path {
+    font-family: var(--font);
+    color: var(--danger);
+  }
+  .run-cwd .run-cwd-note {
+    margin-top: 4px;
+    color: var(--mute);
+    font-size: 11px;
+    cursor: help;
+  }
+
+  .row-end {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  /* ---- Run view (iteration 2) ---- */
+  .run-view {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: column;
+  }
+
+  .run-view.show {
+    display: flex;
+  }
+
+  .run-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .run-head .run-title {
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: -0.2px;
+    word-break: break-word;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .run-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .run-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 560px;
+  }
+
+  .run-form label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .run-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .run-status-bar .grow {
+    flex: 1 1 auto;
+  }
+
+  .run-meta {
+    color: var(--mute);
+    font-size: 12px;
+  }
+
+  .node-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .run-history {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .run-hist-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    background: var(--canvas-soft);
+  }
+  .run-hist-row .run-hist-mid {
+    flex: 1;
+    min-width: 0;
+  }
+  .run-hist-row .run-hist-obj {
+    color: var(--ink);
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .run-hist-row .run-hist-time {
+    color: var(--mute);
+    font-size: 11.5px;
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .run-hist-row .badge {
+    flex: 0 0 auto;
+  }
+
+  .node-card {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .node-card-skipped {
+    background: var(--canvas);
+    color: var(--mute);
+    opacity: 0.7;
+  }
+
+  .node-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .node-id {
+    font-size: 13px;
+    font-weight: 500;
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .node-dur {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .node-turn {
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .node-error {
+    color: var(--danger);
+    font-size: 12px;
+    font-weight: 500;
+    word-break: break-word;
+  }
+
+  .node-result {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+  }
+
+  .node-result-title {
+    color: var(--mute);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+  }
+
+  .node-result-text {
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .node-raw summary {
+    color: var(--mute);
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .node-raw[open] summary {
+    margin-bottom: 6px;
+  }
+
+  .node-log {
+    margin: 0;
+    max-height: 200px;
+    overflow: auto;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--body);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .guidance-form {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  textarea.guidance-input {
+    flex: 1 1 auto;
+    min-height: 48px;
+    resize: vertical;
+    line-height: 1.4;
+  }
+
+  .badge-running,
+  .badge-queued,
+  .badge-waiting-approval {
+    color: var(--accent);
+  }
+
+  .badge-done,
+  .badge-completed {
+    color: var(--ok);
+    border-color: rgba(143, 185, 138, 0.5);
+  }
+
+  .badge-failed {
+    color: var(--danger);
+    border-color: rgba(224, 122, 106, 0.5);
+  }
+
+  .badge-budget_exhausted {
+    color: var(--accent);
+    border-color: rgba(218, 210, 193, 0.55);
+  }
+
+  .badge-pending,
+  .badge-skipped,
+  .badge-cancelled {
+    color: var(--mute);
+  }
+
+  /* ---- Approval banner (iter3) ---- */
+  .btn-danger {
+    color: var(--danger);
+    border-color: rgba(224, 122, 106, 0.5);
+  }
+
+  .btn-danger:hover {
+    background: rgba(224, 122, 106, 0.12);
+  }
+
+  .approval-box {
+    background: var(--canvas);
+    border: 1px solid rgba(218, 210, 193, 0.55);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .approval-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+
+  .approval-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 10px;
+    align-items: baseline;
+  }
+
+  .approval-key {
+    font-size: 11px;
+    color: var(--mute);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .approval-val {
+    font-size: 12px;
+    color: var(--ink);
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .approval-args {
+    margin: 0;
+    max-height: 140px;
+    overflow: auto;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--body);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .approval-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  /* ---- Tool-call audit log (iter3) ---- */
+  .tool-log-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--body);
+    margin-bottom: 8px;
+  }
+
+  .tool-log-list {
+    max-height: 200px;
+    overflow: auto;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    background: var(--canvas-soft);
+  }
+
+  .tool-log-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 12px;
+  }
+
+  .tool-log-row:last-child {
+    border-bottom: none;
+  }
+
+  .tool-log-disp {
+    flex: 0 0 auto;
+    font-size: 11px;
+    text-transform: capitalize;
+    color: var(--body);
+    min-width: 66px;
+  }
+
+  .disp-allow,
+  .disp-approved {
+    color: var(--ok);
+  }
+
+  .disp-deny,
+  .disp-rejected {
+    color: var(--danger);
+  }
+
+  .disp-timed_out {
+    color: var(--accent);
+  }
+
+  .tool-log-tool {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--ink);
+    word-break: break-word;
+  }
+
+  .tool-log-conn {
+    flex: 0 1 auto;
+    min-width: 0;
+    color: var(--mute);
+    word-break: break-word;
+  }
+
+  .tool-log-time {
+    flex: 0 0 auto;
+    color: var(--mute);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 9999px;
+  }
+</style>
+
+<div class="topbar">
+  <span class="title">Agentic AI Creator</span>
+  <div id="tabs" class="tabs">
+    <button id="tab-apps" class="tab active" type="button" data-tab="catalog">
+      Agentic AIs
+    </button>
+    <button id="tab-agents" class="tab" type="button" data-tab="agents">
+      Agents
+    </button>
+    <button id="tab-connections" class="tab" type="button" data-tab="connections">
+      Connections
+    </button>
+  </div>
+  <span class="grow"></span>
+  <button id="import-app-btn" class="btn btn-primary" type="button">
+    Import template
+  </button>
+  <button id="new-app-btn" class="btn btn-primary" type="button">
+    New Agentic AI
+  </button>
+  <button id="new-agent-btn" class="btn btn-primary" type="button" style="display: none">
+    New Agent
+  </button>
+  <button id="new-connection-btn" class="btn btn-primary" type="button" style="display: none">
+    New Connection
+  </button>
+</div>
+
+<div id="banner" class="banner" role="alert"></div>
+
+<div id="catalog" class="catalog"></div>
+
+<!-- Agents library: the reusable agent roster. -->
+<div id="agents-view" class="library"></div>
+
+<!-- Connections library: scoped MCP access to other artifacts. -->
+<div id="connections-view" class="library"></div>
+
+<!-- Run view (iteration 2): pick a target session, start a run, watch the
+     nodeExecutions[] ledger + tailed logs, kill it. No workflow/DAG editor. -->
+<div id="run-view" class="run-view">
+  <div class="run-head">
+    <button id="run-back-btn" class="btn btn-ghost" type="button">← Back</button>
+    <span id="run-title" class="run-title"></span>
+  </div>
+  <div class="run-body">
+    <form id="run-form" class="run-form">
+      <div>
+        <label for="run-session">Target terminal session</label>
+        <select id="run-session" class="field"></select>
+        <div class="hint">
+          The run executes on this session's server, in its working directory.
+        </div>
+        <div id="run-cwd" class="run-cwd" style="display: none"></div>
+      </div>
+      <div>
+        <label for="run-objective">Objective</label>
+        <textarea
+          id="run-objective"
+          class="field"
+          placeholder="What should this Agentic AI do?"
+        ></textarea>
+      </div>
+      <div class="row-end">
+        <button id="run-start-btn" type="submit" class="btn btn-primary">
+          Start run
+        </button>
+      </div>
+    </form>
+
+    <div id="run-history-wrap" style="display: none">
+      <div class="section-label" style="margin-top: 22px">Recent runs</div>
+      <div class="hint" style="margin-bottom: 10px">
+        Runs survive refresh and gateway restarts. Reopen a finished run, or
+        continue watching one that is still running.
+      </div>
+      <div id="run-history" class="run-history"></div>
+    </div>
+
+    <div id="run-active" style="display: none">
+      <div class="run-status-bar">
+        <span id="run-status-badge" class="badge"></span>
+        <span id="run-status-meta" class="run-meta"></span>
+        <span class="grow"></span>
+        <button id="run-kill-btn" class="btn btn-ghost" type="button">Kill</button>
+        <button id="run-new-btn" class="btn" type="button" style="display: none">
+          New run
+        </button>
+      </div>
+      <div id="run-objective-echo" class="run-meta" style="margin-top: 8px"></div>
+      <div id="node-list" class="node-list" style="margin-top: 12px"></div>
+      <div id="tool-log" class="tool-log" style="margin-top: 16px; display: none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- New Agentic AI modal -->
+<div id="new-app-overlay" class="overlay">
+  <form id="new-app-form" class="modal">
+    <h3>New Agentic AI</h3>
+    <div>
+      <label for="na-name">Name</label>
+      <input
+        id="na-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Release notes writer"
+        required
+      />
+    </div>
+    <div>
+      <label for="na-desc">Description</label>
+      <textarea
+        id="na-desc"
+        class="field"
+        placeholder="Optional"
+      ></textarea>
+    </div>
+    <div>
+      <label for="na-mode">Orchestration mode</label>
+      <select id="na-mode" class="field">
+        <option value="single">single</option>
+        <option value="supervisor">supervisor</option>
+        <option value="sequential">sequential</option>
+        <option value="parallel">parallel</option>
+      </select>
+      <div class="hint">
+        How the agents in this app coordinate. You can change it later.
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-app-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create</button>
+    </div>
+  </form>
+</div>
+
+<!-- Import Agentic AI template modal -->
+<div id="import-app-overlay" class="overlay">
+  <form id="import-app-form" class="modal">
+    <h3>Import template</h3>
+    <div>
+      <label for="import-app-file">Template file</label>
+      <input
+        id="import-app-file"
+        class="field"
+        type="file"
+        accept="application/json,.json"
+      />
+    </div>
+    <div>
+      <label for="import-app-json">Template JSON</label>
+      <textarea
+        id="import-app-json"
+        class="field"
+        placeholder="Paste template JSON here"
+      ></textarea>
+    </div>
+    <div id="import-app-error" class="modal-error" role="alert"></div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="import-app-overlay">
+        Cancel
+      </button>
+      <button id="import-app-submit" type="submit" class="btn btn-primary">
+        Import
+      </button>
+    </div>
+  </form>
+</div>
+
+<!-- Team editor modal: edit an app's agents (order matters), connections, and
+     orchestration mode. GETs the full app on open; PATCHes on every change. -->
+<div id="team-overlay" class="overlay">
+  <div class="modal modal-wide">
+    <h3 id="team-title">Team</h3>
+    <div id="team-empty-hint" class="inline-hint" style="display: none">
+      Add at least one agent before running this Agentic AI.
+    </div>
+    <div class="modal-scroll">
+      <div>
+        <label for="team-mode">Orchestration mode</label>
+        <select id="team-mode" class="field">
+          <option value="single">single</option>
+          <option value="supervisor">supervisor</option>
+          <option value="sequential">sequential</option>
+          <option value="parallel">parallel</option>
+          <option value="custom">custom</option>
+        </select>
+        <div id="team-mode-hint" class="hint">
+          How the team coordinates. Order below is the supervisor / pipeline order.
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Objective template</div>
+        <textarea
+          id="team-objective-template"
+          class="field"
+          rows="3"
+          placeholder="Optional. Prepended to every run's objective for this Agentic AI."
+        ></textarea>
+        <div class="hint">
+          A reusable preamble prepended to each run's objective. Changing it alters
+          the scheduled-run fingerprint (a schedule must be re-saved).
+        </div>
+        <div class="row-end" style="margin-top: 8px">
+          <button id="team-objective-save" class="btn" type="button">
+            Save template
+          </button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Budget</div>
+        <div class="picker-row">
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="team-budget-max-spawns">Max spawns</label>
+            <input
+              id="team-budget-max-spawns"
+              class="field"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="Optional"
+            />
+          </div>
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="team-budget-max-wall-clock">Max wall-clock (ms)</label>
+            <input
+              id="team-budget-max-wall-clock"
+              class="field"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="Optional"
+            />
+          </div>
+        </div>
+        <div class="hint">Leave both blank for no app-level budget.</div>
+        <div class="row-end" style="margin-top: 8px">
+          <button id="team-budget-save" class="btn" type="button">
+            Save budget
+          </button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Schedule</div>
+        <div class="inline-hint">
+          Scheduled runs are UNATTENDED — approval-tier tool calls and human-approval
+          steps fail closed; editing this app requires re-saving the schedule (a
+          changed definition refuses to fire).
+        </div>
+        <div id="schedule-target" class="hint" style="margin-top: 8px">
+          New schedules snapshot the target currently selected in the Run view.
+        </div>
+        <div class="picker-row" style="margin-top: 8px">
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="schedule-every">Every</label>
+            <select id="schedule-every" class="field">
+              <option value="minute">minute</option>
+              <option value="hour">hour</option>
+              <option value="day">day</option>
+            </select>
+          </div>
+          <div style="flex: 1 1 0; min-width: 0">
+            <label for="schedule-interval">Interval</label>
+            <input
+              id="schedule-interval"
+              class="field"
+              type="number"
+              min="1"
+              step="1"
+              value="1"
+            />
+          </div>
+          <div
+            id="schedule-at-hour-wrap"
+            style="flex: 1 1 0; min-width: 0; display: none"
+          >
+            <label for="schedule-at-hour">UTC hour</label>
+            <input
+              id="schedule-at-hour"
+              class="field"
+              type="number"
+              min="0"
+              max="23"
+              step="1"
+              value="0"
+            />
+          </div>
+          <div
+            id="schedule-at-minute-wrap"
+            style="flex: 1 1 0; min-width: 0; display: none"
+          >
+            <label for="schedule-at-minute">UTC minute</label>
+            <input
+              id="schedule-at-minute"
+              class="field"
+              type="number"
+              min="0"
+              max="59"
+              step="1"
+              value="0"
+            />
+          </div>
+        </div>
+        <div style="margin-top: 8px">
+          <label for="schedule-objective">Objective</label>
+          <textarea
+            id="schedule-objective"
+            class="field"
+            placeholder="What should this unattended run do?"
+          ></textarea>
+        </div>
+        <div class="check-row">
+          <input id="schedule-enabled" type="checkbox" checked />
+          <label for="schedule-enabled">Enabled</label>
+        </div>
+        <div class="row-end">
+          <button id="schedule-create" class="btn" type="button">
+            Create schedule
+          </button>
+        </div>
+        <div id="schedule-list" class="schedule-list"></div>
+      </div>
+      <div>
+        <div class="section-label">Team agents</div>
+        <div id="team-agents" class="team-list"></div>
+        <div class="picker-row" style="margin-top: 8px">
+          <select id="team-add-select" class="field"></select>
+          <button id="team-add-btn" class="btn" type="button">Add</button>
+        </div>
+      </div>
+      <div id="team-workflow" style="display: none">
+        <div class="section-label">Workflow</div>
+        <div class="hint" style="margin-bottom: 8px">
+          A dependency from one node to another makes the second wait for the first.
+        </div>
+        <div class="section-label">Nodes</div>
+        <div id="workflow-nodes" class="workflow-list"></div>
+        <button id="workflow-add-node" class="btn" type="button" style="margin-top: 8px">
+          Add node
+        </button>
+        <button
+          id="workflow-add-evaluation"
+          class="btn"
+          type="button"
+          style="margin-top: 8px"
+        >
+          Add evaluation
+        </button>
+        <div class="section-label" style="margin-top: 14px">Edges</div>
+        <div id="workflow-edges" class="workflow-list"></div>
+        <button id="workflow-add-edge" class="btn" type="button" style="margin-top: 8px">
+          Add edge
+        </button>
+        <div style="margin-top: 14px">
+          <label for="workflow-entry">Entry node <span style="opacity: 0.6">(optional)</span></label>
+          <select id="workflow-entry" class="field"></select>
+        </div>
+        <div class="row-end" style="margin-top: 14px">
+          <button id="workflow-save" class="btn btn-primary" type="button">
+            Save workflow
+          </button>
+        </div>
+      </div>
+      <div>
+        <div class="section-label">Connections</div>
+        <div id="team-connections"></div>
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="team-overlay">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Agent create/edit modal. In edit mode the tool-policy section appears. -->
+<div id="agent-overlay" class="overlay">
+  <form id="agent-form" class="modal modal-wide">
+    <h3 id="agent-title">New Agent</h3>
+    <div class="modal-scroll">
+      <div>
+        <label for="ag-name">Name</label>
+        <input
+          id="ag-name"
+          class="field"
+          type="text"
+          autocomplete="off"
+          placeholder="Code reviewer"
+          required
+        />
+      </div>
+      <div>
+        <label>Runtime provider</label>
+        <div style="display: flex; gap: 16px; margin-top: 2px">
+          <label style="display: flex; align-items: center; gap: 6px; color: var(--ink)">
+            <input type="radio" name="ag-provider" value="claude-cli" checked />
+            Claude
+          </label>
+          <label style="display: flex; align-items: center; gap: 6px; color: var(--ink)">
+            <input type="radio" name="ag-provider" value="codex-cli" />
+            Codex
+          </label>
+        </div>
+      </div>
+      <div>
+        <label for="ag-role">Role <span style="opacity: 0.6">(optional)</span></label>
+        <input
+          id="ag-role"
+          class="field"
+          type="text"
+          autocomplete="off"
+          placeholder="supervisor / worker / reviewer"
+        />
+      </div>
+      <div>
+        <label for="ag-prompt">System prompt</label>
+        <textarea
+          id="ag-prompt"
+          class="field"
+          placeholder="Optional — how this agent should behave."
+        ></textarea>
+      </div>
+      <div>
+        <label for="ag-sandbox">Sandbox mode</label>
+        <select id="ag-sandbox" class="field">
+          <option value="read-only">read-only</option>
+          <option value="workspace-write">workspace-write</option>
+        </select>
+        <div class="hint">
+          workspace-write lets the agent modify files in the run's working directory.
+        </div>
+      </div>
+      <div>
+        <label for="ag-model">Model <span style="opacity: 0.6">(optional)</span></label>
+        <input
+          id="ag-model"
+          class="field"
+          type="text"
+          autocomplete="off"
+          placeholder="Provider default"
+        />
+      </div>
+      <div id="agent-policies-wrap" style="display: none">
+        <div class="section-label">Tool policy per connection</div>
+        <div id="agent-policies"></div>
+        <div class="hint">Applies to all tools on that connection.</div>
+      </div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="agent-overlay">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="agent-save-btn">Create</button>
+    </div>
+  </form>
+</div>
+
+<!-- Connection create modal. targetType options come from GET /mcp-servers. -->
+<div id="connection-overlay" class="overlay">
+  <form id="connection-form" class="modal">
+    <h3>New Connection</h3>
+    <div>
+      <label for="cn-target">Target artifact</label>
+      <select id="cn-target" class="field"></select>
+    </div>
+    <div>
+      <label for="cn-scope">Scope</label>
+      <select id="cn-scope" class="field">
+        <option value="fixed">fixed</option>
+        <option value="runtime-selection">runtime-selection</option>
+      </select>
+      <div class="hint">
+        fixed binds one board/project; runtime-selection lets a run pick.
+      </div>
+    </div>
+    <div id="cn-target-id-wrap">
+      <label for="cn-target-id">
+        Target id <span style="opacity: 0.6">(optional)</span>
+      </label>
+      <input
+        id="cn-target-id"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="A specific board / project id"
+      />
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="connection-overlay">Cancel</button>
+      <button type="submit" class="btn btn-primary">Create</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  var state = {
+    apps: [], // summaries: {id,name,status,orchestrationMode,agentCount,connectionCount,version,...}
+    agents: [], // full Agent[] (the reusable library)
+    connections: [], // full ArtifactConnection[]
+    mcpServers: [], // [{id,name}] connection targets from GET /mcp-servers
+    view: "catalog", // "catalog" | "agents" | "connections" | "run"
+    runApp: null, // the app being run (a catalog summary)
+    teamApp: null, // the full app currently open in the team editor
+    editingAgentId: null, // the agent id open in the agent modal (null = create)
+    activeRunId: null, // the id of the run currently being polled
+    pollToken: 0, // bumped to invalidate in-flight poll ticks
+    pollTimer: null, // the setTimeout handle for the poll loop
+    cwdToken: 0, // bumped to invalidate stale session-cwd fetches (Run view)
+    teamSchedules: [], // schedules belonging to the app open in the team editor
+    teamWorkflowDraft: null, // local custom-DAG form state; saved explicitly
+    nextWorkflowNodeNumber: 0,
+  };
+
+  var el = {
+    importAppBtn: document.getElementById("import-app-btn"),
+    newAppBtn: document.getElementById("new-app-btn"),
+    newAgentBtn: document.getElementById("new-agent-btn"),
+    newConnectionBtn: document.getElementById("new-connection-btn"),
+    banner: document.getElementById("banner"),
+    catalog: document.getElementById("catalog"),
+    agentsView: document.getElementById("agents-view"),
+    connectionsView: document.getElementById("connections-view"),
+    newAppOverlay: document.getElementById("new-app-overlay"),
+    newAppForm: document.getElementById("new-app-form"),
+    naName: document.getElementById("na-name"),
+    naDesc: document.getElementById("na-desc"),
+    naMode: document.getElementById("na-mode"),
+    importAppOverlay: document.getElementById("import-app-overlay"),
+    importAppForm: document.getElementById("import-app-form"),
+    importAppFile: document.getElementById("import-app-file"),
+    importAppJson: document.getElementById("import-app-json"),
+    importAppError: document.getElementById("import-app-error"),
+    importAppSubmit: document.getElementById("import-app-submit"),
+    // Tabs
+    tabs: Array.prototype.slice.call(document.querySelectorAll("#tabs .tab")),
+    // Team editor modal
+    teamOverlay: document.getElementById("team-overlay"),
+    teamTitle: document.getElementById("team-title"),
+    teamEmptyHint: document.getElementById("team-empty-hint"),
+    teamMode: document.getElementById("team-mode"),
+    teamModeHint: document.getElementById("team-mode-hint"),
+    teamBudgetMaxSpawns: document.getElementById("team-budget-max-spawns"),
+    teamBudgetMaxWallClock: document.getElementById(
+      "team-budget-max-wall-clock",
+    ),
+    teamBudgetSave: document.getElementById("team-budget-save"),
+    teamObjectiveTemplate: document.getElementById("team-objective-template"),
+    teamObjectiveSave: document.getElementById("team-objective-save"),
+    scheduleEvery: document.getElementById("schedule-every"),
+    scheduleTarget: document.getElementById("schedule-target"),
+    scheduleInterval: document.getElementById("schedule-interval"),
+    scheduleAtHourWrap: document.getElementById("schedule-at-hour-wrap"),
+    scheduleAtHour: document.getElementById("schedule-at-hour"),
+    scheduleAtMinuteWrap: document.getElementById("schedule-at-minute-wrap"),
+    scheduleAtMinute: document.getElementById("schedule-at-minute"),
+    scheduleObjective: document.getElementById("schedule-objective"),
+    scheduleEnabled: document.getElementById("schedule-enabled"),
+    scheduleCreate: document.getElementById("schedule-create"),
+    scheduleList: document.getElementById("schedule-list"),
+    teamAgents: document.getElementById("team-agents"),
+    teamAddSelect: document.getElementById("team-add-select"),
+    teamAddBtn: document.getElementById("team-add-btn"),
+    teamWorkflow: document.getElementById("team-workflow"),
+    workflowNodes: document.getElementById("workflow-nodes"),
+    workflowAddNode: document.getElementById("workflow-add-node"),
+    workflowAddEvaluation: document.getElementById("workflow-add-evaluation"),
+    workflowEdges: document.getElementById("workflow-edges"),
+    workflowAddEdge: document.getElementById("workflow-add-edge"),
+    workflowEntry: document.getElementById("workflow-entry"),
+    workflowSave: document.getElementById("workflow-save"),
+    teamConnections: document.getElementById("team-connections"),
+    // Agent modal
+    agentOverlay: document.getElementById("agent-overlay"),
+    agentForm: document.getElementById("agent-form"),
+    agentTitle: document.getElementById("agent-title"),
+    agName: document.getElementById("ag-name"),
+    agRole: document.getElementById("ag-role"),
+    agPrompt: document.getElementById("ag-prompt"),
+    agSandbox: document.getElementById("ag-sandbox"),
+    agModel: document.getElementById("ag-model"),
+    agentPoliciesWrap: document.getElementById("agent-policies-wrap"),
+    agentPolicies: document.getElementById("agent-policies"),
+    agentSaveBtn: document.getElementById("agent-save-btn"),
+    // Connection modal
+    connectionOverlay: document.getElementById("connection-overlay"),
+    connectionForm: document.getElementById("connection-form"),
+    cnTarget: document.getElementById("cn-target"),
+    cnScope: document.getElementById("cn-scope"),
+    cnTargetId: document.getElementById("cn-target-id"),
+    // Run view
+    runView: document.getElementById("run-view"),
+    runBack: document.getElementById("run-back-btn"),
+    runTitle: document.getElementById("run-title"),
+    runForm: document.getElementById("run-form"),
+    runSession: document.getElementById("run-session"),
+    runCwd: document.getElementById("run-cwd"),
+    runObjective: document.getElementById("run-objective"),
+    runStartBtn: document.getElementById("run-start-btn"),
+    runHistoryWrap: document.getElementById("run-history-wrap"),
+    runHistory: document.getElementById("run-history"),
+    runActive: document.getElementById("run-active"),
+    runStatusBadge: document.getElementById("run-status-badge"),
+    runStatusMeta: document.getElementById("run-status-meta"),
+    runObjectiveEcho: document.getElementById("run-objective-echo"),
+    runKillBtn: document.getElementById("run-kill-btn"),
+    runNewBtn: document.getElementById("run-new-btn"),
+    nodeList: document.getElementById("node-list"),
+    toolLog: document.getElementById("tool-log"),
+  };
+
+  // Run status buckets — mirror the gateway's RUN_TERMINAL set (agentic.js).
+  var RUN_TERMINAL = {
+    completed: true,
+    failed: true,
+    cancelled: true,
+    budget_exhausted: true,
+  };
+  var POLL_INTERVAL_MS = 1500;
+
+  // ---------------------------------------------------------------------------
+  // API layer
+  // ---------------------------------------------------------------------------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message || "Request failed";
+  }
+  ApiError.prototype = Object.create(Error.prototype);
+
+  // Performs a same-origin JSON fetch. On non-2xx, throws ApiError with the
+  // parsed body attached (`.body`).
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) {
+      opts.headers["content-type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    var res;
+    try {
+      res = await fetch("/api/agentic" + path, opts);
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = null;
+      }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Request failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error / banner handling
+  // ---------------------------------------------------------------------------
+  function showBanner(message) {
+    el.banner.textContent = message;
+    el.banner.classList.add("show");
+  }
+
+  function clearBanner() {
+    el.banner.textContent = "";
+    el.banner.classList.remove("show");
+  }
+
+  function handleError(e) {
+    if (e && e.status === 401) {
+      showBanner("Session expired — reload the page to sign in again.");
+      return;
+    }
+    showBanner((e && e.message) || "Something went wrong.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOM helpers (textContent-only; never innerHTML with user data)
+  // ---------------------------------------------------------------------------
+  function elem(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+  async function loadApps() {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/apps");
+    } catch (e) {
+      handleError(e);
+      state.apps = [];
+      renderCatalog();
+      return;
+    }
+    state.apps = (data && data.apps) || [];
+    renderCatalog();
+  }
+
+  async function loadAgents() {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/agents");
+    } catch (e) {
+      handleError(e);
+      state.agents = [];
+      renderAgents();
+      return;
+    }
+    state.agents = (data && data.agents) || [];
+    renderAgents();
+  }
+
+  async function loadConnections() {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/connections");
+    } catch (e) {
+      handleError(e);
+      state.connections = [];
+      renderConnections();
+      return;
+    }
+    state.connections = (data && data.connections) || [];
+    renderConnections();
+  }
+
+  // The MCP targets a connection may point at (pm/kanban). Small + static; fetched
+  // once so the connection modal's target picker can label ids by name.
+  async function loadMcpServers() {
+    try {
+      var data = await api("GET", "/mcp-servers");
+      state.mcpServers = (data && data.servers) || [];
+    } catch (e) {
+      state.mcpServers = [];
+    }
+  }
+
+  function mcpServerName(id) {
+    var found = state.mcpServers.filter(function (s) {
+      return s.id === id;
+    })[0];
+    return (found && found.name) || id;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------------------------------
+  async function createApp(fields) {
+    await api("POST", "/apps", fields);
+    await loadApps();
+  }
+
+  // Publish / unpublish via the status endpoint. draft -> published and back.
+  async function togglePublish(app) {
+    var next = app.status === "published" ? "draft" : "published";
+    await api("PATCH", "/apps/" + encodeURIComponent(app.id) + "/status", {
+      status: next,
+    });
+    await loadApps();
+  }
+
+  async function deleteApp(app) {
+    await api("DELETE", "/apps/" + encodeURIComponent(app.id));
+    await loadApps();
+  }
+
+  function templateFilename(name) {
+    var slug = String(name || "")
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80);
+    return (slug || "agentic-ai") + ".agentic.json";
+  }
+
+  async function exportApp(app) {
+    var data = await api(
+      "GET",
+      "/apps/" + encodeURIComponent(app.id) + "/export",
+    );
+    var blob = new Blob([JSON.stringify(data.template, null, 2)], {
+      type: "application/json",
+    });
+    var url = URL.createObjectURL(blob);
+    var link = elem("a");
+    link.href = url;
+    link.download = templateFilename(app.name);
+    document.body.appendChild(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function cloneApp(app) {
+    await api(
+      "POST",
+      "/apps/" + encodeURIComponent(app.id) + "/clone",
+    );
+    await loadApps();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+  function renderCatalog() {
+    var root = el.catalog;
+    root.textContent = "";
+
+    if (state.apps.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No Agentic AIs yet"));
+      empty.appendChild(
+        elem(
+          "div",
+          null,
+          'Create your first one with "New Agentic AI" above.',
+        ),
+      );
+      root.appendChild(empty);
+      return;
+    }
+
+    state.apps.forEach(function (app) {
+      root.appendChild(renderAppCard(app));
+    });
+  }
+
+  function renderAppCard(app) {
+    var card = elem("div", "app-card");
+
+    var head = elem("div", "app-head");
+    head.appendChild(elem("span", "app-name", app.name));
+    var status = app.status || "draft";
+    head.appendChild(elem("span", "badge badge-" + status, status));
+    card.appendChild(head);
+
+    card.appendChild(elem("div", "app-mode", app.orchestrationMode || "single"));
+
+    var meta = elem("div", "app-meta");
+    meta.appendChild(
+      elem("span", null, plural(app.agentCount || 0, "agent", "agents")),
+    );
+    meta.appendChild(
+      elem(
+        "span",
+        null,
+        plural(app.connectionCount || 0, "connection", "connections"),
+      ),
+    );
+    meta.appendChild(elem("span", null, "v" + (app.version || 1)));
+    card.appendChild(meta);
+
+    if (!(app.agentCount > 0)) {
+      card.appendChild(
+        elem(
+          "div",
+          "inline-hint",
+          'No agents yet — add at least one via "Team" before running.',
+        ),
+      );
+    }
+
+    var actions = elem("div", "app-actions");
+
+    var teamBtn = elem("button", "btn", "Team");
+    teamBtn.type = "button";
+    teamBtn.addEventListener("click", function () {
+      openTeamEditor(app);
+    });
+    actions.appendChild(teamBtn);
+
+    var runBtn = elem("button", "btn", "Run");
+    runBtn.type = "button";
+    runBtn.addEventListener("click", function () {
+      openRunView(app);
+    });
+    actions.appendChild(runBtn);
+
+    var exportBtn = elem("button", "btn btn-ghost", "Export");
+    exportBtn.type = "button";
+    exportBtn.addEventListener("click", function () {
+      exportApp(app).catch(handleError);
+    });
+    actions.appendChild(exportBtn);
+
+    var cloneBtn = elem("button", "btn btn-ghost", "Clone");
+    cloneBtn.type = "button";
+    cloneBtn.addEventListener("click", function () {
+      cloneApp(app).catch(handleError);
+    });
+    actions.appendChild(cloneBtn);
+
+    var pubBtn = elem(
+      "button",
+      "btn btn-ghost",
+      app.status === "published" ? "Unpublish" : "Publish",
+    );
+    pubBtn.type = "button";
+    pubBtn.addEventListener("click", function () {
+      togglePublish(app).catch(handleError);
+    });
+    actions.appendChild(pubBtn);
+
+    actions.appendChild(elem("span", "grow"));
+
+    var delBtn = elem("button", "btn btn-ghost", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm('Delete "' + app.name + '"? This cannot be undone.')) {
+        deleteApp(app).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+
+    card.appendChild(actions);
+    return card;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agents library
+  // ---------------------------------------------------------------------------
+  function renderAgents() {
+    var root = el.agentsView;
+    root.textContent = "";
+    if (state.agents.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No agents yet"));
+      empty.appendChild(
+        elem("div", null, 'Create one with "New Agent" above.'),
+      );
+      root.appendChild(empty);
+      return;
+    }
+    state.agents.forEach(function (agent) {
+      root.appendChild(renderAgentRow(agent));
+    });
+  }
+
+  function renderAgentRow(agent) {
+    var row = elem("div", "lib-row");
+
+    var main = elem("div", "lib-main");
+    main.appendChild(elem("div", "lib-name", agent.name));
+
+    var badges = elem("div", "lib-badges");
+    var prov = agent.runtimeProvider || "claude-cli";
+    badges.appendChild(
+      elem(
+        "span",
+        "badge badge-" + prov,
+        prov === "codex-cli" ? "codex" : "claude",
+      ),
+    );
+    badges.appendChild(
+      elem("span", "badge", agent.sandboxMode || "read-only"),
+    );
+    if (agent.role) badges.appendChild(elem("span", "badge", agent.role));
+    var polCount = (agent.toolPolicies || []).length;
+    if (polCount > 0) {
+      badges.appendChild(
+        elem("span", "badge", plural(polCount, "policy", "policies")),
+      );
+    }
+    main.appendChild(badges);
+
+    if (agent.model) {
+      main.appendChild(elem("div", "lib-sub", "model: " + agent.model));
+    }
+    row.appendChild(main);
+
+    var actions = elem("div", "lib-actions");
+    var editBtn = elem("button", "btn btn-ghost", "Edit");
+    editBtn.type = "button";
+    editBtn.addEventListener("click", function () {
+      openAgentModal(agent);
+    });
+    actions.appendChild(editBtn);
+
+    var delBtn = elem("button", "btn btn-ghost", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (
+        window.confirm('Delete agent "' + agent.name + '"? This cannot be undone.')
+      ) {
+        deleteAgent(agent).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function deleteAgent(agent) {
+    await api("DELETE", "/agents/" + encodeURIComponent(agent.id));
+    await loadAgents();
+  }
+
+  // Open the agent modal. `agent` present = edit (PATCH), absent = create (POST).
+  // In edit mode we refresh the connection library first so the per-connection
+  // tool-policy selects reflect what currently exists.
+  async function openAgentModal(agent) {
+    clearBanner();
+    if (agent) await loadConnections();
+    state.editingAgentId = agent ? agent.id : null;
+    el.agentTitle.textContent = agent ? "Edit Agent" : "New Agent";
+    el.agentSaveBtn.textContent = agent ? "Save" : "Create";
+    el.agName.value = agent ? agent.name || "" : "";
+    el.agRole.value = agent && agent.role ? agent.role : "";
+    el.agPrompt.value = agent ? agent.systemPrompt || "" : "";
+    el.agSandbox.value = agent ? agent.sandboxMode || "read-only" : "read-only";
+    el.agModel.value = agent && agent.model ? agent.model : "";
+    var prov = agent ? agent.runtimeProvider || "claude-cli" : "claude-cli";
+    document.querySelectorAll('input[name="ag-provider"]').forEach(function (r) {
+      r.checked = r.value === prov;
+    });
+    // Tool-policy section only in edit mode (needs a saved agent id + connections).
+    if (agent) {
+      renderAgentPolicies(agent);
+      el.agentPoliciesWrap.style.display =
+        state.connections.length > 0 ? "" : "none";
+    } else {
+      el.agentPolicies.textContent = "";
+      el.agentPoliciesWrap.style.display = "none";
+    }
+    openOverlay(el.agentOverlay);
+    el.agName.focus();
+  }
+
+  // Render one policy select per connection. The current disposition is read from
+  // the agent's toolPolicies[]; "none" (no entry) is the default. Selects are read
+  // on save and reassembled into a fresh toolPolicies array.
+  function renderAgentPolicies(agent) {
+    var wrap = el.agentPolicies;
+    wrap.textContent = "";
+    var byConn = {};
+    (agent.toolPolicies || []).forEach(function (p) {
+      byConn[p.connectionId] = p.policy;
+    });
+    state.connections.forEach(function (conn) {
+      var rowEl = elem("div", "policy-row");
+      rowEl.appendChild(
+        elem(
+          "span",
+          "policy-name",
+          mcpServerName(conn.targetType) + " · " + conn.id,
+        ),
+      );
+      var sel = elem("select", "field");
+      sel.setAttribute("data-conn", conn.id);
+      [
+        ["none", "none"],
+        ["allow", "allow"],
+        ["approval", "approval"],
+        ["deny", "deny"],
+      ].forEach(function (pair) {
+        var opt = elem("option", null, pair[1]);
+        opt.value = pair[0];
+        sel.appendChild(opt);
+      });
+      sel.value = byConn[conn.id] || "none";
+      rowEl.appendChild(sel);
+      wrap.appendChild(rowEl);
+    });
+  }
+
+  // Assemble toolPolicies[] from the policy selects (skipping "none"), all tools.
+  function collectToolPolicies() {
+    var policies = [];
+    el.agentPolicies
+      .querySelectorAll("select[data-conn]")
+      .forEach(function (sel) {
+        if (sel.value && sel.value !== "none") {
+          policies.push({
+            connectionId: sel.getAttribute("data-conn"),
+            tools: "all",
+            policy: sel.value,
+          });
+        }
+      });
+    return policies;
+  }
+
+  async function submitAgent() {
+    var name = el.agName.value.trim();
+    if (!name) return;
+    var providerEl = document.querySelector('input[name="ag-provider"]:checked');
+    var provider = providerEl ? providerEl.value : "claude-cli";
+    el.agentSaveBtn.disabled = true;
+    try {
+      if (state.editingAgentId) {
+        var patch = {
+          name: name,
+          runtimeProvider: provider,
+          role: el.agRole.value.trim() || null,
+          systemPrompt: el.agPrompt.value,
+          sandboxMode: el.agSandbox.value,
+          model: el.agModel.value.trim() || null,
+          toolPolicies: collectToolPolicies(),
+        };
+        await api(
+          "PATCH",
+          "/agents/" + encodeURIComponent(state.editingAgentId),
+          patch,
+        );
+      } else {
+        var body = {
+          name: name,
+          runtimeProvider: provider,
+          systemPrompt: el.agPrompt.value,
+          sandboxMode: el.agSandbox.value,
+        };
+        var role = el.agRole.value.trim();
+        if (role) body.role = role;
+        var model = el.agModel.value.trim();
+        if (model) body.model = model;
+        await api("POST", "/agents", body);
+      }
+    } catch (e) {
+      el.agentSaveBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    el.agentSaveBtn.disabled = false;
+    closeOverlay(el.agentOverlay);
+    await loadAgents();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connections library
+  // ---------------------------------------------------------------------------
+  function renderConnections() {
+    var root = el.connectionsView;
+    root.textContent = "";
+    if (state.connections.length === 0) {
+      var empty = elem("div", "placeholder");
+      empty.appendChild(elem("h2", null, "No connections yet"));
+      empty.appendChild(
+        elem(
+          "div",
+          null,
+          "Connect an Agentic AI's agents to a PM or Kanban board via \"New Connection\".",
+        ),
+      );
+      root.appendChild(empty);
+      return;
+    }
+    state.connections.forEach(function (conn) {
+      root.appendChild(renderConnectionRow(conn));
+    });
+  }
+
+  function renderConnectionRow(conn) {
+    var row = elem("div", "lib-row");
+    var main = elem("div", "lib-main");
+    main.appendChild(elem("div", "lib-name", mcpServerName(conn.targetType)));
+    var sub = conn.scope || "fixed";
+    if (conn.targetId) sub += " · " + conn.targetId;
+    main.appendChild(elem("div", "lib-sub", sub));
+    var badges = elem("div", "lib-badges");
+    badges.appendChild(elem("span", "badge", conn.targetType));
+    badges.appendChild(elem("span", "badge", conn.scope || "fixed"));
+    main.appendChild(badges);
+    row.appendChild(main);
+
+    var actions = elem("div", "lib-actions");
+    var delBtn = elem("button", "btn btn-ghost", "Delete");
+    delBtn.type = "button";
+    delBtn.addEventListener("click", function () {
+      if (window.confirm("Delete this connection? This cannot be undone.")) {
+        deleteConnection(conn).catch(handleError);
+      }
+    });
+    actions.appendChild(delBtn);
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function deleteConnection(conn) {
+    await api("DELETE", "/connections/" + encodeURIComponent(conn.id));
+    await loadConnections();
+    // A deleted connection may have been referenced by apps' connectionIds; the
+    // catalog counts are re-derived server-side on next load.
+    await loadApps();
+  }
+
+  function openConnectionModal() {
+    clearBanner();
+    var sel = el.cnTarget;
+    sel.textContent = "";
+    if (state.mcpServers.length === 0) {
+      var none = elem("option", null, "No MCP targets available");
+      none.value = "";
+      sel.appendChild(none);
+    } else {
+      state.mcpServers.forEach(function (s) {
+        var opt = elem("option", null, s.name);
+        opt.value = s.id;
+        sel.appendChild(opt);
+      });
+    }
+    el.cnScope.value = "fixed";
+    el.cnTargetId.value = "";
+    openOverlay(el.connectionOverlay);
+  }
+
+  async function submitConnection() {
+    var targetType = el.cnTarget.value;
+    if (!targetType) {
+      showBanner("Pick a target artifact first.");
+      return;
+    }
+    var body = { targetType: targetType, scope: el.cnScope.value };
+    var targetId = el.cnTargetId.value.trim();
+    if (targetId) body.targetId = targetId;
+    try {
+      await api("POST", "/connections", body);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    closeOverlay(el.connectionOverlay);
+    await loadConnections();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Team editor (fixes the "agentic AI has no agents" run failure)
+  // ---------------------------------------------------------------------------
+  function agentById(id) {
+    return (
+      state.agents.filter(function (a) {
+        return a.id === id;
+      })[0] || null
+    );
+  }
+
+  function seedTeamWorkflow(app) {
+    var workflow =
+      app && app.orchestrationMode === "custom" && app.workflow
+        ? app.workflow
+        : null;
+    var sourceNodes = workflow && Array.isArray(workflow.nodes) ? workflow.nodes : [];
+    var sourceEdges = workflow && Array.isArray(workflow.edges) ? workflow.edges : [];
+    state.teamWorkflowDraft = {
+      nodes: sourceNodes.map(function (node) {
+        var type =
+          node.type === "human-approval"
+            ? "human-approval"
+            : node.type === "router"
+              ? "router"
+              : "agent-task";
+        var draftNode = {
+          id: String(node.id || ""),
+          type: type,
+        };
+        if (type === "agent-task" || type === "router") {
+          draftNode.agentId = String(node.agentId || "");
+          // Retry policy is per agent-running node. Seed from stored values;
+          // absent => maxAttempts 1 (no retry), backoff 0 — the backend default.
+          var rp = node.retryPolicy || {};
+          draftNode.retryMaxAttempts =
+            rp.maxAttempts != null ? Number(rp.maxAttempts) : 1;
+          draftNode.retryBackoffMs =
+            rp.backoffMs != null ? Number(rp.backoffMs) : 0;
+        }
+        if (type === "agent-task") {
+          // Loop policy is agent-task-only. Seed absent values with the backend
+          // defaults so the form and conditional save path stay symmetrical.
+          var lp = node.loopPolicy || {};
+          draftNode.loopMaxIterations =
+            lp.maxIterations != null ? Number(lp.maxIterations) : 1;
+          draftNode.loopUntil = lp.until != null ? String(lp.until) : "done";
+          draftNode.loopBackoffMs =
+            lp.backoffMs != null ? Number(lp.backoffMs) : 0;
+        }
+        return draftNode;
+      }),
+      edges: sourceEdges.map(function (edge) {
+        var draftEdge = {
+          from: String(edge.from || ""),
+          to: String(edge.to || ""),
+        };
+        if (edge.on) draftEdge.on = String(edge.on);
+        if (edge.when) draftEdge.when = String(edge.when);
+        return draftEdge;
+      }),
+      entryNodeId:
+        workflow && workflow.entryNodeId != null
+          ? String(workflow.entryNodeId)
+          : null,
+    };
+    var maxNodeNumber = -1;
+    state.teamWorkflowDraft.nodes.forEach(function (node) {
+      var match = /^n(\d+)$/.exec(node.id);
+      if (match) maxNodeNumber = Math.max(maxNodeNumber, Number(match[1]));
+    });
+    state.nextWorkflowNodeNumber = maxNodeNumber + 1;
+  }
+
+  function workflowNodeOption(select, nodeId) {
+    var option = elem("option", null, nodeId);
+    option.value = nodeId;
+    select.appendChild(option);
+  }
+
+  function renderWorkflowBuilder() {
+    var isCustom = el.teamMode.value === "custom";
+    el.teamWorkflow.style.display = isCustom ? "" : "none";
+    if (!isCustom) return;
+    if (!state.teamWorkflowDraft) seedTeamWorkflow(null);
+
+    var draft = state.teamWorkflowDraft;
+    var teamAgentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(Boolean);
+    var nodeIds = draft.nodes.map(function (node) {
+      return node.id;
+    });
+
+    el.workflowNodes.textContent = "";
+    if (draft.nodes.length === 0) {
+      el.workflowNodes.appendChild(
+        elem("div", "lib-sub", "No workflow nodes yet."),
+      );
+    }
+    draft.nodes.forEach(function (node, index) {
+      var row = elem("div", "team-item workflow-row");
+      row.appendChild(elem("span", "workflow-node-id", node.id));
+
+      var typeSelect = elem("select", "field");
+      typeSelect.setAttribute("aria-label", "Type for " + node.id);
+      var agentTaskOption = elem("option", null, "Agent task");
+      agentTaskOption.value = "agent-task";
+      typeSelect.appendChild(agentTaskOption);
+      var humanApprovalOption = elem("option", null, "Human approval");
+      humanApprovalOption.value = "human-approval";
+      typeSelect.appendChild(humanApprovalOption);
+      var routerOption = elem("option", null, "Router");
+      routerOption.value = "router";
+      typeSelect.appendChild(routerOption);
+      typeSelect.value = node.type;
+      typeSelect.addEventListener("change", function () {
+        node.type = typeSelect.value;
+        if (node.type === "human-approval") delete node.agentId;
+        var outgoing = draft.edges.filter(function (edge) {
+          return edge.from === node.id;
+        });
+        outgoing.forEach(function (edge) {
+          delete edge.on;
+          delete edge.when;
+        });
+        if (node.type === "router" && outgoing.length > 0) {
+          outgoing[0].when = "default";
+        }
+        renderWorkflowBuilder();
+      });
+      row.appendChild(typeSelect);
+
+      var agentSelect = elem("select", "field");
+      agentSelect.setAttribute("aria-label", "Agent for " + node.id);
+      if (node.type === "human-approval") {
+        agentSelect.style.display = "none";
+        agentSelect.disabled = true;
+      } else if (teamAgentIds.length === 0) {
+        var noAgent = elem("option", null, "No team agents available");
+        noAgent.value = "";
+        agentSelect.appendChild(noAgent);
+        node.agentId = "";
+        agentSelect.disabled = true;
+      } else {
+        teamAgentIds.forEach(function (agentId) {
+          var agent = agentById(agentId);
+          var option = elem("option", null, agent ? agent.name : agentId + " (missing)");
+          option.value = agentId;
+          agentSelect.appendChild(option);
+        });
+        if (teamAgentIds.indexOf(node.agentId) === -1) {
+          node.agentId = teamAgentIds[0];
+        }
+        agentSelect.value = node.agentId;
+      }
+      agentSelect.addEventListener("change", function () {
+        node.agentId = agentSelect.value;
+      });
+      row.appendChild(agentSelect);
+
+      // Retry sub-form (agent-running nodes only). maxAttempts is the TOTAL
+      // attempts incl. the first (1 = no retry); backoff is the fixed wait (ms).
+      if (node.type === "agent-task" || node.type === "router") {
+        if (node.retryMaxAttempts == null) node.retryMaxAttempts = 1;
+        if (node.retryBackoffMs == null) node.retryBackoffMs = 0;
+
+        var retryWrap = elem("span", "workflow-retry");
+        retryWrap.appendChild(elem("span", "lib-sub", "retries"));
+
+        var attemptsInput = elem("input", "field workflow-retry-num");
+        attemptsInput.type = "number";
+        attemptsInput.min = "1";
+        attemptsInput.max = "5";
+        attemptsInput.step = "1";
+        attemptsInput.value = String(node.retryMaxAttempts);
+        attemptsInput.title = "Max attempts (1 = no retry, max 5)";
+        attemptsInput.setAttribute("aria-label", "Max attempts for " + node.id);
+        attemptsInput.addEventListener("change", function () {
+          var v = Math.round(Number(attemptsInput.value));
+          if (!isFinite(v) || v < 1) v = 1;
+          if (v > 5) v = 5;
+          node.retryMaxAttempts = v;
+          attemptsInput.value = String(v);
+        });
+        retryWrap.appendChild(attemptsInput);
+
+        var backoffInput = elem("input", "field workflow-retry-num");
+        backoffInput.type = "number";
+        backoffInput.min = "0";
+        backoffInput.step = "1000";
+        backoffInput.value = String(node.retryBackoffMs);
+        backoffInput.title = "Backoff between attempts (ms)";
+        backoffInput.setAttribute("aria-label", "Retry backoff ms for " + node.id);
+        backoffInput.addEventListener("change", function () {
+          var v = Math.round(Number(backoffInput.value));
+          if (!isFinite(v) || v < 0) v = 0;
+          node.retryBackoffMs = v;
+          backoffInput.value = String(v);
+        });
+        retryWrap.appendChild(elem("span", "lib-sub", "backoff ms"));
+        retryWrap.appendChild(backoffInput);
+        row.appendChild(retryWrap);
+      }
+
+      // Loop sub-form (agent-task nodes only). One iteration, a "done"
+      // verdict, and no backoff are the backend defaults.
+      if (node.type === "agent-task") {
+        if (node.loopMaxIterations == null) node.loopMaxIterations = 1;
+        if (node.loopUntil == null) node.loopUntil = "done";
+        if (node.loopBackoffMs == null) node.loopBackoffMs = 0;
+
+        var loopWrap = elem("span", "workflow-retry");
+        loopWrap.appendChild(elem("span", "lib-sub", "loop"));
+
+        var iterationsInput = elem("input", "field workflow-retry-num");
+        iterationsInput.type = "number";
+        iterationsInput.min = "1";
+        iterationsInput.step = "1";
+        iterationsInput.value = String(node.loopMaxIterations);
+        iterationsInput.title = "Max loop iterations (1 = single run)";
+        iterationsInput.setAttribute(
+          "aria-label",
+          "Max loop iterations for " + node.id,
+        );
+        iterationsInput.addEventListener("change", function () {
+          var v = Math.round(Number(iterationsInput.value));
+          if (!isFinite(v) || v < 1) v = 1;
+          node.loopMaxIterations = v;
+          iterationsInput.value = String(v);
+        });
+        loopWrap.appendChild(iterationsInput);
+
+        var untilInput = elem("input", "field workflow-edge-label");
+        untilInput.type = "text";
+        untilInput.value = node.loopUntil;
+        untilInput.placeholder = "done";
+        untilInput.title = "Stop on this single-token verdict";
+        untilInput.setAttribute(
+          "aria-label",
+          "Loop until verdict for " + node.id,
+        );
+        untilInput.addEventListener("change", function () {
+          var v = untilInput.value.trim();
+          if (!/^\S+$/.test(v)) v = "done";
+          node.loopUntil = v;
+          untilInput.value = v;
+        });
+        loopWrap.appendChild(elem("span", "lib-sub", "until"));
+        loopWrap.appendChild(untilInput);
+
+        var loopBackoffInput = elem("input", "field workflow-retry-num");
+        loopBackoffInput.type = "number";
+        loopBackoffInput.min = "0";
+        loopBackoffInput.step = "1000";
+        loopBackoffInput.value = String(node.loopBackoffMs);
+        loopBackoffInput.title = "Backoff between loop iterations (ms)";
+        loopBackoffInput.setAttribute(
+          "aria-label",
+          "Loop backoff ms for " + node.id,
+        );
+        loopBackoffInput.addEventListener("change", function () {
+          var v = Math.round(Number(loopBackoffInput.value));
+          if (!isFinite(v) || v < 0) v = 0;
+          node.loopBackoffMs = v;
+          loopBackoffInput.value = String(v);
+        });
+        loopWrap.appendChild(elem("span", "lib-sub", "backoff ms"));
+        loopWrap.appendChild(loopBackoffInput);
+        row.appendChild(loopWrap);
+      }
+
+      var remove = elem("button", "icon-btn", "Remove");
+      remove.type = "button";
+      remove.addEventListener("click", function () {
+        draft.nodes.splice(index, 1);
+        draft.edges = draft.edges.filter(function (edge) {
+          return edge.from !== node.id && edge.to !== node.id;
+        });
+        if (draft.entryNodeId === node.id) draft.entryNodeId = null;
+        renderWorkflowBuilder();
+      });
+      row.appendChild(remove);
+      el.workflowNodes.appendChild(row);
+    });
+    el.workflowAddNode.disabled = false;
+
+    el.workflowEdges.textContent = "";
+    if (draft.edges.length === 0) {
+      el.workflowEdges.appendChild(
+        elem("div", "lib-sub", "No dependencies yet."),
+      );
+    }
+    draft.edges.forEach(function (edge, index) {
+      var row = elem("div", "team-item workflow-row");
+      var fromSelect = elem("select", "field");
+      fromSelect.setAttribute("aria-label", "Dependency from node");
+      var toSelect = elem("select", "field");
+      toSelect.setAttribute("aria-label", "Dependency to node");
+      nodeIds.forEach(function (nodeId) {
+        workflowNodeOption(fromSelect, nodeId);
+        workflowNodeOption(toSelect, nodeId);
+      });
+      fromSelect.value = edge.from;
+      toSelect.value = edge.to;
+      fromSelect.addEventListener("change", function () {
+        edge.from = fromSelect.value;
+        delete edge.on;
+        delete edge.when;
+        var source = draft.nodes.filter(function (node) {
+          return node.id === edge.from;
+        })[0];
+        if (
+          source &&
+          source.type === "router" &&
+          !draft.edges.some(function (other) {
+            return (
+              other !== edge &&
+              other.from === edge.from &&
+              other.when === "default"
+            );
+          })
+        ) {
+          edge.when = "default";
+        }
+        renderWorkflowBuilder();
+      });
+      toSelect.addEventListener("change", function () {
+        edge.to = toSelect.value;
+      });
+      row.appendChild(fromSelect);
+      row.appendChild(elem("span", "workflow-arrow", "→"));
+      row.appendChild(toSelect);
+
+      var sourceNode = draft.nodes.filter(function (node) {
+        return node.id === edge.from;
+      })[0];
+      if (sourceNode && sourceNode.type === "router") {
+        var whenInput = elem("input", "field workflow-edge-label");
+        whenInput.type = "text";
+        whenInput.placeholder = "when label";
+        whenInput.value = edge.when || "";
+        whenInput.title =
+          'Router edges require unique labels, including exactly one "default".';
+        whenInput.setAttribute(
+          "aria-label",
+          "When label for edge " + edge.from + " to " + edge.to,
+        );
+        whenInput.addEventListener("input", function () {
+          edge.when = whenInput.value;
+          delete edge.on;
+        });
+        row.appendChild(whenInput);
+        row.appendChild(elem("span", "lib-sub", 'one must be "default"'));
+      } else if (sourceNode && sourceNode.type === "agent-task") {
+        var onSelect = elem("select", "field workflow-edge-label");
+        onSelect.setAttribute(
+          "aria-label",
+          "Outcome for edge " + edge.from + " to " + edge.to,
+        );
+        var plainOption = elem("option", null, "Any success");
+        plainOption.value = "";
+        onSelect.appendChild(plainOption);
+        var successOption = elem("option", null, "success");
+        successOption.value = "success";
+        onSelect.appendChild(successOption);
+        var failureOption = elem("option", null, "failure");
+        failureOption.value = "failure";
+        onSelect.appendChild(failureOption);
+        onSelect.value = edge.on || "";
+        onSelect.title =
+          "Keep all outgoing edges either unlabeled or outcome-labeled.";
+        onSelect.addEventListener("change", function () {
+          edge.on = onSelect.value;
+          delete edge.when;
+        });
+        row.appendChild(onSelect);
+        row.appendChild(elem("span", "lib-sub", "all outcomes or all blank"));
+      }
+
+      var remove = elem("button", "icon-btn", "Remove");
+      remove.type = "button";
+      remove.addEventListener("click", function () {
+        draft.edges.splice(index, 1);
+        renderWorkflowBuilder();
+      });
+      row.appendChild(remove);
+      el.workflowEdges.appendChild(row);
+    });
+    el.workflowAddEdge.disabled = nodeIds.length < 2;
+
+    el.workflowEntry.textContent = "";
+    var noEntry = elem("option", null, "No entry node");
+    noEntry.value = "";
+    el.workflowEntry.appendChild(noEntry);
+    nodeIds.forEach(function (nodeId) {
+      workflowNodeOption(el.workflowEntry, nodeId);
+    });
+    el.workflowEntry.value = draft.entryNodeId || "";
+  }
+
+  function saveTeamWorkflow() {
+    var draft = state.teamWorkflowDraft;
+    if (!draft) return;
+    var nodes = draft.nodes.map(function (node) {
+      var type =
+        node.type === "human-approval"
+          ? "human-approval"
+          : node.type === "router"
+            ? "router"
+            : "agent-task";
+      var savedNode = { id: node.id, type: type };
+      if (type === "agent-task" || type === "router") {
+        savedNode.agentId = node.agentId;
+        // Only emit a retryPolicy when it departs from the default (1 attempt,
+        // no backoff) — an absent policy is the backend's "single attempt".
+        var maxAttempts = node.retryMaxAttempts != null ? node.retryMaxAttempts : 1;
+        var backoffMs = node.retryBackoffMs != null ? node.retryBackoffMs : 0;
+        if (maxAttempts > 1 || backoffMs > 0) {
+          savedNode.retryPolicy = {
+            maxAttempts: maxAttempts,
+            backoffMs: backoffMs,
+            retryOn: "failure",
+          };
+        }
+      }
+      if (type === "agent-task") {
+        // Only emit a loopPolicy when it departs from the default (one
+        // iteration, "done" verdict, no backoff).
+        var maxIterations =
+          node.loopMaxIterations != null ? node.loopMaxIterations : 1;
+        var until = node.loopUntil != null ? node.loopUntil : "done";
+        var loopBackoffMs = node.loopBackoffMs != null ? node.loopBackoffMs : 0;
+        if (maxIterations > 1 || loopBackoffMs > 0 || until !== "done") {
+          savedNode.loopPolicy = {
+            maxIterations: maxIterations,
+            until: until,
+            backoffMs: loopBackoffMs,
+          };
+        }
+      }
+      return savedNode;
+    });
+    if (
+      nodes.some(function (node) {
+        return (
+          (node.type === "agent-task" || node.type === "router") &&
+          !node.agentId
+        );
+      })
+    ) {
+      showBanner(
+        "Every agent-task and router workflow node needs a team agent.",
+      );
+      return;
+    }
+    var agentIds = [];
+    nodes.forEach(function (node) {
+      if (
+        (node.type === "agent-task" || node.type === "router") &&
+        agentIds.indexOf(node.agentId) === -1
+      ) {
+        agentIds.push(node.agentId);
+      }
+    });
+    patchTeam({
+      orchestrationMode: "custom",
+      workflow: {
+        nodes: nodes,
+        edges: draft.edges.map(function (edge) {
+          var savedEdge = { from: edge.from, to: edge.to };
+          var sourceNode = nodes.filter(function (node) {
+            return node.id === edge.from;
+          })[0];
+          if (sourceNode && sourceNode.type === "agent-task" && edge.on) {
+            savedEdge.on = edge.on;
+          }
+          if (
+            sourceNode &&
+            sourceNode.type === "router" &&
+            edge.when &&
+            edge.when.trim()
+          ) {
+            savedEdge.when = edge.when.trim();
+          }
+          return savedEdge;
+        }),
+        entryNodeId: draft.entryNodeId || null,
+      },
+      agentIds: agentIds,
+    });
+  }
+
+  function scheduleSpecSummary(spec) {
+    spec = spec || {};
+    var interval = spec.interval || 1;
+    var unit = spec.every || "minute";
+    var summary =
+      "every " + interval + " " + unit + (interval === 1 ? "" : "s");
+    if (unit === "hour") {
+      summary +=
+        " at minute " +
+        String(spec.atMinute == null ? 0 : spec.atMinute).padStart(2, "0") +
+        " UTC";
+    } else if (unit === "day") {
+      summary +=
+        " at " +
+        String(spec.atHour == null ? 0 : spec.atHour).padStart(2, "0") +
+        ":" +
+        String(spec.atMinute == null ? 0 : spec.atMinute).padStart(2, "0") +
+        " UTC";
+    }
+    return summary;
+  }
+
+  function scheduleUtcTime(ms) {
+    if (!Number.isFinite(ms)) return "not scheduled";
+    return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+
+  function renderScheduleFields() {
+    var every = el.scheduleEvery.value;
+    el.scheduleAtHourWrap.style.display = every === "day" ? "" : "none";
+    el.scheduleAtMinuteWrap.style.display =
+      every === "hour" || every === "day" ? "" : "none";
+  }
+
+  function renderScheduleTarget() {
+    var option = el.runSession.options[el.runSession.selectedIndex];
+    el.scheduleTarget.textContent =
+      option && option.value
+        ? "Run target: " + option.textContent + " (snapshotted when created)."
+        : "Select a target terminal session in the Run view before creating a schedule.";
+  }
+
+  async function loadTeamSchedules(agenticId) {
+    var data = await api("GET", "/schedules");
+    state.teamSchedules = ((data && data.schedules) || []).filter(
+      function (schedule) {
+        return schedule.agenticId === agenticId;
+      },
+    );
+  }
+
+  function renderTeamSchedules() {
+    var root = el.scheduleList;
+    root.textContent = "";
+    if (state.teamSchedules.length === 0) {
+      root.appendChild(elem("div", "lib-sub", "No schedules for this app."));
+      return;
+    }
+    state.teamSchedules.forEach(function (schedule) {
+      var item = elem("div", "schedule-item");
+      var head = elem("div", "schedule-head");
+      head.appendChild(
+        elem("span", "schedule-summary", scheduleSpecSummary(schedule.spec)),
+      );
+      head.appendChild(
+        elem("span", "badge", schedule.enabled ? "enabled" : "disabled"),
+      );
+      item.appendChild(head);
+      item.appendChild(
+        elem("div", "schedule-meta", "Next: " + scheduleUtcTime(schedule.nextFireAt)),
+      );
+      item.appendChild(
+        elem("div", "schedule-meta", "Last outcome: " + (schedule.lastOutcome || "none")),
+      );
+      if (schedule.lastError) {
+        item.appendChild(elem("div", "schedule-meta schedule-error", schedule.lastError));
+      }
+      item.appendChild(
+        elem("div", "schedule-objective", "Objective: " + (schedule.objective || "(empty)")),
+      );
+
+      var actions = elem("div", "schedule-actions");
+      var toggle = elem(
+        "button",
+        "btn",
+        schedule.enabled ? "Disable" : "Enable",
+      );
+      toggle.type = "button";
+      toggle.addEventListener("click", function () {
+        patchSchedule(schedule, { enabled: !schedule.enabled }, toggle);
+      });
+      actions.appendChild(toggle);
+
+      var resave = elem("button", "btn btn-ghost", "Re-save definition");
+      resave.type = "button";
+      resave.title = "Re-pin this schedule to the app's current executable definition.";
+      resave.addEventListener("click", function () {
+        patchSchedule(schedule, { enabled: schedule.enabled }, resave);
+      });
+      actions.appendChild(resave);
+
+      var remove = elem("button", "btn btn-ghost", "Delete");
+      remove.type = "button";
+      remove.addEventListener("click", function () {
+        if (
+          window.confirm(
+            "Delete this " + scheduleSpecSummary(schedule.spec) + " schedule?",
+          )
+        ) {
+          deleteSchedule(schedule, remove);
+        }
+      });
+      actions.appendChild(remove);
+      item.appendChild(actions);
+      root.appendChild(item);
+    });
+  }
+
+  async function refreshTeamSchedules() {
+    if (!state.teamApp) return;
+    await loadTeamSchedules(state.teamApp.id);
+    renderTeamSchedules();
+  }
+
+  async function patchSchedule(schedule, patch, button) {
+    clearBanner();
+    button.disabled = true;
+    try {
+      await api("PATCH", "/schedules/" + encodeURIComponent(schedule.id), patch);
+      await refreshTeamSchedules();
+    } catch (e) {
+      handleError(e);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function deleteSchedule(schedule, button) {
+    clearBanner();
+    button.disabled = true;
+    try {
+      await api("DELETE", "/schedules/" + encodeURIComponent(schedule.id));
+      await refreshTeamSchedules();
+    } catch (e) {
+      button.disabled = false;
+      handleError(e);
+    }
+  }
+
+  function scheduleNumber(input, label, min, max) {
+    var value = Number(input.value);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      showBanner(label + " must be an integer from " + min + " to " + max + ".");
+      input.focus();
+      return null;
+    }
+    return value;
+  }
+
+  async function createSchedule() {
+    var app = state.teamApp;
+    if (!app) return;
+    var sessionId = el.runSession.value;
+    if (!sessionId) {
+      showBanner("Select a target terminal session in the Run view first.");
+      return;
+    }
+    var interval = scheduleNumber(
+      el.scheduleInterval,
+      "Schedule interval",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (interval == null) return;
+    var every = el.scheduleEvery.value;
+    var spec = { every: every, interval: interval };
+    if (every === "day") {
+      var atHour = scheduleNumber(el.scheduleAtHour, "UTC hour", 0, 23);
+      if (atHour == null) return;
+      spec.atHour = atHour;
+    }
+    if (every === "hour" || every === "day") {
+      var atMinute = scheduleNumber(el.scheduleAtMinute, "UTC minute", 0, 59);
+      if (atMinute == null) return;
+      spec.atMinute = atMinute;
+    }
+
+    clearBanner();
+    el.scheduleCreate.disabled = true;
+    try {
+      var target = await api(
+        "GET",
+        "/session-cwd?sessionId=" + encodeURIComponent(sessionId),
+      );
+      if (!target || !target.serverId || !target.cwd) {
+        throw new ApiError(400, "Could not resolve the selected run target.");
+      }
+      await api("POST", "/schedules", {
+        agenticId: app.id,
+        serverId: target.serverId,
+        cwd: target.cwd,
+        objective: el.scheduleObjective.value,
+        spec: spec,
+        enabled: el.scheduleEnabled.checked,
+      });
+      el.scheduleObjective.value = "";
+      await refreshTeamSchedules();
+    } catch (e) {
+      handleError(e);
+    } finally {
+      el.scheduleCreate.disabled = false;
+    }
+  }
+
+  // Open the team modal for a catalog summary. Loads the FULL app (agentIds +
+  // connectionIds live only on the full record) and the agent/connection libraries
+  // so the pickers are populated, then renders.
+  async function openTeamEditor(appSummary) {
+    clearBanner();
+    try {
+      var results = await Promise.all([
+        loadAgents(),
+        loadConnections(),
+        api("GET", "/apps/" + encodeURIComponent(appSummary.id)),
+        loadTeamSchedules(appSummary.id),
+      ]);
+      var app = results[2];
+      state.teamApp = app;
+      seedTeamWorkflow(app);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    el.teamTitle.textContent = "Team · " + (state.teamApp.name || "");
+    el.teamMode.value = state.teamApp.orchestrationMode || "single";
+    renderTeamModal();
+    renderScheduleFields();
+    renderScheduleTarget();
+    openOverlay(el.teamOverlay);
+  }
+
+  function renderTeamModal() {
+    var app = state.teamApp;
+    if (!app) return;
+    var agentIds = (app.agentIds || []).filter(Boolean);
+    var budget = app.budget || {};
+
+    el.teamEmptyHint.style.display = agentIds.length === 0 ? "" : "none";
+    el.teamBudgetMaxSpawns.value =
+      budget.maxSpawns != null ? String(budget.maxSpawns) : "";
+    el.teamBudgetMaxWallClock.value =
+      budget.maxWallClockMs != null ? String(budget.maxWallClockMs) : "";
+    el.teamObjectiveTemplate.value = app.objectiveTemplate || "";
+    renderTeamSchedules();
+
+    // parallel + a workspace-write agent is rejected at run start (server §9).
+    var parallelWarn =
+      el.teamMode.value === "parallel" &&
+      agentIds.some(function (id) {
+        var a = agentById(id);
+        return a && a.sandboxMode === "workspace-write";
+      });
+    el.teamModeHint.textContent = parallelWarn
+      ? "parallel mode forbids workspace-write agents — a run will be rejected."
+      : el.teamMode.value === "custom"
+        ? "Build a dependency graph over the team's agents, then save it below."
+        : "How the team coordinates. Order below is the supervisor / pipeline order.";
+    el.teamModeHint.style.color = parallelWarn ? "var(--danger)" : "";
+
+    // Ordered team list, with up/down reorder + remove.
+    el.teamAgents.textContent = "";
+    if (agentIds.length === 0) {
+      el.teamAgents.appendChild(
+        elem("div", "lib-sub", "No agents in this team yet."),
+      );
+    }
+    agentIds.forEach(function (id, i) {
+      var agent = agentById(id);
+      var item = elem("div", "team-item");
+      item.appendChild(elem("span", "team-idx", String(i + 1)));
+      item.appendChild(
+        elem("span", "team-name", agent ? agent.name : id + " (missing)"),
+      );
+      if (agent && agent.role) {
+        item.appendChild(elem("span", "team-role", agent.role));
+      }
+
+      var up = elem("button", "icon-btn", "↑");
+      up.type = "button";
+      up.disabled = i === 0;
+      up.addEventListener("click", function () {
+        moveTeamAgent(i, i - 1);
+      });
+      item.appendChild(up);
+
+      var down = elem("button", "icon-btn", "↓");
+      down.type = "button";
+      down.disabled = i === agentIds.length - 1;
+      down.addEventListener("click", function () {
+        moveTeamAgent(i, i + 1);
+      });
+      item.appendChild(down);
+
+      var rm = elem("button", "icon-btn", "Remove");
+      rm.type = "button";
+      rm.addEventListener("click", function () {
+        var next = agentIds.slice();
+        next.splice(i, 1);
+        patchTeam({ agentIds: next });
+      });
+      item.appendChild(rm);
+
+      el.teamAgents.appendChild(item);
+    });
+
+    // Add-agent picker: agents not already on the team.
+    var addSel = el.teamAddSelect;
+    addSel.textContent = "";
+    var available = state.agents.filter(function (a) {
+      return agentIds.indexOf(a.id) === -1;
+    });
+    if (available.length === 0) {
+      var opt = elem(
+        "option",
+        null,
+        state.agents.length === 0
+          ? "No agents — create one in the Agents tab"
+          : "All agents added",
+      );
+      opt.value = "";
+      addSel.appendChild(opt);
+      el.teamAddBtn.disabled = true;
+    } else {
+      el.teamAddBtn.disabled = false;
+      available.forEach(function (a) {
+        var o = elem("option", null, a.name);
+        o.value = a.id;
+        addSel.appendChild(o);
+      });
+    }
+
+    renderWorkflowBuilder();
+
+    // Connections: a checkbox per connection, checked = attached to this app.
+    var connIds = (app.connectionIds || []).filter(Boolean);
+    el.teamConnections.textContent = "";
+    if (state.connections.length === 0) {
+      el.teamConnections.appendChild(
+        elem("div", "lib-sub", "No connections — create one in the Connections tab."),
+      );
+    }
+    state.connections.forEach(function (conn) {
+      var rowEl = elem("div", "check-row");
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.id = "team-conn-" + conn.id;
+      cb.checked = connIds.indexOf(conn.id) !== -1;
+      cb.addEventListener("change", function () {
+        var next = ((state.teamApp && state.teamApp.connectionIds) || [])
+          .filter(Boolean)
+          .slice();
+        var at = next.indexOf(conn.id);
+        if (cb.checked && at === -1) next.push(conn.id);
+        else if (!cb.checked && at !== -1) next.splice(at, 1);
+        patchTeam({ connectionIds: next });
+      });
+      var lab = elem(
+        "label",
+        null,
+        mcpServerName(conn.targetType) + " · " + (conn.scope || "fixed"),
+      );
+      lab.setAttribute("for", cb.id);
+      rowEl.appendChild(cb);
+      rowEl.appendChild(lab);
+      el.teamConnections.appendChild(rowEl);
+    });
+  }
+
+  function moveTeamAgent(from, to) {
+    var ids = ((state.teamApp && state.teamApp.agentIds) || [])
+      .filter(Boolean)
+      .slice();
+    if (to < 0 || to >= ids.length) return;
+    var moved = ids.splice(from, 1)[0];
+    ids.splice(to, 0, moved);
+    patchTeam({ agentIds: ids });
+  }
+
+  function saveTeamBudget() {
+    var maxSpawnsRaw = el.teamBudgetMaxSpawns.value.trim();
+    var maxWallClockRaw = el.teamBudgetMaxWallClock.value.trim();
+    var budget = {};
+
+    if (maxSpawnsRaw) {
+      var maxSpawns = Number(maxSpawnsRaw);
+      if (!Number.isInteger(maxSpawns) || maxSpawns <= 0) {
+        showBanner("Max spawns must be a positive integer.");
+        el.teamBudgetMaxSpawns.focus();
+        return;
+      }
+      budget.maxSpawns = maxSpawns;
+    }
+    if (maxWallClockRaw) {
+      var maxWallClockMs = Number(maxWallClockRaw);
+      if (!Number.isInteger(maxWallClockMs) || maxWallClockMs <= 0) {
+        showBanner("Max wall-clock must be a positive integer in milliseconds.");
+        el.teamBudgetMaxWallClock.focus();
+        return;
+      }
+      budget.maxWallClockMs = maxWallClockMs;
+    }
+
+    patchTeam({ budget: Object.keys(budget).length > 0 ? budget : null });
+  }
+
+  function saveTeamObjectiveTemplate() {
+    patchTeam({ objectiveTemplate: el.teamObjectiveTemplate.value });
+  }
+
+  // PATCH the app definition (last-writer-wins, no expectedRev — mirrors
+  // togglePublish). The response is the fresh full app; we adopt it, re-render the
+  // modal, and refresh the catalog so its counts/hint stay in sync. Built-in modes
+  // remain backend-derived; custom mode includes its explicitly saved workflow.
+  async function patchTeam(patch) {
+    var app = state.teamApp;
+    if (!app) return;
+    clearBanner();
+    var updated;
+    try {
+      updated = await api("PATCH", "/apps/" + encodeURIComponent(app.id), patch);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    if (updated && updated.id) state.teamApp = updated;
+    else if (
+      patch.agentIds ||
+      patch.connectionIds ||
+      patch.orchestrationMode ||
+      patch.workflow ||
+      Object.prototype.hasOwnProperty.call(patch, "budget")
+    ) {
+      // Fallback: adopt the patch locally if the response was unexpected.
+      Object.keys(patch).forEach(function (k) {
+        state.teamApp[k] = patch[k];
+      });
+    }
+    renderTeamModal();
+    await loadApps();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Run view (iteration 2)
+  // ---------------------------------------------------------------------------
+
+  // The session list lives at the bare /api/sessions endpoint, NOT under
+  // /api/agentic — the api() helper hardcodes the agentic prefix, so this fetch
+  // is done directly. Returns a plain array; we keep reachable sessions only.
+  async function loadSessions() {
+    var res;
+    try {
+      res = await fetch("/api/sessions", { credentials: "same-origin" });
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (!res.ok) throw new ApiError(res.status, "Failed to load sessions");
+    var list = await res.json();
+    if (!Array.isArray(list)) return [];
+    return list.filter(function (s) {
+      return s && s.reachable !== false;
+    });
+  }
+
+  function sessionLabel(s) {
+    var name = s.name || s.id;
+    if (s.serverId && s.serverId !== "local") name += " (" + s.serverId + ")";
+    return name;
+  }
+
+  async function populateSessionPicker() {
+    var sel = el.runSession;
+    sel.textContent = "";
+    var loading = elem("option", null, "Loading sessions…");
+    loading.value = "";
+    sel.appendChild(loading);
+    var sessions;
+    try {
+      sessions = await loadSessions();
+    } catch (e) {
+      sel.textContent = "";
+      var errOpt = elem("option", null, "Could not load sessions");
+      errOpt.value = "";
+      sel.appendChild(errOpt);
+      throw e;
+    }
+    sel.textContent = "";
+    if (sessions.length === 0) {
+      var none = elem("option", null, "No reachable sessions");
+      none.value = "";
+      sel.appendChild(none);
+      return;
+    }
+    sessions.forEach(function (s) {
+      var opt = elem("option", null, sessionLabel(s));
+      opt.value = s.id;
+      sel.appendChild(opt);
+    });
+  }
+
+  // Resolve + show the working directory the currently-selected target session
+  // would run in (its pane_current_path), so the operator sees WHERE the run —
+  // and any workspace-write agent — will act BEFORE Start run, and is warned up
+  // front if the target's server is unreachable. Informational only: it never
+  // blocks Start run. Stale-guarded: each fetch captures a token; a response is
+  // dropped if the user switched sessions mid-flight (token no longer current).
+  function renderRunCwd() {
+    var box = el.runCwd;
+    var sessionId = el.runSession.value;
+    var token = ++state.cwdToken;
+    box.className = "run-cwd";
+    if (!sessionId) {
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "";
+    box.textContent = "";
+    box.appendChild(elem("span", "run-cwd-label", "Working directory:"));
+    box.appendChild(elem("span", "run-cwd-path", "resolving…"));
+    api("GET", "/session-cwd?sessionId=" + encodeURIComponent(sessionId))
+      .then(function (data) {
+        if (token !== state.cwdToken) return; // superseded selection
+        box.className = "run-cwd";
+        box.textContent = "";
+        box.appendChild(elem("span", "run-cwd-label", "Working directory:"));
+        box.appendChild(
+          elem("span", "run-cwd-path", (data && data.cwd) || "unknown"),
+        );
+        var note = elem(
+          "div",
+          "run-cwd-note",
+          "A workspace-write agent modifies files in this directory.",
+        );
+        note.title =
+          "Codex workspace-write is an OS sandbox confined to this directory with no network. " +
+          "Claude workspace-write (acceptEdits) is not filesystem-confined and keeps network access.";
+        box.appendChild(note);
+      })
+      .catch(function () {
+        if (token !== state.cwdToken) return; // superseded selection
+        box.className = "run-cwd is-error";
+        box.textContent = "";
+        box.appendChild(elem("span", "run-cwd-label", "Working directory:"));
+        box.appendChild(
+          elem(
+            "span",
+            "run-cwd-path",
+            "Couldn't resolve — the session's server may be unreachable.",
+          ),
+        );
+      });
+  }
+
+  function setView(view) {
+    state.view = view;
+    var isRun = view === "run";
+    var isCatalog = view === "catalog";
+    var isAgents = view === "agents";
+    var isConnections = view === "connections";
+
+    el.runView.classList.toggle("show", isRun);
+    el.catalog.style.display = isCatalog ? "" : "none";
+    el.agentsView.classList.toggle("show", isAgents);
+    el.connectionsView.classList.toggle("show", isConnections);
+
+    // The tab bar + contextual "New …" button are hidden while inside a run.
+    document.getElementById("tabs").style.display = isRun ? "none" : "";
+    el.importAppBtn.style.display = isCatalog ? "" : "none";
+    el.newAppBtn.style.display = isCatalog ? "" : "none";
+    el.newAgentBtn.style.display = isAgents ? "" : "none";
+    el.newConnectionBtn.style.display = isConnections ? "" : "none";
+
+    // Reflect the active tab (run keeps whatever tab was active underneath).
+    if (!isRun) {
+      el.tabs.forEach(function (t) {
+        t.classList.toggle("active", t.getAttribute("data-tab") === view);
+      });
+    }
+
+    if (!isRun) stopPolling();
+  }
+
+  // Switch top-level tab: sets the view and (re)loads that tab's data.
+  function selectTab(view) {
+    clearBanner();
+    setView(view);
+    if (view === "catalog") loadApps();
+    else if (view === "agents") loadAgents();
+    else if (view === "connections") loadConnections();
+  }
+
+  function openRunView(app) {
+    clearBanner();
+    state.runApp = app;
+    state.activeRunId = null;
+    stopPolling();
+    el.runTitle.textContent = "Run · " + app.name;
+    el.runObjective.value = "";
+    el.runForm.style.display = "";
+    el.runHistoryWrap.style.display = "";
+    el.runActive.style.display = "none";
+    el.nodeList.textContent = "";
+    el.runCwd.style.display = "none";
+    el.runCwd.textContent = "";
+    setView("run");
+    loadRunHistory(app.id);
+    populateSessionPicker()
+      .then(function () {
+        renderRunCwd(); // a session may be preselected on open
+      })
+      .catch(handleError);
+  }
+
+  // Re-derive relative-ish wall time for a run's start (durable across refresh).
+  function fmtWhen(ms) {
+    if (!ms) return "";
+    var diff = Date.now() - ms;
+    if (diff >= 0 && diff < 60000) return "just now";
+    if (diff >= 0 && diff < 3600000) return Math.floor(diff / 60000) + "m ago";
+    if (diff >= 0 && diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
+    try {
+      return new Date(ms).toLocaleString();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Run history for this Agentic AI — runs survive refresh + gateway restarts,
+  // so this list is how you get back to a run after reloading the page.
+  async function loadRunHistory(appId) {
+    el.runHistory.textContent = "";
+    el.runHistory.appendChild(elem("div", "run-meta", "Loading…"));
+    var runs;
+    try {
+      runs = (await api("GET", "/runs")).runs || [];
+    } catch (e) {
+      el.runHistory.textContent = "";
+      el.runHistory.appendChild(
+        elem("div", "run-meta", "Could not load run history."),
+      );
+      return;
+    }
+    // Ignore a stale response if the user navigated away / opened a run.
+    if (!state.runApp || state.runApp.id !== appId) return;
+    var mine = runs
+      .filter(function (r) {
+        return r.agenticAiId === appId;
+      })
+      .sort(function (a, b) {
+        return (b.startedAt || 0) - (a.startedAt || 0);
+      })
+      .slice(0, 15);
+    renderRunHistory(mine);
+  }
+
+  function renderRunHistory(runs) {
+    el.runHistory.textContent = "";
+    if (!runs.length) {
+      el.runHistory.appendChild(
+        elem("div", "run-meta", "No runs yet — start one above."),
+      );
+      return;
+    }
+    runs.forEach(function (r) {
+      var live = !RUN_TERMINAL[r.status];
+      var row = elem("div", "run-hist-row");
+      row.appendChild(
+        elem(
+          "span",
+          "badge badge-" + r.status,
+          r.status === "budget_exhausted" ? "budget exhausted" : r.status,
+        ),
+      );
+      var mid = elem("div", "run-hist-mid");
+      mid.appendChild(
+        elem("div", "run-hist-obj", r.objective || "(no objective)"),
+      );
+      mid.appendChild(
+        elem(
+          "div",
+          "run-hist-time",
+          "v" + (r.agenticAiVersion || 1) + " · " + fmtWhen(r.startedAt),
+        ),
+      );
+      row.appendChild(mid);
+      var btn = elem(
+        "button",
+        "btn" + (live ? " btn-primary" : ""),
+        live ? "Continue" : "Open",
+      );
+      btn.type = "button";
+      btn.addEventListener("click", function () {
+        openRun(r.id);
+      });
+      row.appendChild(btn);
+      el.runHistory.appendChild(row);
+    });
+  }
+
+  // Re-attach to an existing run (finished → view; still running → "continue"
+  // watching it live). This is what makes a run reachable after a page refresh.
+  async function openRun(runId) {
+    clearBanner();
+    stopPolling();
+    var run;
+    try {
+      run = await api("GET", "/runs/" + encodeURIComponent(runId));
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    state.activeRunId = run.id;
+    el.runForm.style.display = "none";
+    el.runHistoryWrap.style.display = "none";
+    el.runActive.style.display = "";
+    renderRun(run);
+    if (!RUN_TERMINAL[run.status]) startPolling();
+  }
+
+  function leaveRunView() {
+    stopPolling();
+    state.runApp = null;
+    state.activeRunId = null;
+    setView("catalog");
+  }
+
+  async function startRunForApp() {
+    var app = state.runApp;
+    if (!app) return;
+    var sessionId = el.runSession.value;
+    if (!sessionId) {
+      showBanner("Pick a reachable target session first.");
+      return;
+    }
+    clearBanner();
+    el.runStartBtn.disabled = true;
+    var run;
+    try {
+      run = await api(
+        "POST",
+        "/apps/" + encodeURIComponent(app.id) + "/run",
+        { sessionId: sessionId, objective: el.runObjective.value },
+      );
+    } catch (e) {
+      el.runStartBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    el.runStartBtn.disabled = false;
+    if (!run || !run.id) {
+      showBanner("Run did not start (no run id returned).");
+      return;
+    }
+    state.activeRunId = run.id;
+    el.runForm.style.display = "none";
+    el.runHistoryWrap.style.display = "none";
+    el.runActive.style.display = "";
+    renderRun(run);
+    // A run may already be terminal (a fast/empty job): only poll if not.
+    if (!RUN_TERMINAL[run.status]) startPolling();
+  }
+
+  function startPolling() {
+    stopPolling();
+    var token = ++state.pollToken;
+    var tick = async function () {
+      if (token !== state.pollToken) return; // superseded
+      var runId = state.activeRunId;
+      if (!runId) return;
+      var run;
+      try {
+        run = await api("GET", "/runs/" + encodeURIComponent(runId));
+      } catch (e) {
+        if (token !== state.pollToken) return;
+        // A transient poll failure shouldn't tear the view down — surface it
+        // and keep trying on the next tick.
+        handleError(e);
+        state.pollTimer = window.setTimeout(tick, POLL_INTERVAL_MS);
+        return;
+      }
+      if (token !== state.pollToken) return;
+      renderRun(run);
+      if (RUN_TERMINAL[run.status]) {
+        stopPolling();
+        return;
+      }
+      state.pollTimer = window.setTimeout(tick, POLL_INTERVAL_MS);
+    };
+    state.pollTimer = window.setTimeout(tick, POLL_INTERVAL_MS);
+  }
+
+  function stopPolling() {
+    state.pollToken++;
+    if (state.pollTimer) {
+      window.clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  async function killActiveRun() {
+    var runId = state.activeRunId;
+    if (!runId) return;
+    el.runKillBtn.disabled = true;
+    try {
+      await api("DELETE", "/runs/" + encodeURIComponent(runId));
+    } catch (e) {
+      el.runKillBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    el.runKillBtn.disabled = false;
+    // Poll once more so the cancelled state + final logs are reflected.
+    try {
+      var run = await api("GET", "/runs/" + encodeURIComponent(runId));
+      renderRun(run);
+      if (RUN_TERMINAL[run.status]) stopPolling();
+    } catch (e) {
+      /* the next poll tick will reconcile */
+    }
+  }
+
+  function fmtDuration(startedAt, finishedAt) {
+    if (!startedAt) return "";
+    var end = finishedAt || Date.now();
+    var ms = end - startedAt;
+    if (ms < 0) ms = 0;
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + "s";
+    var m = Math.floor(s / 60);
+    return m + "m " + (s % 60) + "s";
+  }
+
+  // Extract the human-readable final response from a tailed stream-json log.
+  // A tail can begin midway through a JSON line, so malformed lines are ignored.
+  // Plain Codex/text logs fall back to the unmodified trimmed tail.
+  function finalMessageFromLogTail(logTail) {
+    var raw = typeof logTail === "string" ? logTail.trim() : "";
+    if (!raw) return "";
+
+    var parsedAny = false;
+    var lastResult = null;
+    var lastAssistant = null;
+
+    function textFromContent(content) {
+      if (typeof content === "string") return content;
+      if (!Array.isArray(content)) return "";
+      return content
+        .map(function (part) {
+          if (typeof part === "string") return part;
+          if (part && typeof part.text === "string") return part.text;
+          if (part && typeof part.content === "string") return part.content;
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+
+    raw.split(/\r?\n/).forEach(function (line) {
+      var record;
+      try {
+        record = JSON.parse(line);
+      } catch (e) {
+        return;
+      }
+      parsedAny = true;
+      if (!record || typeof record !== "object") return;
+
+      if (record.type === "result" && typeof record.result === "string") {
+        lastResult = record.result;
+        return;
+      }
+
+      if (record.type === "assistant") {
+        var assistantText = "";
+        if (typeof record.text === "string") assistantText = record.text;
+        if (!assistantText) assistantText = textFromContent(record.content);
+        if (!assistantText && record.message) {
+          if (typeof record.message.text === "string") {
+            assistantText = record.message.text;
+          }
+          if (!assistantText) {
+            assistantText = textFromContent(record.message.content);
+          }
+        }
+        if (assistantText) lastAssistant = assistantText;
+      }
+    });
+
+    if (lastResult !== null) return lastResult;
+    if (lastAssistant !== null) return lastAssistant;
+    if (!parsedAny) return raw;
+    return raw;
+  }
+
+  function renderRun(run) {
+    var status = run.status || "running";
+    el.runStatusBadge.className = "badge badge-" + status;
+    el.runStatusBadge.textContent =
+      status === "budget_exhausted" ? "budget exhausted" : status;
+
+    var terminal = !!RUN_TERMINAL[status];
+    el.runKillBtn.style.display = terminal ? "none" : "";
+    el.runNewBtn.style.display = terminal ? "" : "none";
+
+    var meta = "v" + (run.agenticAiVersion || 1);
+    var dur = fmtDuration(run.startedAt, run.finishedAt);
+    if (dur) meta += " · " + dur;
+    if (run.budget && run.budget.maxSpawns != null) {
+      var spawnsUsed =
+        typeof run.spawnsUsed === "number" ? run.spawnsUsed : 0;
+      meta += " · spawns " + spawnsUsed + "/" + run.budget.maxSpawns;
+    }
+    el.runStatusMeta.textContent = meta;
+
+    el.runObjectiveEcho.textContent = run.objective
+      ? "Objective: " + run.objective
+      : "";
+
+    renderToolCallLog(run);
+
+    el.nodeList.textContent = "";
+    var nodes = run.nodeExecutions || [];
+    if (nodes.length === 0) {
+      el.nodeList.appendChild(
+        elem("div", "run-meta", "This run has no steps to execute."),
+      );
+      return;
+    }
+    nodes.forEach(function (ne) {
+      el.nodeList.appendChild(renderNode(ne));
+    });
+  }
+
+  function renderNode(ne) {
+    var st = ne.status || "pending";
+    var card = elem(
+      "div",
+      "node-card" + (st === "skipped" ? " node-card-skipped" : ""),
+    );
+
+    var head = elem("div", "node-head");
+    var label = ne.nodeId || "step";
+    if (ne.parentNodeId) label = ne.parentNodeId + " › " + label;
+    head.appendChild(elem("span", "node-id", label));
+
+    var dur = fmtDuration(ne.startedAt, ne.finishedAt);
+    if (dur) head.appendChild(elem("span", "node-dur", dur));
+
+    if (typeof ne.turns === "number" && ne.turns > 1) {
+      head.appendChild(elem("span", "node-turn", "Turn " + ne.turns));
+    }
+
+    if (st === "failed" && ne.error) {
+      head.appendChild(elem("span", "node-error", ne.error));
+    }
+    head.appendChild(elem("span", "badge badge-" + st, st));
+    card.appendChild(head);
+
+    if (Array.isArray(ne.chosenEdges)) {
+      card.appendChild(
+        elem(
+          "div",
+          "run-meta",
+          ne.chosenEdges.length > 0
+            ? "Branch: " + ne.chosenEdges.join(", ")
+            : "Branch: none",
+        ),
+      );
+    }
+    if (Number.isFinite(ne.score)) {
+      card.appendChild(elem("div", "run-meta", "SCORE: " + ne.score));
+    }
+    if (Number.isFinite(ne.iterationCount) && ne.iterationCount > 1) {
+      card.appendChild(
+        elem("div", "run-meta", "iteration " + ne.iterationCount),
+      );
+    }
+    if (typeof ne.lastVerdict === "string") {
+      card.appendChild(elem("div", "run-meta", "verdict: " + ne.lastVerdict));
+    }
+    if (ne.loopExhausted === true) {
+      card.appendChild(elem("div", "run-meta", "loop exhausted"));
+    }
+
+    // Iter3: a node parked on an MCP tool-call approval carries a persisted
+    // pendingToolCall. Gate on BOTH the node status AND the record's own status
+    // — once resolved, pendingToolCall stays but flips to approved/rejected, so
+    // requiring "pending" is what stops a decided call from re-showing here.
+    var ptc = ne.pendingToolCall;
+    if (ne.status === "waiting-approval" && ptc && ptc.status === "pending") {
+      card.appendChild(renderApprovalBanner(ne.nodeId, ptc));
+    } else if (ne.status === "waiting-approval" && !ptc) {
+      card.appendChild(renderHumanApprovalBanner(ne.nodeId));
+    }
+
+    if (ne.logTail) {
+      var result = elem("div", "node-result");
+      result.appendChild(elem("div", "node-result-title", "Result"));
+      result.appendChild(
+        elem("div", "node-result-text", finalMessageFromLogTail(ne.logTail)),
+      );
+      card.appendChild(result);
+
+      var raw = elem("details", "node-raw");
+      raw.appendChild(elem("summary", null, "Show raw log"));
+      raw.appendChild(elem("pre", "node-log", ne.logTail));
+      card.appendChild(raw);
+    }
+
+    if (ne.status === "done") {
+      card.appendChild(renderGuidanceForm(ne.nodeId));
+    }
+    return card;
+  }
+
+  function renderGuidanceForm(nodeId) {
+    var form = elem("div", "guidance-form");
+    var input = elem("textarea", "field guidance-input");
+    input.placeholder = "Send a follow-up / answer the agent's question…";
+    input.setAttribute("aria-label", "Send guidance");
+    var sendBtn = elem("button", "btn btn-primary", "Send");
+    sendBtn.type = "button";
+    sendBtn.addEventListener("click", function () {
+      var text = input.value.trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      sendGuidance(nodeId, text, input, sendBtn);
+    });
+    form.appendChild(input);
+    form.appendChild(sendBtn);
+    return form;
+  }
+
+  async function sendGuidance(nodeId, text, input, sendBtn) {
+    var runId = state.activeRunId;
+    if (!runId) {
+      sendBtn.disabled = false;
+      return;
+    }
+    clearBanner();
+    var path =
+      "/runs/" +
+      encodeURIComponent(runId) +
+      "/nodes/" +
+      encodeURIComponent(nodeId) +
+      "/guidance";
+    var run;
+    try {
+      run = await api("POST", path, { text: text });
+    } catch (e) {
+      sendBtn.disabled = false;
+      handleError(e);
+      return;
+    }
+    input.value = "";
+    if (run) {
+      renderRun(run);
+      if (!RUN_TERMINAL[run.status]) startPolling();
+      else stopPolling();
+    }
+  }
+
+  // Prominent per-node approval banner. All fields via textContent. The pending
+  // record carries only connectionId (no targetType — that's a toolCallLog-only
+  // field), so we surface connectionId here and never fabricate a type.
+  function renderApprovalBanner(nodeId, ptc) {
+    var box = elem("div", "approval-box");
+    box.appendChild(
+      elem("div", "approval-title", "Tool call awaiting approval"),
+    );
+
+    var grid = elem("div", "approval-grid");
+    grid.appendChild(elem("span", "approval-key", "Tool"));
+    grid.appendChild(elem("span", "approval-val", ptc.toolName || "—"));
+    grid.appendChild(elem("span", "approval-key", "Connection"));
+    grid.appendChild(elem("span", "approval-val", ptc.connectionId || "—"));
+    box.appendChild(grid);
+
+    if (ptc.argsPreview) {
+      box.appendChild(elem("div", "approval-key", "Arguments"));
+      box.appendChild(elem("pre", "approval-args", ptc.argsPreview));
+    }
+
+    var actions = elem("div", "approval-actions");
+    var approveBtn = elem("button", "btn btn-primary", "Approve");
+    approveBtn.type = "button";
+    var rejectBtn = elem("button", "btn btn-danger", "Reject");
+    rejectBtn.type = "button";
+    approveBtn.addEventListener("click", function () {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, ptc.id, "approve", null);
+    });
+    rejectBtn.addEventListener("click", function () {
+      // Host iframe carries allow-modals (verified), so prompt() is safe and
+      // blocks the poll loop while open. Cancel (null) aborts; empty = no reason.
+      var reason = window.prompt("Reason for rejecting (optional):", "");
+      if (reason === null) return;
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, ptc.id, "reject", reason.trim() || undefined);
+    });
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+    box.appendChild(actions);
+    return box;
+  }
+
+  function renderHumanApprovalBanner(nodeId) {
+    var box = elem("div", "approval-box");
+    box.appendChild(elem("div", "approval-title", "Human-approval gate"));
+    box.appendChild(
+      elem(
+        "div",
+        "approval-val",
+        "Approve to let the workflow continue, or reject to stop.",
+      ),
+    );
+
+    var actions = elem("div", "approval-actions");
+    var approveBtn = elem("button", "btn btn-primary", "Approve");
+    approveBtn.type = "button";
+    var rejectBtn = elem("button", "btn btn-danger", "Reject");
+    rejectBtn.type = "button";
+    approveBtn.addEventListener("click", function () {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, null, "approve", null);
+    });
+    rejectBtn.addEventListener("click", function () {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      decidePendingCall(nodeId, null, "reject", null);
+    });
+    actions.appendChild(approveBtn);
+    actions.appendChild(rejectBtn);
+    box.appendChild(actions);
+    return box;
+  }
+
+  // POST the human decision. Both routes return the fresh Run (200); we render
+  // it immediately, then keep polling so the resolution + downstream steps show.
+  async function decidePendingCall(nodeId, pendingId, decision, reason) {
+    var runId = state.activeRunId;
+    if (!runId) return;
+    clearBanner();
+    var path =
+      "/runs/" +
+      encodeURIComponent(runId) +
+      "/nodes/" +
+      encodeURIComponent(nodeId) +
+      "/" +
+      decision;
+    var body = {};
+    if (pendingId != null) body.pendingId = pendingId;
+    if (decision === "reject" && reason) body.reason = reason;
+    var run;
+    try {
+      run = await api("POST", path, body);
+    } catch (e) {
+      handleError(e);
+      return;
+    }
+    if (run) {
+      renderRun(run);
+      if (!RUN_TERMINAL[run.status]) startPolling();
+      else stopPolling();
+    }
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    var d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    return d.toLocaleTimeString();
+  }
+
+  // Run-level audit trail (iter3): allow/deny/approved/rejected/timed_out
+  // dispositions. textContent-only; bounded + scrollable via CSS.
+  function renderToolCallLog(run) {
+    var wrap = el.toolLog;
+    wrap.textContent = "";
+    var log = run.toolCallLog || [];
+    if (log.length === 0) {
+      wrap.style.display = "none";
+      return;
+    }
+    wrap.style.display = "";
+    wrap.appendChild(elem("div", "tool-log-title", "Tool call log"));
+    var list = elem("div", "tool-log-list");
+    log.forEach(function (entry) {
+      var row = elem("div", "tool-log-row");
+      var disp = entry.disposition || "";
+      row.appendChild(
+        elem("span", "tool-log-disp disp-" + disp, disp || "—"),
+      );
+      row.appendChild(elem("span", "tool-log-tool", entry.toolName || "—"));
+      var conn = entry.connectionId || "";
+      if (entry.targetType) {
+        conn = entry.targetType + " · " + (entry.connectionId || "—");
+      }
+      row.appendChild(elem("span", "tool-log-conn", conn || "—"));
+      row.appendChild(elem("span", "tool-log-time", fmtTime(entry.at)));
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modals
+  // ---------------------------------------------------------------------------
+  function openOverlay(overlay) {
+    overlay.classList.add("show");
+  }
+  function closeOverlay(overlay) {
+    overlay.classList.remove("show");
+  }
+
+  document.querySelectorAll("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      closeOverlay(document.getElementById(btn.getAttribute("data-close")));
+    });
+  });
+
+  // Click-on-backdrop and Escape close whichever overlay is open. The team editor
+  // PATCHes live on each change, so closing it never loses work.
+  var ALL_OVERLAYS = [
+    el.newAppOverlay,
+    el.importAppOverlay,
+    el.teamOverlay,
+    el.agentOverlay,
+    el.connectionOverlay,
+  ];
+  ALL_OVERLAYS.forEach(function (ov) {
+    ov.addEventListener("mousedown", function (e) {
+      if (e.target === ov) closeOverlay(ov);
+    });
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      ALL_OVERLAYS.forEach(function (ov) {
+        closeOverlay(ov);
+      });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  el.newAppBtn.addEventListener("click", function () {
+    el.naName.value = "";
+    el.naDesc.value = "";
+    el.naMode.value = "single";
+    openOverlay(el.newAppOverlay);
+    el.naName.focus();
+  });
+
+  function showImportError(message) {
+    el.importAppError.textContent = message || "";
+    el.importAppError.classList.toggle("show", Boolean(message));
+  }
+
+  el.importAppBtn.addEventListener("click", function () {
+    clearBanner();
+    el.importAppFile.value = "";
+    el.importAppJson.value = "";
+    showImportError("");
+    openOverlay(el.importAppOverlay);
+    el.importAppJson.focus();
+  });
+
+  el.importAppFile.addEventListener("change", function () {
+    var file = el.importAppFile.files && el.importAppFile.files[0];
+    if (!file) return;
+    showImportError("");
+    var reader = new FileReader();
+    reader.addEventListener("load", function () {
+      el.importAppJson.value = String(reader.result || "");
+    });
+    reader.addEventListener("error", function () {
+      showImportError("Could not read that template file.");
+    });
+    reader.readAsText(file);
+  });
+
+  el.importAppForm.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    showImportError("");
+    var template;
+    try {
+      template = JSON.parse(el.importAppJson.value);
+    } catch (parseError) {
+      showImportError("Invalid JSON. Check the template and try again.");
+      return;
+    }
+
+    el.importAppSubmit.disabled = true;
+    try {
+      await api("POST", "/apps/import", { template: template });
+      closeOverlay(el.importAppOverlay);
+      await loadApps();
+    } catch (requestError) {
+      handleError(requestError);
+      showImportError(
+        (requestError && requestError.message) || "Could not import template.",
+      );
+    } finally {
+      el.importAppSubmit.disabled = false;
+    }
+  });
+
+  el.newAppForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.naName.value.trim();
+    if (!name) return;
+    var fields = {
+      name: name,
+      description: el.naDesc.value,
+      orchestrationMode: el.naMode.value,
+    };
+    closeOverlay(el.newAppOverlay);
+    createApp(fields).catch(handleError);
+  });
+
+  // ---- Tab wiring ----
+  el.tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      selectTab(t.getAttribute("data-tab"));
+    });
+  });
+
+  // ---- Agents wiring ----
+  el.newAgentBtn.addEventListener("click", function () {
+    openAgentModal(null);
+  });
+  el.agentForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    submitAgent().catch(handleError);
+  });
+
+  // ---- Connections wiring ----
+  el.newConnectionBtn.addEventListener("click", function () {
+    openConnectionModal();
+  });
+  el.connectionForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    submitConnection().catch(handleError);
+  });
+
+  // ---- Team editor wiring ----
+  el.teamMode.addEventListener("change", function () {
+    if (el.teamMode.value === "custom") {
+      if (!state.teamApp || state.teamApp.orchestrationMode !== "custom") {
+        seedTeamWorkflow(null);
+      }
+      renderTeamModal();
+      return;
+    }
+    patchTeam({ orchestrationMode: el.teamMode.value });
+  });
+  el.teamBudgetSave.addEventListener("click", saveTeamBudget);
+  el.teamObjectiveSave.addEventListener("click", saveTeamObjectiveTemplate);
+  el.scheduleEvery.addEventListener("change", renderScheduleFields);
+  el.scheduleCreate.addEventListener("click", createSchedule);
+  el.teamAddBtn.addEventListener("click", function () {
+    var id = el.teamAddSelect.value;
+    if (!id) return;
+    var ids = ((state.teamApp && state.teamApp.agentIds) || [])
+      .filter(Boolean)
+      .slice();
+    if (ids.indexOf(id) === -1) ids.push(id);
+    patchTeam({ agentIds: ids });
+  });
+  el.workflowAddNode.addEventListener("click", function () {
+    var draft = state.teamWorkflowDraft;
+    var agentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(Boolean);
+    if (!draft) return;
+    var id = "n" + state.nextWorkflowNodeNumber++;
+    if (agentIds.length === 0) {
+      draft.nodes.push({ id: id, type: "human-approval" });
+    } else {
+      draft.nodes.push({ id: id, type: "agent-task", agentId: agentIds[0] });
+    }
+    renderWorkflowBuilder();
+  });
+  el.workflowAddEvaluation.addEventListener("click", function () {
+    var draft = state.teamWorkflowDraft;
+    var agentIds = ((state.teamApp && state.teamApp.agentIds) || []).filter(
+      Boolean,
+    );
+    if (!draft) return;
+    var targets = draft.nodes.slice();
+    var id = "n" + state.nextWorkflowNodeNumber++;
+    draft.nodes.push({ id: id, type: "router", agentId: agentIds[0] });
+    if (targets.length >= 2) {
+      draft.edges.push({ from: id, to: targets[0].id, when: "pass" });
+      draft.edges.push({ from: id, to: targets[1].id, when: "default" });
+    }
+    renderWorkflowBuilder();
+  });
+  el.workflowAddEdge.addEventListener("click", function () {
+    var draft = state.teamWorkflowDraft;
+    if (!draft || draft.nodes.length < 2) return;
+    var edge = { from: draft.nodes[0].id, to: draft.nodes[1].id };
+    if (
+      draft.nodes[0].type === "router" &&
+      !draft.edges.some(function (other) {
+        return other.from === edge.from && other.when === "default";
+      })
+    ) {
+      edge.when = "default";
+    }
+    draft.edges.push(edge);
+    renderWorkflowBuilder();
+  });
+  el.workflowEntry.addEventListener("change", function () {
+    if (state.teamWorkflowDraft) {
+      state.teamWorkflowDraft.entryNodeId = el.workflowEntry.value || null;
+    }
+  });
+  el.workflowSave.addEventListener("click", saveTeamWorkflow);
+
+  // ---- Run view wiring ----
+  el.runBack.addEventListener("click", leaveRunView);
+
+  // Re-resolve + show the working directory whenever the target session changes.
+  el.runSession.addEventListener("change", function () {
+    renderRunCwd();
+    renderScheduleTarget();
+  });
+
+  el.runForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    startRunForApp();
+  });
+
+  el.runKillBtn.addEventListener("click", function () {
+    killActiveRun();
+  });
+
+  // "New run" (shown once a run is terminal) resets the run view for the same
+  // app so the operator can fire another run without leaving.
+  el.runNewBtn.addEventListener("click", function () {
+    if (state.runApp) openRunView(state.runApp);
+  });
+
+  // Don't keep hammering the gateway while the modal/tab is hidden (the host
+  // dialog keeps this iframe mounted). Resume polling a live run when visible.
+  document.addEventListener("visibilitychange", function () {
+    if (state.view !== "run" || !state.activeRunId) return;
+    if (document.hidden) {
+      stopPolling();
+    } else {
+      startPolling();
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  // Preload the MCP target list (static, tiny) so the connection modal + policy
+  // labels are ready, then render the default (catalog) tab.
+  void loadMcpServers().then(function () {
+    void loadApps();
+  });
+</script>

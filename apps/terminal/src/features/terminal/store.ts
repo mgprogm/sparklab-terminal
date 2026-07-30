@@ -63,6 +63,23 @@ interface TerminalState {
   explorerOpen: boolean;
   setExplorerOpen: (open: boolean) => void;
 
+  /** Whether the Kanban board dialog is open. NOT persisted — like the file
+   * explorer/settings modals, a persisted-open dialog would flash on reload. */
+  kanbanOpen: boolean;
+  setKanbanOpen: (open: boolean) => void;
+
+  /** Whether the Project management dialog is open. NOT persisted — like the
+   * Kanban/file-explorer/settings modals, a persisted-open dialog would flash
+   * on reload. */
+  pmOpen: boolean;
+  setPmOpen: (open: boolean) => void;
+
+  /** Whether the Agentic AI Creator dialog is open. NOT persisted — like the
+   * Kanban/PM/file-explorer/settings modals, a persisted-open dialog would
+   * flash on reload. */
+  agenticOpen: boolean;
+  setAgenticOpen: (open: boolean) => void;
+
   /** Set of collapsed group keys ("org" or "org/project"). Keys present =
    *  collapsed. Default (absent) = expanded. Persisted. */
   collapsedGroups: Record<string, boolean>;
@@ -105,6 +122,15 @@ export const useTerminalStore = create<TerminalState>()(
 
       explorerOpen: false,
       setExplorerOpen: (open) => set({ explorerOpen: open }),
+
+      kanbanOpen: false,
+      setKanbanOpen: (open) => set({ kanbanOpen: open }),
+
+      pmOpen: false,
+      setPmOpen: (open) => set({ pmOpen: open }),
+
+      agenticOpen: false,
+      setAgenticOpen: (open) => set({ agenticOpen: open }),
 
       collapsedGroups: {},
       toggleGroupCollapsed: (key) =>

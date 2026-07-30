@@ -85,4 +85,47 @@ describe("BrowserViewOverlay", () => {
       screen.getByText(/Connection lost — browser session closing/),
     ).toBeVisible();
   });
+
+  it("recovers Done and Cancel controls after a reload loses the view", () => {
+    useBrowserHandoffStore.getState().ingestControl({
+      type: "browser_handoff_state",
+      browserId: "browser-1",
+      handoffId: "handoff-1",
+      state: "human_active",
+      expiresAt: Date.now() + 60_000,
+      hardExpiresAt: Date.now() + 300_000,
+    });
+
+    render(<BrowserViewOverlay />);
+
+    expect(screen.getByRole("region", { name: "Browser view" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Done — return to agent" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Cancel browser session" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Interactive control is unavailable after reload/),
+    ).toBeVisible();
+  });
+
+  it("offers cancellation but not Done for a recovered pending handoff", () => {
+    useBrowserHandoffStore.getState().ingestControl({
+      type: "browser_handoff_state",
+      browserId: "browser-1",
+      handoffId: "handoff-1",
+      state: "pending",
+      expiresAt: Date.now() + 30_000,
+    });
+
+    render(<BrowserViewOverlay />);
+
+    expect(
+      screen.getByRole("button", { name: "Cancel browser session" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Done — return to agent" }),
+    ).toBeNull();
+  });
 });

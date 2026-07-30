@@ -207,6 +207,90 @@ Rename or move an entry. Body (`FsRenameRequest`): `{ "from": "/home/me/a", "to"
 
 Deletes a file or directory. A non-empty directory requires `recursive=1` (client must show a strong confirm before setting this). Response (`FsDeleteResponse`): `{ "path": "…" }`. Not found → `404`; permission denied → `403`; non-empty dir without `recursive=1` → `502`.
 
+### Kanban endpoints: `/api/kanban/*`
+
+A gateway-owned, multi-board task tracker (design: [`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). State lives in a `data/kanban.json` sidecar (`src/kanban.js`, atomic write; every mutator is synchronous so a read-modify-write is atomic — no mutex, same as `registry.js`). **Ordering authority is `Column.cardIds[]` only** — a card's `columnId` is derived on GET and never persisted. Each board carries a monotonic `rev` for optimistic concurrency. Schemas: the `Kanban*` block in `packages/shared-types/src/terminal.ts`.
+
+Auth: the existing `gw_session` cookie **or** a scoped `Authorization: Bearer <KANBAN_API_TOKEN>` (this prefix only — lets an external AI CLI drive boards without a cookie login; a CLI request carries no `Origin`, so the CSRF guard is a no-op for it). GET routes are Origin-exempt; state-changing routes get the Origin/CSRF check.
+
+An MCP-server wrapper (dependency-free stdio) lives at `tools/kanban-mcp/` — it exposes these endpoints as MCP tools for Claude Code / Codex via the bearer token. See `tools/kanban-mcp/README.md` for the `claude mcp add` / `~/.codex/config.toml` setup.
+
+#### `GET /api/kanban/boards` → 200
+
+`{ "boards": KanbanBoardSummary[] }` where a summary is `{id,name,tags,rev,createdAt,updatedAt,columnCount,cardCount}`.
+
+#### `GET /api/kanban/boards/:boardId` → 200
+
+Full `KanbanBoard`: `{id,name,tags,rev,createdAt,updatedAt, columns:[{id,name,cardIds[]}], cards:[{id,title,description,tags,columnId,createdAt,updatedAt}]}`. Unknown board → `404`.
+
+#### `POST /api/kanban/boards` → 201
+
+Body (`CreateBoardRequest`): `{name, tags?, columns?}`. Omitting `columns` seeds Backlog / To Do / In Progress / Done. Returns the created board.
+
+#### `PATCH /api/kanban/boards/:boardId` → 200
+
+Body (`UpdateBoardRequest`): `{name?, tags?}` (at least one). Returns the board.
+
+#### `DELETE /api/kanban/boards/:boardId` → 204
+
+#### `POST /api/kanban/boards/:boardId/cards` → 201
+
+Body (`CreateCardRequest`): `{title, description?, tags?, columnId?}` — defaults to the first column. Returns the created card (with its derived `columnId`).
+
+#### `PATCH /api/kanban/cards/:cardId` → 200
+
+Body (`UpdateCardRequest`): `{boardId, title?, description?, tags?}` (at least one field beyond `boardId`).
+
+#### `POST /api/kanban/cards/:cardId/move` → 200 / 409
+
+Body (`MoveCardRequest`): `{boardId, toColumnId, toIndex, rev}`. Splices the card out of whichever column holds it and into the target at the clamped index — exactly one write. A stale `rev` → `409 { "error": "stale", "board": <current board> }` so the client can reconcile and retry with the fresh `rev`. Unknown card/column → `404`.
+
+#### `DELETE /api/kanban/cards/:cardId?boardId=<id>` → 204
+
+`boardId` via query string or JSON body.
+
+### Project-management endpoints: `/api/pm/*`
+
+A Kanban-first PM suite (design: [`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md), extended by [`PM-ARTIFACT-ENHANCEMENTS-PLAN.md`](./PM-ARTIFACT-ENHANCEMENTS-PLAN.md) — **implemented**, 2026-07-28), a **separate** artifact from Kanban. State in `data/pm.json` (`src/pm.js`, synchronous mutators ⇒ atomic, no mutex) plus a **separate collaboration sidecar** `src/pm-collab.js` (append-only JSONL for comments/activity + attachment blobs + a bounded notification JSON — never inline in `pm.json`, so comment/attachment volume never bloats the whole-file rewrite). Like Kanban: `Column.taskIds[]` is the sole ordering/status authority (`columnId` derived on GET). Auth: cookie **or** the shared bearer (`GATEWAY_API_TOKEN` / legacy `KANBAN_API_TOKEN`). GET Origin-exempt; writes Origin/CSRF-checked. Schemas: the `Pm*` block in `shared-types/src/terminal.ts`.
+
+**Issue model**: each task carries a derived issue **key** (`project.key` + a per-project monotonic `number`, e.g. `PAY-43`; `key`/`number` are the authority, the string is never persisted), a `type` (`epic|story|task|bug|subtask`, default `task`), a `reporter` (the creating actor — see Actors below), a `parentId` (containment edge, separate from `dependsOn`; enforced against a fixed matrix: Epic has no parent, Story/Task/Bug may parent under an Epic or be root, Subtask **requires** a parent that is a Story/Task/Bug — max depth 3), and `watchers[]` (auto-populated: reporter + assignee + commenters). Assignee stays a **single** field (multi-assignee was evaluated and deliberately deferred — watchers cover "involve others"). Deleting a task **orphans** its children (`parentId→null`; an orphaned Subtask is promoted to `type:"task"` since a parentless Subtask is invalid) and scrubs the id from every other task's `dependsOn` **and** `parentId`.
+
+**Actors**: there is no multi-user login; a small advisory `actorOf(req)` labels "who did this" for `reporter`/comment `author`/activity `actor` — `user:<GATEWAY_AUTH_USER>` for a cookie session, `client:<X-PM-Actor header>` or `client:bearer` for the scoped bearer. This is **not** a trust boundary (auth is still the cookie/bearer itself), just a label.
+
+**Custom columns / WIP / transitions**: columns are no longer fixed after project creation. A column carries an optional `wipLimit` (int ≥1 or `null`) and `transitions` (allowed destination column ids, or `null` = unrestricted). Moving a task **cross-column** into an at-limit column, or to a destination not in the source's `transitions`, is rejected — see the error-code table below. Same-column reorder is exempt from both checks. Deleting a non-empty column requires `mode=relocate&toColumnId=` (splices its tasks onto the target) or is blocked (`mode=block`, the default); the last remaining column can't be deleted.
+
+**Collaboration**: comments (edit = new record same id, delete = tombstone; append-only, never rewritten in place), an append-only project **activity/audit log** (every mutating action — task/column CRUD, comments, attachments, watch/unwatch — emits one record `{id,ts,actor,verb,target:{type,id},taskId?,summary}`; `taskId` is carried explicitly so sub-resource-scoped verbs like `attached`/`detached` — whose `target` points at the attachment, not the task — can still be filtered per-task), attachments (opaque on-disk blob name, original filename is metadata-only so path traversal is structurally impossible; size-capped, `nosniff` on download), and **in-app notifications** (durable primary channel, recipient = watchers minus the acting actor; **Web Push is best-effort only** — if configured via `push.js`, a bare `{projectId,taskId,summary}` payload is sent, **never** a comment body, and a push failure is swallowed and never rolls back the triggering mutation).
+
+| Method + route                                      | Body                                                                                                                                        | Result                                                                                            |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `GET /api/pm/projects`                              | —                                                                                                                                           | `{projects: PmProjectSummary[]}`                                                                  |
+| `GET /api/pm/projects/:id`                          | —                                                                                                                                           | full `PmProject` (columns[+wipLimit/transitions], sprints, tasks[+derived columnId/key]); 404     |
+| `GET /api/pm/projects/:id/tree`                     | —                                                                                                                                           | derived Epic→Story→Subtask forest; 404 unknown project                                            |
+| `POST /api/pm/projects`                             | `{name, key?, tags?, columns?}`                                                                                                             | 201 project (key derived-unique from name if omitted; explicit collision → 409 `key_taken`)       |
+| `PATCH /api/pm/projects/:id`                        | `{name?, key?, tags?}`                                                                                                                      | 200 project                                                                                       |
+| `DELETE /api/pm/projects/:id`                       | —                                                                                                                                           | 204 (cascades: purges all comments/activity/attachments for the project)                          |
+| `POST /api/pm/projects/:id/tasks`                   | `{title, description?, type?, assignee?, reporter?, priority?, labels?, startDate?, dueDate?, sprintId?, parentId?, columnId?, dependsOn?}` | 201 task; hierarchy violation → **422** `{error, reason}`                                         |
+| `PATCH /api/pm/tasks/:id`                           | `{projectId, …field, type?, parentId?, dependsOn?}`                                                                                         | 200 task; **cycle/hierarchy → 400/422**                                                           |
+| `POST /api/pm/tasks/:id/move`                       | `{projectId, toColumnId, toIndex, rev}`                                                                                                     | 200 project / **409** `{error:"stale", project}` / **422** `wip_exceeded`\|`transition_forbidden` |
+| `DELETE /api/pm/tasks/:id?projectId=`               | —                                                                                                                                           | 204 (scrubs `dependsOn`+`parentId`; cascades: purges the task's comments/attachments)             |
+| `POST /api/pm/projects/:id/sprints`                 | `{name, startDate?, endDate?}`                                                                                                              | 201 sprint                                                                                        |
+| `PATCH /api/pm/sprints/:id`                         | `{projectId, name?, startDate?, endDate?}`                                                                                                  | 200 sprint                                                                                        |
+| `DELETE /api/pm/sprints/:id?projectId=`             | —                                                                                                                                           | 204 (affected tasks → `sprintId:null`)                                                            |
+| `POST /api/pm/projects/:id/columns`                 | `{name, index?, wipLimit?, transitions?}`                                                                                                   | 201 project                                                                                       |
+| `PATCH /api/pm/columns/:colId`                      | `{projectId, name?, wipLimit?, transitions?}`                                                                                               | 200 project                                                                                       |
+| `POST /api/pm/columns/:colId/move`                  | `{projectId, toIndex, rev}`                                                                                                                 | 200 project / **409** `{error:"stale", project}`                                                  |
+| `DELETE /api/pm/columns/:colId?…mode=&toColumnId=`  | —                                                                                                                                           | 204 / **409** `column_not_empty` / **400** `last_column`                                          |
+| `GET/POST /api/pm/tasks/:id/comments?projectId=`    | `{body}` (POST)                                                                                                                             | 201 comment / `{comments:[...]}`                                                                  |
+| `PATCH/DELETE /api/pm/comments/:id`                 | `{projectId, taskId, body?}`                                                                                                                | 200 comment / 204 tombstone                                                                       |
+| `GET /api/pm/projects/:id/activity?limit=&before=`  | —                                                                                                                                           | `{activity:[...]}` (reverse-chronological)                                                        |
+| `GET/POST /api/pm/tasks/:id/attachments?projectId=` | raw bytes (POST, `X-Filename`/`Content-Type` headers, NOT JSON)                                                                             | 201 metadata / **413** over cap / `{attachments:[...]}`                                           |
+| `GET/DELETE /api/pm/attachments/:id?projectId=`     | —                                                                                                                                           | stream w/ `Content-Disposition`+`nosniff` / 204                                                   |
+| `POST /api/pm/tasks/:id/watch\|unwatch?projectId=`  | —                                                                                                                                           | 200 task (idempotent — safe to call redundantly)                                                  |
+| `GET /api/pm/notifications?unread=1`                | —                                                                                                                                           | `{notifications:[...]}` for the calling actor                                                     |
+| `POST /api/pm/notifications/read`                   | `{ids?, all?}`                                                                                                                              | 200 `{updated:N}`                                                                                 |
+
+Priority ∈ `low|medium|high|urgent`; type ∈ `epic|story|task|bug|subtask`; dates are epoch ms (day-level) or null. Task/column `move` are `rev`-guarded (409 on stale — the **only** code the agent retries, once); **422** (`wip_exceeded`, `transition_forbidden`, `hierarchy_invalid`) is a distinct, deliberately non-retried rejection class — see [`AGENT-PROTOCOL.md`](./AGENT-PROTOCOL.md). Field/dependency/sprint/comment/column-rename edits are last-writer-wins (v1). An MCP wrapper lives at `tools/pm-mcp/` (see its README) mirroring every read/write tool below.
+
 ### Errors (400 / 404 / 500)
 
 Always `{ "error": "<message>" }`.
