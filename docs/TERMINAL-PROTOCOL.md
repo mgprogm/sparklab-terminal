@@ -13,29 +13,57 @@ Returns `SessionInfo[]`:
 ```json
 [
   {
-    "id": "web-6f2c…", // always "web-" + UUID
+    "id": "local/web-6f2c…", // qualified as <serverId>/web-<UUID>
     "name": "my-session",
     "createdAt": 1752444000000, // epoch ms; nullable
     "tags": [], // reserved for future use
     "currentCommand": "bash", // command in the active pane
     "attached": true, // ≥1 tmux client attached
     "attachedClients": 1, // optional: count of attached tmux clients
-    "lastActivity": 1752444000 // optional: last activity, epoch SECONDS (not ms)
+    "lastActivity": 1752444000, // optional: last activity, epoch SECONDS (not ms)
+    "org": "Sparklab", // optional/nullable organization metadata
+    "project": "terminal", // optional/nullable; requires org
+    "muted": false, // suppress job notifications
+    "serverId": "local",
+    "reachable": true, // whether the server answered this poll
+    "alive": true // whether this tmux session exists
   }
 ]
 ```
 
 `attachedClients` and `lastActivity` are optional in the schema (Phase 3 B2) so older gateways still validate; the UI shows a viewers badge when `attachedClients > 0`, else an idle-time badge from `lastActivity`.
 
+`reachable` and `alive` are independent, backward-compatible status fields
+(absence means `true`):
+
+- `reachable:true, alive:true` is a live tmux session.
+- `reachable:false` is a last-known row from an unreachable server. Its tmux
+  state is unknown, so it must not be treated as ended or pruned.
+- `reachable:true, alive:false` is a persisted **ended-session placeholder**:
+  the server answered, but tmux no longer contains the metadata-tracked
+  session (for example after a host reboot or an out-of-band kill). It remains
+  in the list until explicit deletion. Runtime-only fields are empty/false and
+  the push poll ignores the row.
+
+This distinction is load-bearing: network failure must not masquerade as
+process death, and process death must not silently remove the user's session
+entry.
+
 ### `POST /api/sessions` → 201
 
 Create a session. Body (all fields optional):
 
 ```json
-{ "name": "my-session", "cwd": "/home/me/project" }
+{
+  "name": "my-session",
+  "cwd": "/home/me/project",
+  "org": "Sparklab",
+  "project": "terminal",
+  "serverId": "local"
+}
 ```
 
-Response: `{ "id": "web-…", "name": "…", "createdAt": 1752444000000 }`
+Response: `{ "id": "local/web-…", "name": "…", "createdAt": 1752444000000, "serverId": "local" }`
 
 ### `GET /api/sessions/:id/scrollback?lines=N` → 200
 
@@ -88,7 +116,11 @@ Executing a command is therefore always two explicit calls: `{text}` then `{keys
 
 ### `DELETE /api/sessions/:id` → 204
 
-Kills the tmux session (the **only** place `tmux kill-session` is ever run). No body either way.
+For a live session, kills tmux and removes its metadata; this remains the
+**only** user-session path that runs `tmux kill-session`. For an ended-session
+placeholder (`alive:false`), removes metadata only because no tmux process
+exists. Deletion refuses to infer death while the server is unreachable. No
+response body.
 
 ### Web Push endpoints: `/api/push/*`
 
@@ -114,7 +146,7 @@ Global push preferences (single-user), stored in the gitignored `push-settings.j
 
 **`muted` on `PATCH /api/sessions/:id`.** The session PATCH additionally accepts `muted:boolean` (alongside name/org/project), persisted to the `sessions.json` sidecar and echoed in the response; `GET /api/sessions` rows carry `muted`. A muted session is skipped in the poll loop (server-side enforcement).
 
-**Poll loop + SW push contract.** While ≥1 subscription exists AND VAPID is configured, the gateway polls `listSessions()` every `PUSH_POLL_INTERVAL_MS` (default 4s; env-overridable). Per reachable session it tracks `pane_current_command` (`""` = unknown, never a trigger) and times a job on shell→non-shell:
+**Poll loop + SW push contract.** While ≥1 subscription exists AND VAPID is configured, the gateway polls `listSessions()` every `PUSH_POLL_INTERVAL_MS` (default 4s; env-overridable). Per reachable, live session it tracks `pane_current_command` (`""` = unknown, never a trigger) and times a job on shell→non-shell. Unreachable and `alive:false` rows are skipped, so an out-of-band tmux death cannot produce a false "job finished" push:
 
 - **Finish** (non-shell→shell): unless the session is `muted` or the duration is below `minDurationMs`, it sends a Web Push (a `404`/`410` prunes the endpoint). The first poll after any (re)start only baselines and notifies nothing.
 - **Still-running** (opt-in `notifyOnStart`): one alert when a timed job crosses `minDurationMs` while still running.

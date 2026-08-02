@@ -24,10 +24,11 @@ later (e.g. `prod`, `debug`).
 
 **Groups are derived, not entities.** There is no org/project registry, no
 create-org endpoint, no empty groups to manage. An org exists exactly while
-at least one session carries it; the metadata sidecar's existing
-`pruneToExisting()` makes the whole thing self-cleaning when sessions die.
-This keeps the "tmux is the source of truth, metadata is a sidecar"
-principle intact.
+at least one session row carries it. Metadata-tracked sessions that disappear
+from tmux now remain as `alive:false` placeholders until explicit deletion, so
+their group context remains visible instead of being silently pruned. tmux is
+still the source of truth for whether a process is live; metadata is the
+durable display/context sidecar.
 
 Validation rules (enforced by the gateway):
 
@@ -100,6 +101,10 @@ Validation rules (enforced by the gateway):
   to…" opens a small dialog backed by `PATCH /api/sessions/:id` (new
   `useUpdateSession` mutation in `use-sessions.ts`, invalidating the
   sessions query).
+- **Ended sessions:** `reachable:true, alive:false` rows render dimmed with a
+  "session ended" status. Their action menu offers Reconnect (a new session
+  prefilled with the same server/name/org/project) and Delete (metadata-only).
+  The original cwd is not persisted, so reconnect uses the server default.
 - **Collapsed 52px rail:** unchanged flat list (no room for hierarchy);
   tooltips gain an `org / project` line.
 - **Mobile:** free — the drawer reuses `SessionList`, so grouping appears

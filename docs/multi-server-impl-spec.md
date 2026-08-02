@@ -109,16 +109,15 @@ the existing `session` param** — `connection.ts:94` already does
 decodes back cleanly. This means **`connection.ts` needs no change** beyond
 `sessionId` now being the qualified id. One seam, not two.
 
-**[surprise] metadata prune must become per-server.** `metadata.js` keys records
-by session id and `pruneToExisting(liveIds)` drops any key not in `liveIds`
-(`metadata.js:74`). With multi-server, `listSessions` only sees live ids from
-_reachable_ servers; a global prune would wipe metadata (name/org/project) for
-every session on an unreachable server. **BE must:** (a) key metadata by the
-**qualified id** (`local/web-…`; migrate bare keys as local on load), and
-(b) prune only within the namespaces of servers that actually responded —
-pass the reachable-server set, never prune an unreachable server's namespace.
-The sidecar thereby doubles as the "last-known" cache that feeds the
-`reachable:false` entries.
+**Implementation update — metadata is no longer auto-pruned.** The original
+MVP required per-reachable-server pruning. That behavior was subsequently
+reversed: `listSessions()` keeps metadata for both unreachable servers and
+sessions missing from tmux on reachable servers. The former become
+`reachable:false` last-known rows; the latter become
+`reachable:true, alive:false` ended-session placeholders. Both persist until
+explicit DELETE. Metadata remains keyed by qualified id (`local/web-…`; bare
+legacy keys migrate to local), and the sidecar supplies both kinds of retained
+rows.
 
 **Frontend:**
 
@@ -156,13 +155,20 @@ rule above and the URL normalization.
 ## Deliverable 2 — "unreachable ≠ dead": the frozen wire representation
 
 **Decision:** `GET /api/sessions` stays a **flat array** (top-level shape
-unchanged, backward-compatible). Each entry gains `serverId` and `reachable`.
+unchanged, backward-compatible). Each entry gains `serverId`, `reachable`, and
+`alive`.
 A **reachable** server contributes its live `tmux ls` rows (`reachable:true`).
 An **unreachable** server contributes its **last-known rows reconstructed from
 the metadata sidecar** (`reachable:false`) — they are **never omitted and never
 pruned**. Per-server reachability is _also_ authoritatively exposed by
 `GET /api/servers`, so the FE can grey a whole group header even if that server
 had no known sessions.
+
+If a server is reachable but a metadata-tracked session is absent from tmux,
+the gateway contributes an ended placeholder with `reachable:true` and
+`alive:false`. Live and older-gateway rows treat absent `alive` as true. The UI
+must keep ended rows, disable actions that require a process, and offer explicit
+Delete or Reconnect; the push poll must skip them.
 
 **Why this shape:** last-known sessions must not vanish on a flaky link (that
 would strand `resolveActiveSession` and blank the sidebar). The sidecar already
@@ -300,7 +306,7 @@ BE works entirely under `apps/terminal-gateway/`; FE entirely under
       (no `/`, unique). Key-based ssh only; never store passwords.
 - [ ] `src/server.js` — add plain-JS `parseSessionRef`/`formatSessionRef`
       (comment: canonical copy in shared-types) and `serverExecArgv(server,
-    tmuxArgs, {tty})` with ControlMaster/ControlPersist flags (§6).
+  tmuxArgs, {tty})` with ControlMaster/ControlPersist flags (§6).
 - [ ] `src/server.js` — thread `(serverId, tmuxName)` through both exec seams
       and all six REST handlers per the Deliverable-1 table (control seam +
       WS-attach pty spawn).

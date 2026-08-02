@@ -13,6 +13,7 @@
     "test:fs": "node test/fs-endpoints.js",
     "test:git": "node test/git-endpoints.js",
     "test:push": "node test/push-endpoints.js",
+    "test:dead-session": "node test/dead-session.js",
     "test:codex": "node test/codex-endpoints.js",
     "test:kanban": "node test/kanban-endpoints.js",
     "test:pm": "node test/pm-endpoints.js",

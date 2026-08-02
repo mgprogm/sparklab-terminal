@@ -21,7 +21,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data");
+const DATA_DIR =
+  process.env.GATEWAY_DATA_DIR || path.join(__dirname, "..", "data");
 const FILE = path.join(DATA_DIR, "sessions.json");
 const TMP = path.join(DATA_DIR, "sessions.json.tmp");
 

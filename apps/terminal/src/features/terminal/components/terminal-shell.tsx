@@ -200,7 +200,7 @@ export function TerminalShell() {
       ? parseSessionRef(activeSessionId).serverId
       : null;
   useEffect(() => {
-    if (activeSessionId) {
+    if (activeSessionId && sessionsLoaded) {
       expandAncestors(
         activeOrg,
         activeProject,
@@ -209,6 +209,7 @@ export function TerminalShell() {
     }
   }, [
     activeSessionId,
+    sessionsLoaded,
     activeOrg,
     activeProject,
     activeServerId,
@@ -402,6 +403,54 @@ export function TerminalShell() {
             {activeMeta?.name ??
               (activeSessionId ? activeSessionId : "no session")}
           </span>
+          {activeMeta &&
+            (activeMeta.org || (activeServer && servers.length > 1)) && (
+              <span className="text-muted-foreground flex min-w-0 items-center gap-1 text-xs">
+                <span aria-hidden="true">·</span>
+                {servers.length > 1 && activeServer && (
+                  <>
+                    <button
+                      type="button"
+                      className="hover:text-foreground max-w-24 truncate transition-colors"
+                      onClick={() => {
+                        // No-op stub until jump-to-level navigation is added.
+                      }}
+                      title={activeServer.name}
+                    >
+                      {activeServer.name}
+                    </button>
+                    {activeMeta.org && <span aria-hidden="true">/</span>}
+                  </>
+                )}
+                {activeMeta.org && (
+                  <>
+                    <button
+                      type="button"
+                      className="hover:text-foreground max-w-24 truncate transition-colors"
+                      onClick={() => {
+                        // No-op stub until jump-to-level navigation is added.
+                      }}
+                      title={activeMeta.org}
+                    >
+                      {activeMeta.org}
+                    </button>
+                    {activeMeta.project && <span aria-hidden="true">/</span>}
+                  </>
+                )}
+                {activeMeta.project && (
+                  <button
+                    type="button"
+                    className="hover:text-foreground max-w-24 truncate transition-colors"
+                    onClick={() => {
+                      // No-op stub until jump-to-level navigation is added.
+                    }}
+                    title={activeMeta.project}
+                  >
+                    {activeMeta.project}
+                  </button>
+                )}
+              </span>
+            )}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

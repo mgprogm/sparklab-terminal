@@ -233,7 +233,13 @@ function startServer(port, env) {
   return new Promise((resolve, reject) => {
     const proc = spawn("node", ["src/server.js"], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", ...env },
+      env: {
+        ...process.env,
+        PORT: String(port),
+        HOST: "127.0.0.1",
+        GATEWAY_DATA_DIR: scratch,
+        ...env,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     // Accumulate ALL stdout so tests can observe the gateway's structured
@@ -750,6 +756,20 @@ async function main() {
     assert(pollHits.length > hitsBefore, "transition push was not delivered");
     console.log(
       "  ok: live poll loop fired + delivered a push on a real job-finish transition",
+    );
+  }
+
+  // --- direct tmux death: dead placeholder must not look like job finish ---
+  {
+    const { sid, tmuxName } = await runJob("push-dead-session", "sleep 30");
+    await sleep(700); // ensure at least one poll observed the running command
+    execFileSync("tmux", ["kill-session", "-t", tmuxName], {
+      stdio: "ignore",
+    });
+    const quiet = await expectNoNotify(gw, (e) => e.sessionId === sid, 2500);
+    assert(quiet, "dead session produced a spurious job-finished notification");
+    console.log(
+      "  ok: direct tmux death produced NO job-finished notification",
     );
   }
 

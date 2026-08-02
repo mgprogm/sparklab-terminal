@@ -760,15 +760,24 @@ async function listSessions() {
         ok = true;
       } catch (err) {
         // Local: "no server running" is normal => reachable with zero sessions.
-        // ssh: a failure means the host couldn't be reached this tick.
+        // Remote tmux can also report "no server running" while SSH itself is
+        // healthy (for example, after a host reboot). Probe SSH separately so
+        // that case becomes reachable with zero live sessions, while a genuine
+        // host outage still reconstructs last-known reachable:false rows.
         if (server.type === "local") {
           ok = true;
           out = "";
         } else {
-          ok = false;
-          console.warn(
-            `[api] list on server "${server.id}" failed: ${err.message}`,
-          );
+          const probe = await probeServer(server, { force: true });
+          if (probe.reachability === "ok") {
+            ok = true;
+            out = "";
+          } else {
+            ok = false;
+            console.warn(
+              `[api] list on server "${server.id}" failed: ${err.message}`,
+            );
+          }
         }
       }
       if (!ok) return; // unreachable: reconstructed from the sidecar below
@@ -801,6 +810,7 @@ async function listSessions() {
           exitCode,
           serverId: server.id,
           reachable: true,
+          alive: true,
         });
       }
     }),
@@ -833,9 +843,43 @@ async function listSessions() {
     }
   }
 
-  // Prune metadata ONLY within the servers that actually responded, so an
-  // unreachable server's last-known metadata is preserved as the cache.
-  metadata.pruneToExisting(liveIds, reachableServerIds);
+  // Synthesize rows for sessions whose server responded fine this tick but
+  // whose tmux session was NOT in the live output (e.g. host rebooted, or the
+  // tmux session was killed outside the gateway). These are "dead"
+  // placeholders: reachable:true (we CAN reach the server), alive:false (the
+  // specific session is gone from tmux). They persist until the user
+  // explicitly deletes them — no TTL, no auto-expiry (intentional).
+  //
+  // DELIBERATE BEHAVIOR REVERSAL: metadata for such sessions used to be pruned
+  // here via metadata.pruneToExisting(), which is now removed so dead sessions
+  // stay visible in the sidebar instead of vanishing without a trace.
+  const liveSet = new Set(liveIds);
+  for (const [qid, m] of Object.entries(meta)) {
+    const sid = parseSessionRef(qid).serverId;
+    if (!reachableServerIds.has(sid)) continue; // unreachable server: handled above
+    if (liveSet.has(qid)) continue; // live: already in sessions[]
+    const tmux = parseSessionRef(qid).tmuxName;
+    if (!tmux.startsWith(PREFIX)) continue;
+    sessions.push({
+      id: qid,
+      name: m.name || tmux,
+      createdAt: m.createdAt || null,
+      tags: m.tags || [],
+      currentCommand: "",
+      attached: false,
+      attachedClients: 0,
+      lastActivity: null,
+      org: m.org ?? null,
+      project: m.project ?? null,
+      muted: m.muted ?? false,
+      serverId: sid,
+      reachable: true,
+      alive: false,
+    });
+  }
+  // metadata.pruneToExisting() is deliberately NOT called here anymore. Dead
+  // session metadata persists until the user explicitly deletes via
+  // DELETE /api/sessions/:id.
   return sessions;
 }
 
@@ -921,6 +965,7 @@ async function pushPollTick() {
     // a fabricated "" — letting that overwrite state would fire spurious pushes
     // on flap (job -> "" -> job). Skip them entirely => a flap is a no-op.
     if (!s.reachable) continue;
+    if (s.alive === false) continue; // Dead session: no tmux, no job to track.
     seen.add(s.id);
     const curr = s.currentCommand || "";
     const currShell = isShellCommand(curr);
@@ -6476,7 +6521,13 @@ async function handleApi(req, res, url) {
     }
     const id = formatSessionRef(serverId, tmuxName);
     if (!(await sessionExists(server, tmuxName))) {
-      return sendJson(res, 404, { error: "session not found" });
+      const probe = await probeServer(server, { force: true });
+      if (
+        probe.reachability !== "ok" ||
+        (!(await sessionExists(server, tmuxName)) && !metadata.get(id))
+      ) {
+        return sendJson(res, 404, { error: "session not found" });
+      }
     }
     let body = {};
     try {
@@ -6583,7 +6634,26 @@ async function handleApi(req, res, url) {
     }
     const id = formatSessionRef(serverId, tmuxName);
     if (!(await sessionExists(server, tmuxName))) {
-      return sendJson(res, 404, { error: "session not found" });
+      const probe = await probeServer(server, { force: true });
+      const recoveredLiveSession =
+        probe.reachability === "ok" && (await sessionExists(server, tmuxName));
+      // The tmux session is gone. If metadata still exists (a "dead" session
+      // placeholder), clean it up and return 204 — no kill-session needed since
+      // there's nothing to kill.
+      if (
+        !recoveredLiveSession &&
+        probe.reachability === "ok" &&
+        metadata.get(id)
+      ) {
+        metadata.remove(id);
+        console.log(`[api] deleted dead session metadata "${id}"`);
+        res.writeHead(204);
+        res.end();
+        return true;
+      }
+      if (!recoveredLiveSession) {
+        return sendJson(res, 404, { error: "session not found" });
+      }
     }
     try {
       // THE ONE INTENTIONAL KILL. This is the only place the gateway terminates

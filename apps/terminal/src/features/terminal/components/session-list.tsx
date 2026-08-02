@@ -28,6 +28,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@sparklab/ui/components/ui/dropdown-menu";
 import { Input } from "@sparklab/ui/components/ui/input";
@@ -52,6 +53,7 @@ import {
   LogOut,
   MoreHorizontal,
   Plus,
+  RefreshCw,
   Server,
   Settings,
   Sparkles,
@@ -59,7 +61,7 @@ import {
   Trash2,
   Unplug,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   groupSessions,
@@ -113,6 +115,11 @@ function formatRelativeTime(epochSeconds: number): string {
 
 function isRunning(cmd: string): boolean {
   return !!cmd && !SHELLS.has(cmd);
+}
+
+/** Count running sessions in a list. */
+function countRunning(sessions: SessionInfo[]): number {
+  return sessions.filter((s) => isRunning(s.currentCommand)).length;
 }
 
 /** Collect unique org values from sessions. */
@@ -231,6 +238,10 @@ export function SessionList({
   const [moveProject, setMoveProject] = useState("");
   const [moveBusy, setMoveBusy] = useState(false);
 
+  // Track previous running state for aria-live transition announcements.
+  const prevRunningRef = useRef<Map<string, boolean>>(new Map());
+  const [announcement, setAnnouncement] = useState("");
+
   // Compute tree and grouping flag.
   const grouped = useMemo(() => hasAnyGrouping(sessions), [sessions]);
   const tree = useMemo(() => groupSessions(sessions), [sessions]);
@@ -238,6 +249,34 @@ export function SessionList({
     () => (grouped ? flattenTree(tree) : sessions),
     [grouped, tree, sessions],
   );
+
+  useEffect(() => {
+    const prevMap = prevRunningRef.current;
+    const announcements: string[] = [];
+
+    for (const s of sessions) {
+      const wasRunning = prevMap.get(s.id);
+      const nowRunning = isRunning(s.currentCommand);
+
+      if (wasRunning === true && !nowRunning) {
+        announcements.push(`Session ${s.name} finished`);
+      } else if (wasRunning === false && nowRunning) {
+        announcements.push(
+          `Session ${s.name} now running: ${s.currentCommand}`,
+        );
+      }
+    }
+
+    const nextMap = new Map<string, boolean>();
+    for (const s of sessions) {
+      nextMap.set(s.id, isRunning(s.currentCommand));
+    }
+    prevRunningRef.current = nextMap;
+
+    if (announcements.length > 0) {
+      setAnnouncement(announcements.join(". "));
+    }
+  }, [sessions]);
 
   // Datalist suggestions.
   const orgSuggestions = useMemo(() => uniqueOrgs(sessions), [sessions]);
@@ -326,6 +365,25 @@ export function SessionList({
     onDialogClose?.();
   };
 
+  const handleReconnect = useCallback(
+    (s: SessionInfo) => {
+      // Create a replacement session on the same server, pre-filled with the
+      // dead session's org/project/name. cwd is NOT available (not persisted
+      // in metadata) — falls back to the server's default working directory.
+      const params: CreateSessionParams = { name: s.name };
+      if (s.org) params.org = s.org;
+      if (s.project) params.project = s.project;
+      if (multiServer && s.serverId) params.serverId = s.serverId;
+
+      void Promise.resolve(onCreateSession(params))
+        .then(() => {
+          void Promise.resolve(onDeleteSession(s.id)).catch(() => {});
+        })
+        .catch(() => {});
+    },
+    [multiServer, onCreateSession, onDeleteSession],
+  );
+
   // ---- Move/rename handlers ----
   const openMoveDialog = useCallback((s: SessionInfo) => {
     setMoveTarget(s);
@@ -379,6 +437,7 @@ export function SessionList({
     // ("couldn't ask" != "dead"). An unknown (orphan) serverId is treated the
     // same — muted, never destructive, never dropped.
     const unreachable = multiServer && (!server || isServerUnreachable(server));
+    const dead = !unreachable && s.alive === false && s.reachable !== false;
     const serverName = server?.name ?? sessionServerId(s);
 
     const tooltipLines: string[] = [s.name];
@@ -396,7 +455,7 @@ export function SessionList({
             className={cn(
               "group relative flex w-full items-center rounded-sm transition-colors",
               collapsed && "justify-center",
-              unreachable && "opacity-60",
+              (unreachable || dead || s.muted) && "opacity-60",
               s.id === activeSessionId
                 ? "border-l-primary bg-secondary border-l-2"
                 : "hover:bg-accent border-l-2 border-l-transparent",
@@ -417,11 +476,14 @@ export function SessionList({
               <span
                 className={cn(
                   "size-[7px] shrink-0 rounded-full",
-                  isRunning(s.currentCommand)
-                    ? "bg-chart-1"
-                    : "bg-muted-foreground",
-                  s.attached && "ring-chart-1/30 ring-2",
-                  agentActiveSessionIds.includes(s.id) &&
+                  dead
+                    ? "bg-muted-foreground/50"
+                    : isRunning(s.currentCommand)
+                      ? "bg-chart-1"
+                      : "bg-muted-foreground",
+                  !dead && s.attached && "ring-chart-1/30 ring-2",
+                  !dead &&
+                    agentActiveSessionIds.includes(s.id) &&
                     "ring-chart-2/40 ring-2",
                 )}
                 title={
@@ -434,23 +496,36 @@ export function SessionList({
               {/* Name on line 1; command + status share line 2 */}
               {!collapsed && (
                 <div className="min-w-0 flex-1">
-                  <span
-                    className={cn(
-                      "block truncate text-sm",
-                      s.id === activeSessionId
-                        ? "text-foreground"
-                        : "text-secondary-foreground",
+                  <div className="flex min-w-0 items-center">
+                    <span
+                      className={cn(
+                        "min-w-0 truncate text-sm",
+                        s.id === activeSessionId
+                          ? "text-foreground"
+                          : "text-secondary-foreground",
+                      )}
+                    >
+                      {s.name}
+                    </span>
+                    {s.muted && (
+                      <BellOff
+                        className="text-muted-foreground ml-1 inline size-3 shrink-0"
+                        aria-label="Muted"
+                      />
                     )}
-                  >
-                    {s.name}
-                  </span>
+                  </div>
                   <span className="flex min-w-0 items-baseline gap-1.5 text-xs">
-                    {s.currentCommand && (
+                    {dead && (
+                      <span className="text-muted-foreground shrink-0 italic">
+                        session ended
+                      </span>
+                    )}
+                    {!dead && s.currentCommand && (
                       <span className="text-muted-foreground min-w-0 truncate font-mono">
                         {s.currentCommand}
                       </span>
                     )}
-                    {agentActiveSessionIds.includes(s.id) && (
+                    {!dead && agentActiveSessionIds.includes(s.id) && (
                       <span className="text-chart-2 flex shrink-0 items-center gap-1">
                         {s.currentCommand && (
                           <span
@@ -465,7 +540,8 @@ export function SessionList({
                       </span>
                     )}
                     {/* B2: Status badge */}
-                    {s.attachedClients !== undefined &&
+                    {!dead &&
+                    s.attachedClients !== undefined &&
                     s.attachedClients > 0 ? (
                       <span className="text-chart-1 shrink-0">
                         {s.currentCommand && (
@@ -480,7 +556,7 @@ export function SessionList({
                           ? "1 viewer"
                           : `${String(s.attachedClients)} viewers`}
                       </span>
-                    ) : s.lastActivity != null ? (
+                    ) : !dead && s.lastActivity != null ? (
                       <span className="text-muted-foreground shrink-0">
                         {s.currentCommand && (
                           <span aria-hidden="true" className="mr-1.5">
@@ -490,7 +566,7 @@ export function SessionList({
                         {formatRelativeTime(s.lastActivity)}
                       </span>
                     ) : null}
-                    {unreachable && (
+                    {!dead && unreachable && (
                       <span className="text-muted-foreground shrink-0">
                         unreachable
                       </span>
@@ -505,67 +581,100 @@ export function SessionList({
                 without hovering — works for local and remote sessions alike. */}
             {!collapsed && (
               <div className="mr-1 flex shrink-0 items-center gap-0.5">
-                {onUpdateSession && (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:bg-accent hover:text-secondary-foreground pointer-coarse:p-2 rounded-sm p-1 transition-colors"
-                        title="Session actions"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <MoreHorizontal className="size-3.5" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-48">
-                      <DropdownMenuItem onClick={() => openMoveDialog(s)}>
-                        Rename / Move to...
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:bg-accent hover:text-secondary-foreground pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px] pointer-coarse:p-2 flex items-center justify-center rounded-sm p-1 transition-colors"
+                      title="Session actions"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <MoreHorizontal className="size-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48">
+                    {onUpdateSession && (
+                      <>
+                        <DropdownMenuItem
+                          disabled={unreachable}
+                          title={
+                            unreachable
+                              ? "Session's server is unreachable"
+                              : undefined
+                          }
+                          onClick={() => openMoveDialog(s)}
+                        >
+                          Rename / Move to...
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={unreachable || dead}
+                          title={
+                            unreachable
+                              ? "Session's server is unreachable"
+                              : dead
+                                ? "Session has ended"
+                                : undefined
+                          }
+                          onClick={() =>
+                            void onUpdateSession({ id: s.id, muted: !s.muted })
+                          }
+                        >
+                          {s.muted ? (
+                            <>
+                              <Bell className="size-3.5" />
+                              Unmute notifications
+                            </>
+                          ) : (
+                            <>
+                              <BellOff className="size-3.5" />
+                              Mute notifications
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                    {dead && (
+                      <DropdownMenuItem onClick={() => handleReconnect(s)}>
+                        <RefreshCw className="size-3.5" />
+                        Reconnect
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() =>
-                          void onUpdateSession({ id: s.id, muted: !s.muted })
-                        }
-                      >
-                        {s.muted ? (
-                          <>
-                            <Bell className="size-3.5" />
-                            Unmute notifications
-                          </>
-                        ) : (
-                          <>
-                            <BellOff className="size-3.5" />
-                            Mute notifications
-                          </>
-                        )}
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )}
-                <button
-                  type="button"
-                  className="text-muted-foreground hover:bg-destructive/20 hover:text-destructive pointer-coarse:p-2 rounded-sm p-1 transition-all"
-                  title="Delete session (kills the running job)"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteTarget(s);
-                  }}
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
+                    )}
+                    {(onUpdateSession || dead) && <DropdownMenuSeparator />}
+                    <DropdownMenuItem
+                      disabled={unreachable}
+                      title={
+                        unreachable
+                          ? "Session's server is unreachable"
+                          : undefined
+                      }
+                      className="focus:text-destructive data-[highlighted]:text-destructive focus:[&_svg]:text-destructive data-[highlighted]:[&_svg]:text-destructive"
+                      onClick={() => setDeleteTarget(s)}
+                    >
+                      <Trash2 className="size-3.5" />
+                      Delete session
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             )}
           </div>
         </TooltipTrigger>
-        {(collapsed || unreachable) && (
+        {(collapsed || unreachable || dead) && (
           <TooltipContent side="right">
             {collapsed ? (
               tooltipLines.map((line, i) => <div key={i}>{line}</div>)
-            ) : (
+            ) : dead ? (
+              <div className="max-w-56">
+                This session&apos;s tmux process is no longer running (e.g. the
+                host rebooted). Delete to remove, or Reconnect to start a new
+                session with the same settings.
+              </div>
+            ) : unreachable ? (
               <div className="max-w-56">
                 This server is unreachable. The session is still running there —
                 the gateway just can&apos;t reach {serverName} right now.
               </div>
-            )}
+            ) : null}
           </TooltipContent>
         )}
       </Tooltip>
@@ -575,9 +684,14 @@ export function SessionList({
   };
 
   // ---- Server header renderer (multi-server only) ----
-  const renderServerHeader = (server: ServerInfo, sessionCount: number) => {
+  const renderServerHeader = (
+    server: ServerInfo,
+    sessionCount: number,
+    groupSessions: SessionInfo[],
+  ) => {
     const key = serverCollapseKey(server.id);
     const isCollapsed = !!collapsedGroups[key];
+    const runningCount = countRunning(groupSessions);
     const status = serverStatus(server);
     const unreachable = status === "unreachable";
 
@@ -614,6 +728,12 @@ export function SessionList({
           <span className="text-muted-foreground shrink-0 text-[10px] font-normal tabular-nums">
             {sessionCount}
           </span>
+          {isCollapsed && runningCount > 0 && (
+            <span className="text-chart-1 ml-1 flex shrink-0 items-center gap-1 text-[10px] tabular-nums">
+              <span className="bg-chart-1 size-[5px] rounded-full" />
+              {runningCount}
+            </span>
+          )}
         </button>
         <button
           type="button"
@@ -643,10 +763,12 @@ export function SessionList({
   const renderOrgHeader = (
     orgName: string | null,
     sessionCount: number,
+    groupSessions: SessionInfo[],
     serverId: string | null = null,
   ) => {
     const key = orgCollapseKey(serverId, orgName);
     const isCollapsed = !!collapsedGroups[key];
+    const runningCount = countRunning(groupSessions);
     const label = orgName ?? "Ungrouped";
 
     return (
@@ -666,6 +788,12 @@ export function SessionList({
           <span className="text-muted-foreground ml-auto shrink-0 text-[10px] font-normal tabular-nums">
             {sessionCount}
           </span>
+          {isCollapsed && runningCount > 0 && (
+            <span className="text-chart-1 ml-1 flex shrink-0 items-center gap-1 text-[10px] tabular-nums">
+              <span className="bg-chart-1 size-[5px] rounded-full" />
+              {runningCount}
+            </span>
+          )}
         </button>
         {orgName && (
           <button
@@ -688,10 +816,12 @@ export function SessionList({
     orgName: string | null,
     projectName: string,
     sessionCount: number,
+    groupSessions: SessionInfo[],
     serverId: string | null = null,
   ) => {
     const key = projectCollapseKey(serverId, orgName, projectName);
     const isCollapsed = !!collapsedGroups[key];
+    const runningCount = countRunning(groupSessions);
 
     return (
       <div key={`proj-${key}`} className="group/proj flex items-center pl-4">
@@ -710,6 +840,12 @@ export function SessionList({
           <span className="text-muted-foreground ml-auto shrink-0 text-[10px] font-normal tabular-nums">
             {sessionCount}
           </span>
+          {isCollapsed && runningCount > 0 && (
+            <span className="text-chart-1 ml-1 flex shrink-0 items-center gap-1 text-[10px] tabular-nums">
+              <span className="bg-chart-1 size-[5px] rounded-full" />
+              {runningCount}
+            </span>
+          )}
         </button>
         {orgName && (
           <button
@@ -739,9 +875,17 @@ export function SessionList({
     for (const orgGroup of orgTree) {
       const orgKey = orgCollapseKey(serverId, orgGroup.org);
       const orgCollapsed = !!collapsedGroups[orgKey];
+      const orgSessions = orgGroup.projects.flatMap(
+        (project) => project.sessions,
+      );
 
       elements.push(
-        renderOrgHeader(orgGroup.org, orgGroup.sessionCount, serverId),
+        renderOrgHeader(
+          orgGroup.org,
+          orgGroup.sessionCount,
+          orgSessions,
+          serverId,
+        ),
       );
 
       if (!orgCollapsed) {
@@ -759,6 +903,7 @@ export function SessionList({
                 orgGroup.org,
                 projGroup.project,
                 projGroup.sessions.length,
+                projGroup.sessions,
                 serverId,
               ),
             );
@@ -798,10 +943,35 @@ export function SessionList({
 
     for (const group of serverGroups) {
       const { server } = group;
-      elements.push(renderServerHeader(server, group.sessionCount));
+      elements.push(
+        renderServerHeader(server, group.sessionCount, group.sessions),
+      );
 
       const serverCollapsed = !!collapsedGroups[serverCollapseKey(server.id)];
       if (serverCollapsed) continue;
+
+      if (group.sessionCount === 0 && !(loading && sessions.length === 0)) {
+        const unreachable = isServerUnreachable(server);
+        elements.push(
+          <div
+            key={`server-empty-${server.id}`}
+            className="px-4 py-3 text-center"
+          >
+            <p className="text-muted-foreground text-xs">
+              No sessions on {server.name} yet.
+            </p>
+            <button
+              type="button"
+              disabled={unreachable}
+              className="text-primary mt-1 text-xs underline disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => openCreateDialog(undefined, undefined, server.id)}
+            >
+              New session here
+            </button>
+          </div>,
+        );
+        continue;
+      }
 
       if (group.grouped) {
         // Per-server org tree (grouped-vs-flat decided per subset, not global).
@@ -883,13 +1053,24 @@ export function SessionList({
           {/* Initial-load indicator: shown only before the first successful
               fetch so the "No sessions yet" empty state can't flash early. */}
           {loading && sessions.length === 0 && (
-            <div className="flex items-center justify-center gap-2 py-8">
-              <Loader2 className="text-muted-foreground size-4 animate-spin" />
-              {!collapsed && (
-                <span className="text-muted-foreground text-xs">
-                  Loading sessions…
-                </span>
-              )}
+            <div className="space-y-1">
+              {Array.from({ length: 4 }, (_, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "flex items-center rounded-sm",
+                    collapsed ? "justify-center py-2" : "gap-2.5 px-2.5 py-2",
+                  )}
+                >
+                  <span className="bg-muted size-[7px] shrink-0 animate-pulse rounded-full" />
+                  {!collapsed && (
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <span className="bg-muted block h-3.5 w-24 animate-pulse rounded" />
+                      <span className="bg-muted block h-2.5 w-16 animate-pulse rounded" />
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
@@ -1170,8 +1351,10 @@ export function SessionList({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete session</AlertDialogTitle>
             <AlertDialogDescription>
-              Delete &quot;{deleteTarget?.name ?? deleteTarget?.id}&quot;? This
-              kills the running job.
+              Delete &quot;{deleteTarget?.name ?? deleteTarget?.id}&quot;?
+              {deleteTarget?.alive === false
+                ? " This removes the session entry."
+                : " This kills the running job."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1301,6 +1484,11 @@ export function SessionList({
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Visually hidden aria-live region for session state transitions. */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {announcement}
+      </div>
     </>
   );
 }

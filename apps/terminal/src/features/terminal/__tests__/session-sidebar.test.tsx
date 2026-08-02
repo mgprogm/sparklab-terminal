@@ -116,9 +116,11 @@ describe("SessionSidebar", () => {
       const user = userEvent.setup();
       renderSidebar();
 
-      // Find the delete button for first session
-      const deleteButtons = screen.getAllByTitle(/delete session/i);
-      await user.click(deleteButtons[0]!);
+      const menuButtons = screen.getAllByTitle("Session actions");
+      await user.click(menuButtons[0]!);
+      await user.click(
+        screen.getByRole("menuitem", { name: /delete session/i }),
+      );
 
       expect(
         screen.getByRole("heading", { name: /delete session/i }),
@@ -130,8 +132,11 @@ describe("SessionSidebar", () => {
       const user = userEvent.setup();
       const { props } = renderSidebar();
 
-      const deleteButtons = screen.getAllByTitle(/delete session/i);
-      await user.click(deleteButtons[0]!);
+      const menuButtons = screen.getAllByTitle("Session actions");
+      await user.click(menuButtons[0]!);
+      await user.click(
+        screen.getByRole("menuitem", { name: /delete session/i }),
+      );
 
       const deleteAction = screen.getByRole("button", { name: /^delete$/i });
       await user.click(deleteAction);
@@ -143,8 +148,11 @@ describe("SessionSidebar", () => {
       const user = userEvent.setup();
       const { props } = renderSidebar();
 
-      const deleteButtons = screen.getAllByTitle(/delete session/i);
-      await user.click(deleteButtons[0]!);
+      const menuButtons = screen.getAllByTitle("Session actions");
+      await user.click(menuButtons[0]!);
+      await user.click(
+        screen.getByRole("menuitem", { name: /delete session/i }),
+      );
 
       await user.click(screen.getByRole("button", { name: /cancel/i }));
 

@@ -167,6 +167,17 @@ export const SessionInfoSchema = z.object({
    * Absent from older gateways => treat as true (reachable).
    */
   reachable: z.boolean().optional(),
+  /**
+   * Whether the session's tmux process is alive on its server:
+   * - true (or absent) => found in live `tmux ls` output.
+   * - false => the server IS reachable but this session is GONE from tmux
+   *   (e.g. the host rebooted, or it was killed outside the gateway). A "dead"
+   *   placeholder from the metadata sidecar, persisted until the user
+   *   explicitly deletes it. Distinct from `reachable: false` (server itself
+   *   unreachable — session might still be alive remotely, just unknown).
+   * Absent from older gateways => treat as true (alive).
+   */
+  alive: z.boolean().optional(),
 });
 export type SessionInfo = z.infer<typeof SessionInfoSchema>;
 
