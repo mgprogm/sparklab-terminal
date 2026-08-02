@@ -203,12 +203,21 @@ export function FileExplorerDialog({
     }
   }, [open, sessionId]);
 
-  // Seed the current directory from the first successful listing.
+  // Seed the current directory from the first successful listing. Must
+  // ignore placeholder data (keepPreviousData carries the last-viewed
+  // directory across close/reopen) — otherwise the dialog reseeds to
+  // whatever was last browsed instead of the terminal's live cwd, since the
+  // placeholder is available synchronously before the fresh cwd resolution
+  // (which re-queries tmux) has a chance to land.
   useEffect(() => {
-    if (listQuery.data && currentPath === null) {
+    if (
+      listQuery.data &&
+      !listQuery.isPlaceholderData &&
+      currentPath === null
+    ) {
       setCurrentPath(listQuery.data.path);
     }
-  }, [listQuery.data, currentPath]);
+  }, [listQuery.data, listQuery.isPlaceholderData, currentPath]);
 
   const canWrite = currentPath != null && !unreachable;
 
