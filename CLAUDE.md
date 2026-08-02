@@ -2,19 +2,36 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Explore via the knowledge graph first (graphify)
+## Repository exploration (graphify)
 
-This repo has a graphify knowledge graph in `graphify-out/` (gitignored, regenerable). Use it **before** grep/find sweeps — one read of the report answers most structural questions in far fewer tokens:
+This repo has a regenerable, gitignored knowledge graph in `graphify-out/`. Use
+the following progression to minimize broad searches while keeping conclusions
+grounded in the current checkout:
 
-- **Start here for any exploration or planning:** read `graphify-out/GRAPH_REPORT.md` (structure, hubs, communities, cross-links).
-- **Structural questions** ("what calls X?", "how does X connect to Y?"): query `graphify-out/graph.json` or invoke the `/graphify` skill.
-- **If `graphify-out/` is missing** (fresh clone) or stale after significant changes, regenerate it off-session (no Claude tokens; ~$0.07 on Azure):
+1. Run `pnpm graphify:check`. Treat errors as stale output and semantic
+   warnings as unverified documentation coverage.
+2. Read `graphify-out/wiki/index.md` to find the relevant generated topic.
+3. Read `graphify-out/GRAPH_REPORT.md` for the repository overview, hubs,
+   communities, and cross-links.
+4. For structural questions such as "what calls X?" or "how does X connect to
+   Y?", query `graphify-out/graph.json` or use the `/graphify` skill.
+5. Use `rg` for exact symbols, strings, definitions, and current implementation
+   details. Source files are authoritative; generated graph and wiki output is
+   only a navigation aid and may lag uncommitted or recent changes.
 
-  ```bash
-  set -a; . ~/workspaces/sparklab/graphify/.env; set +a
-  /home/sparklab/miniconda3/bin/python3.13 \
-    ~/workspaces/sparklab/graphify/scripts/graphify_azure.py "$(pwd)" --no-viz
-  ```
+If `graphify-out/` or one of these outputs is missing, say that generated
+navigation is unavailable and continue with `rg`. If its report date or
+contents predate relevant changes, say that it may be stale and verify all
+affected claims in source. For code-only changes, refresh the graph and wiki
+with `pnpm graphify:generate`. For documentation or other semantic changes,
+perform the full rebuild and certify its semantic baseline:
+
+```bash
+set -a; . ~/workspaces/sparklab/graphify/.env; set +a
+/home/sparklab/miniconda3/bin/python3.13 \
+  ~/workspaces/sparklab/graphify/scripts/graphify_azure.py "$(pwd)" --no-viz
+pnpm graphify:generate -- --semantic-current
+```
 
 ## What this is
 

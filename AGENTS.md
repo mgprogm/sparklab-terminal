@@ -6,6 +6,37 @@ This Node.js 24+ pnpm/Turborepo monorepo keeps applications in `apps/`: the Next
 
 Within Next.js apps, keep `src/app/` limited to routing and composition. Put business logic in `src/features/<feature>/`, expose cross-feature APIs through each feature's `index.ts`, and import workspace packages by name (for example, `@sparklab/ui`).
 
+## Repository Exploration (graphify)
+
+This repo has a regenerable, gitignored knowledge graph in `graphify-out/`. Use
+the following progression to minimize broad searches while keeping conclusions
+grounded in the current checkout:
+
+1. Run `pnpm graphify:check`. Treat errors as stale output and semantic
+   warnings as unverified documentation coverage.
+2. Read `graphify-out/wiki/index.md` to find the relevant generated topic.
+3. Read `graphify-out/GRAPH_REPORT.md` for the repository overview, hubs,
+   communities, and cross-links.
+4. For structural questions such as "what calls X?" or "how does X connect to
+   Y?", query `graphify-out/graph.json` or use the `/graphify` skill.
+5. Use `rg` for exact symbols, strings, definitions, and current implementation
+   details. Source files are authoritative; generated graph and wiki output is
+   only a navigation aid and may lag uncommitted or recent changes.
+
+If `graphify-out/` or one of these outputs is missing, say that generated
+navigation is unavailable and continue with `rg`. If its report date or
+contents predate relevant changes, say that it may be stale and verify all
+affected claims in source. For code-only changes, refresh the graph and wiki
+with `pnpm graphify:generate`. For documentation or other semantic changes,
+perform the full rebuild and certify its semantic baseline:
+
+```bash
+set -a; . ~/workspaces/sparklab/graphify/.env; set +a
+/home/sparklab/miniconda3/bin/python3.13 \
+  ~/workspaces/sparklab/graphify/scripts/graphify_azure.py "$(pwd)" --no-viz
+pnpm graphify:generate -- --semantic-current
+```
+
 ## Build, Test, and Development Commands
 
 - `pnpm install` / `pnpm dev`: install workspaces and start development tasks.

@@ -12,6 +12,9 @@
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",
     "test": "turbo test",
+    "graphify:generate": "node scripts/graphify.mjs generate",
+    "graphify:check": "node scripts/graphify.mjs check",
+    "graphify:test": "node --test scripts/graphify.test.mjs",
     "prepare": "husky"
   },
   "lint-staged": {

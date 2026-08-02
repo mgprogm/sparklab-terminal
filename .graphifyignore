@@ -1,0 +1,20 @@
+# Secrets and local configuration
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secrets*
+
+# Generated output, caches, reports, and runtime data
+.next
+.next-*
+.turbo
+coverage
+playwright-report
+test-results
+apps/agent-service/data
+data
+graphify-out
