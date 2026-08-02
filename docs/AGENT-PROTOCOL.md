@@ -103,6 +103,7 @@ immediately; writes pause the loop at the approval gate.
 | `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                       |
 | `browser_list_tabs`       | read      | Browser Use MCP tab list                                            |
 | `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action                |
+| `browser_capture`         | **write** | capture viewport + save through session-scoped gateway `fs/upload`  |
 | `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication    |
 | `kanban_list`             | read      | `GET /api/kanban/boards`                                            |
 | `kanban_get`              | read      | `GET /api/kanban/boards/:id`                                        |
@@ -213,6 +214,12 @@ the UI (the gateway's single `DELETE` call site).
   ownership for resume. Browser screenshots,
   page state, typed values, URL query strings, and tool results are omitted or
   redacted from durable history.
+- **Screenshot export:** `browser_capture` requires a terminal session and an
+  absolute destination path, is approved one invocation at a time, and writes
+  the already-bounded PNG/WebP bytes through the gateway's session-scoped
+  `fs/upload` route. The parent directory must exist; an existing file is
+  overwritten. Image bytes and saved-path results are omitted from chat
+  history.
 - **Browser isolation:** each chat lazily owns an ephemeral Browser Use process,
   profile/config directory, and enforcing outbound proxy. Stop/disconnect closes
   its process group and view. The proxy resolves every HTTP/CONNECT destination

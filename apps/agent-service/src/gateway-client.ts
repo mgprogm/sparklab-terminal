@@ -35,6 +35,7 @@ import type {
   CreateSprintRequest,
   CreateColumnRequest,
   UpdateColumnRequest,
+  FsUploadResponse,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -213,6 +214,26 @@ class GatewayClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(opts),
       }),
+    );
+  }
+
+  /** Write bounded raw bytes to an absolute path on the selected session's server. */
+  async uploadSessionFile(
+    sessionId: string,
+    path: string,
+    data: Uint8Array,
+    contentType: string,
+  ): Promise<FsUploadResponse> {
+    const query = new URLSearchParams({ path });
+    return this.json<FsUploadResponse>(
+      await this.call(
+        `/api/sessions/${encodeURIComponent(sessionId)}/fs/upload?${query.toString()}`,
+        {
+          method: "POST",
+          headers: { "content-type": contentType },
+          body: Buffer.from(data),
+        },
+      ),
     );
   }
 

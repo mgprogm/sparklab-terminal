@@ -32,6 +32,7 @@ import {
 } from "./tools.js";
 import { BrowserRuntime, type BrowserAction } from "./browser-runtime.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
+import { gateway } from "./gateway-client.js";
 
 type Send = (frame: AgentWsServerMessage) => void;
 
@@ -375,6 +376,34 @@ export class AgentLoop {
       }
       if (tool === "browser_list_tabs")
         return (await this.browser.listTabs(signal)).content;
+      if (tool === "browser_capture") {
+        if (!args.session_id) return "error: session_id is required";
+        if (
+          typeof args.path !== "string" ||
+          !args.path.startsWith("/") ||
+          args.path.length > 4096
+        ) {
+          return "error: path must be an absolute path of at most 4096 characters";
+        }
+        const result = await this.browser.observe(signal);
+        if (!result.snapshot)
+          return "error: browser did not return a screenshot";
+        this.send({ type: "browser_view", ...result.snapshot });
+        const bytes = Buffer.from(result.snapshot.screenshot.data, "base64");
+        const saved = await gateway.uploadSessionFile(
+          args.session_id,
+          args.path,
+          bytes,
+          result.snapshot.screenshot.mediaType,
+        );
+        return JSON.stringify({
+          saved: true,
+          path: saved.path,
+          size: saved.size,
+          mediaType: result.snapshot.screenshot.mediaType,
+          viewport: result.snapshot.viewport,
+        });
+      }
       if (tool === "browser_request_handoff") {
         const result = this.beginBrowserHandoff(this.browser.browserId);
         if (result === "reopened")

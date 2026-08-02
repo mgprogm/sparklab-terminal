@@ -49,6 +49,13 @@ pnpm dev
 
 Open `http://localhost:3002`, open Agent Chat, and ask it to visit a public HTTP(S) URL. Navigation and other state-changing browser actions require one-time approval. A successful action publishes a revisioned PNG or WebP snapshot; use **Back to terminal** to hide it and the globe control to reopen the latest view.
 
+Ask the agent to capture the current web screen and provide an absolute path
+plus the target terminal session to save that viewport on the session's server.
+The one-time approval card shows the exact destination. Capture uses the
+gateway's bounded file-upload route, overwrites an existing file, and requires
+the parent directory to exist. The image is shown in Browser View but is never
+persisted in chat history.
+
 The initial `about:blank` observation intentionally displays no screenshot. Private, loopback, link-local, reserved, credential-bearing, and non-HTTP(S) destinations are rejected.
 Public literal-IP URLs are supported (for example, a public service on a
 non-standard port). Browser Use's blanket IP-address block is intentionally
@@ -86,7 +93,12 @@ Chromium instance.
   `browser-handoff-tokens.ts` own the isolated Chromium profile, exclusive
   control, bounded data plane, and one-time credentials.
 
-Do not expose raw MCP, CDP, JavaScript execution, filesystem, upload, or download capabilities. Do not persist screenshots or browser state in chat history. Keep xterm mounted beneath the overlay and move focus away from its hidden textarea.
+Do not expose raw MCP, CDP, JavaScript execution, or general browser
+filesystem/upload/download capabilities. The only browser-to-filesystem seam is
+the one-time-approved `browser_capture` export of an already bounded viewport
+through the selected terminal session's gateway upload route. Do not persist
+screenshots or browser state in chat history. Keep xterm mounted beneath the
+overlay and move focus away from its hidden textarea.
 
 ## Verify and Troubleshoot
 

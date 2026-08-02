@@ -9,7 +9,7 @@
  *   READ  (auto):  list_sessions, read_screen, wait_idle,
  *                  browser_observe, browser_list_tabs
  *   WRITE (ask):   type_text, press_keys, run_command, create_session,
- *                  run_codex, browser_act, browser_request_handoff
+ *                  run_codex, browser_act, browser_capture, browser_request_handoff
  *
  * There is deliberately no kill_session — destroying a session stays a
  * human-only act in the UI.
@@ -25,6 +25,7 @@ export const WRITE_TOOLS = new Set([
   "create_session",
   "run_codex",
   "browser_act",
+  "browser_capture",
   "browser_request_handoff",
   // Kanban writes (D9). The routine four permit allow-always; kanban_delete is
   // additionally in ONE_TIME_TOOLS so it is re-approved on every call.
@@ -63,6 +64,7 @@ export const WRITE_TOOLS = new Set([
  */
 export const ONE_TIME_TOOLS = new Set([
   "browser_act",
+  "browser_capture",
   "browser_request_handoff",
   "run_codex",
   "kanban_delete",
@@ -76,6 +78,31 @@ export const ONE_TIME_TOOLS = new Set([
 const NAMED_KEYS = AgentNamedKeySchema.options;
 
 export const TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "browser_capture",
+      description:
+        "Capture the current isolated-browser viewport and save the PNG/WebP bytes to an absolute path on the server of the selected terminal session. The parent directory must already exist and an existing file is overwritten. Always requires one-time user approval. The screenshot is also shown in Browser View but is never stored in chat history.",
+      parameters: {
+        type: "object",
+        properties: {
+          session_id: {
+            type: "string",
+            description:
+              "Target terminal session whose server will receive the screenshot file.",
+          },
+          path: {
+            type: "string",
+            description:
+              "Absolute destination file path, for example /home/user/project/screenshots/page.png.",
+          },
+        },
+        required: ["session_id", "path"],
+        additionalProperties: false,
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -1015,6 +1042,7 @@ export interface ToolArgs {
   body?: string;
   limit?: number;
   before?: number;
+  path?: string;
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -1045,6 +1073,8 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `run Codex [${args.mode === "workspace-write" ? "workspace-write" : "read-only"}]: ${truncate(String(args.prompt ?? ""))}`;
     case "browser_observe":
       return "observe browser";
+    case "browser_capture":
+      return `capture browser screen to ${truncate(String(args.path ?? ""))}`;
     case "browser_request_handoff":
       return "take control of the isolated browser";
     case "browser_list_tabs":

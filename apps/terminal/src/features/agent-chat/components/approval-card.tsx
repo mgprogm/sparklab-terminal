@@ -22,6 +22,7 @@ interface Input {
   action?: string;
   url?: string;
   index?: number;
+  path?: string;
 }
 
 function keystrokeParts(tool: string, input: Input): string[] {
@@ -63,7 +64,12 @@ export function ApprovalCard({
   const [armed, setArmed] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
   const input = (entry.input ?? {}) as Input;
-  const browserAction = entry.tool === "browser_act";
+  const browserAction = [
+    "browser_act",
+    "browser_capture",
+    "browser_request_handoff",
+  ].includes(entry.tool);
+  const browserCapture = entry.tool === "browser_capture";
 
   const parts = keystrokeParts(entry.tool, input);
   const hints = riskHints(entry.tool, input);
@@ -118,11 +124,13 @@ export function ApprovalCard({
 
       <div className="text-body flex items-center gap-1.5 text-xs">
         {browserAction
-          ? `Allow this browser action${input.action ? `: ${input.action}` : ""}`
+          ? browserCapture
+            ? "Save the current browser screen"
+            : `Allow this browser action${input.action ? `: ${input.action}` : ""}`
           : entry.tool === "create_session"
             ? "create"
             : "type into"}
-        {!browserAction && sessionName && (
+        {(!browserAction || browserCapture) && sessionName && (
           <span className="bg-secondary text-foreground rounded-xs flex items-center gap-1 px-1.5 py-0.5">
             <span className="bg-chart-1 size-[5px] rounded-full" />
             {sessionName}
@@ -139,6 +147,14 @@ export function ApprovalCard({
               title={input.url}
             >
               {input.url}
+            </div>
+          )}
+          {browserCapture && input.path && (
+            <div
+              className="text-muted-foreground mt-1 break-all font-mono text-[11px]"
+              title={input.path}
+            >
+              {input.path}
             </div>
           )}
           {typeof input.index === "number" && (
@@ -203,8 +219,9 @@ export function ApprovalCard({
 
       {browserAction ? (
         <p className="text-muted-foreground text-[11px]">
-          Browser actions are approved one at a time. The page is read-only
-          here.
+          {browserCapture
+            ? "This writes or overwrites the file once. The captured image is not saved in chat history."
+            : "Browser actions are approved one at a time. The page is read-only here."}
         </p>
       ) : (
         <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">

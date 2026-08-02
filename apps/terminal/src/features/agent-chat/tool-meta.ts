@@ -3,6 +3,7 @@
  * card. Keep tool names in sync with apps/agent-service/src/tools.ts.
  */
 import {
+  Camera,
   Clock,
   Eye,
   Globe2,
@@ -19,6 +20,7 @@ export const WRITE_TOOL_NAMES = new Set([
   "run_command",
   "create_session",
   "browser_act",
+  "browser_capture",
   "browser_request_handoff",
 ]);
 
@@ -26,6 +28,7 @@ export const BROWSER_TOOL_NAMES = new Set([
   "browser_observe",
   "browser_list_tabs",
   "browser_act",
+  "browser_capture",
   "browser_request_handoff",
 ]);
 
@@ -41,6 +44,8 @@ export function toolIcon(tool: string): LucideIcon {
       return Plus;
     case "browser_observe":
       return Globe2;
+    case "browser_capture":
+      return Camera;
     case "browser_list_tabs":
       return List;
     case "browser_act":

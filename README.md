@@ -2,7 +2,7 @@
 
 A web terminal whose defining property is that **your jobs survive the browser and the gateway**. Close the tab, drop the network, or restart the server process — a running job keeps going and is there, live, when you reconnect.
 
-It ships with multi-server SSH access, a file explorer, "job finished" push notifications, installable-PWA support, an **Agent Chat** (an AI agent that can read a session's screen, type into it with per-write approval, create sessions, and drive an isolated browser), and three pluggable in-app tools — a **Kanban board**, a **project-management suite** (board/list/sprints/Gantt), and an **Agentic AI Creator** for building and running survivable AI agent workflows.
+It ships with multi-server SSH access, a file explorer, "job finished" push notifications, installable-PWA support, an **Agent Chat** (an AI agent that can read a session's screen, type into it with per-write approval, create sessions, drive an isolated browser, and save an approved viewport capture to a terminal server), and three pluggable in-app tools — a **Kanban board**, a **project-management suite** (board/list/sprints/Gantt), and an **Agentic AI Creator** for building and running survivable AI agent workflows.
 
 > ⚠️ **Status:** experimental / single-user. This is a personal project, not a hardened multi-tenant product — see [Security & scope](#security--scope) before exposing it to the internet.
 
@@ -29,7 +29,7 @@ Full rationale in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/DESI
 - **Multi-server** — attach to remote hosts over SSH (key or password auth) with connection multiplexing; local and remote sessions live side by side.
 - **File explorer** — browse, preview, upload, download, rename, and delete files on any session's host (local or remote).
 - **Git-status footer** — live branch + working-tree summary for the active session's cwd.
-- **Agent Chat** — an Azure-OpenAI tool-calling loop that can read screens, type with per-write approval, create sessions, run one-shot Codex CLI tasks, and operate an isolated, egress-restricted browser.
+- **Agent Chat** — an Azure-OpenAI tool-calling loop that can read screens, type with per-write approval, create sessions, run one-shot Codex CLI tasks, operate an isolated, egress-restricted browser, and one-time-approve a bounded viewport capture to an absolute path on a selected terminal server.
 - **Kanban board** — a gateway-owned, multi-board task tracker embedded as a self-contained sandboxed-iframe artifact; drivable by the agent or an external AI CLI over a scoped token.
 - **Project management** — a Kanban-first PM suite (Board · List · Sprints · dependency-aware Gantt) with issue keys, an epic→story→subtask hierarchy, comments, activity log, attachments, and watchers.
 - **Agentic AI Creator** — build catalog entries and agents (`claude-cli` / `codex-cli`) into workflows whose runs survive browser reload and gateway restart: each step continues as a detached tmux job, with retry/router/eval/loop/budget nodes and scheduled runs.
@@ -92,7 +92,7 @@ Expose the gateway only behind a reverse proxy with auth configured — never bi
 
 - **Single-user** username/password auth (scrypt-hashed). There is no multi-user isolation, session sharing, or read-only viewer support yet.
 - Secrets live only in gitignored per-app `.env` files. Copy the `.env.example` templates; never commit real credentials.
-- The Agent Chat's browser is intentionally locked down (public HTTP(S) egress only; no raw MCP/CDP/JS/file access). See [`docs/VIRTUAL-BROWSER.md`](docs/VIRTUAL-BROWSER.md).
+- The Agent Chat's browser is intentionally locked down (public HTTP(S) egress only; no raw MCP/CDP/JS or general file access). Its sole filesystem seam is the one-time-approved `browser_capture` viewport export through the selected session's gateway upload route. See [`docs/VIRTUAL-BROWSER.md`](docs/VIRTUAL-BROWSER.md).
 
 Treat this as a tool for your own machines behind trusted auth, not as a hosted service for untrusted users.
 

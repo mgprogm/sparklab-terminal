@@ -37,3 +37,15 @@ test("browser page state and screenshots never become durable tool results", () 
   );
   assert.equal(sanitizePersistedToolResult("read_screen", content), content);
 });
+
+test("browser capture results omit saved-file metadata from durable history", () => {
+  const content = JSON.stringify({
+    saved: true,
+    path: "/private/project/capture.png",
+    mediaType: "image/png",
+  });
+  assert.equal(
+    sanitizePersistedToolResult("browser_capture", content),
+    "[browser result omitted from durable history]",
+  );
+});

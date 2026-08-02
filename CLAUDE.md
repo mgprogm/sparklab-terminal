@@ -37,7 +37,7 @@ pnpm graphify:generate -- --semantic-current
 
 A web terminal whose defining property is that **jobs survive the browser and the gateway**. Closing the tab, losing the network, or restarting the Node gateway must never kill a running process. `docs/DESIGN-SYSTEM.md` is the authoritative design and rationale — read it before making architectural changes.
 
-It also ships an **Agent Chat**: a floating panel (bottom-right of the terminal) where an AI agent — a custom tool-calling loop over Azure OpenAI (`gpt-5.6-sol`), running as a separate `apps/agent-service` — can read any session's screen, type into it _with per-write approval_, create sessions through the gateway, and operate an isolated Browser Use instance. See `docs/AGENT-PROTOCOL.md` and `docs/VIRTUAL-BROWSER.md`.
+It also ships an **Agent Chat**: a floating panel (bottom-right of the terminal) where an AI agent — a custom tool-calling loop over Azure OpenAI (`gpt-5.6-sol`), running as a separate `apps/agent-service` — can read any session's screen, type into it _with per-write approval_, create sessions through the gateway, operate an isolated Browser Use instance, and save a one-time-approved viewport capture through the selected terminal's gateway. See `docs/AGENT-PROTOCOL.md` and `docs/VIRTUAL-BROWSER.md`.
 
 ## Commands
 
@@ -84,8 +84,8 @@ Browser (xterm.js)  --WebSocket-->  Gateway (node-pty)  --tmux attach-->  tmux s
 ## Virtual browser invariants
 
 - Read `docs/VIRTUAL-BROWSER.md` before changing browser code. The backend ownership chain is `agent-loop.ts` → `browser-runtime.ts` → local Browser Use MCP; `browser-proxy.ts` and `browser-security.ts` enforce public HTTP(S)-only egress.
-- The model receives only `browser_observe`, `browser_list_tabs`, and structured `browser_act`. Actions are always approved once; never add persistent approval, raw MCP, CDP, JavaScript, file, upload, or download access.
-- Browser screenshots and state are ephemeral. Persist only sanitized tool history: redact typed text and strip URL query strings/fragments. Keep screenshot and WebSocket payload bounds intact.
+- The model receives `browser_observe`, `browser_list_tabs`, structured `browser_act`, one-time-approved `browser_capture`, and the explicit handoff tool. Never add persistent browser approval, raw MCP, CDP, JavaScript, or general file/upload/download access.
+- Browser screenshots and state are ephemeral in chat. The only filesystem seam is `browser_capture`: write the already-bounded viewport through the selected terminal session's gateway `fs/upload` route to an explicit absolute path. Persist only sanitized tool history—never image bytes or saved-path results; redact typed text and strip URL query strings/fragments.
 - Frontend browser state lives separately in `features/browser-view/`. Preserve monotonically increasing revisions and close tombstones so a late frame cannot reopen a closed view. The overlay stays read-only, leaves xterm mounted, and moves focus away from xterm's hidden textarea.
 - Browser setup is `uv sync` plus `uvx browser-use install` in the checkout, then `BROWSER_USE_PROJECT=/home/sparklab/workspaces/sparklab/browser-use` in `apps/agent-service/.env`. The initial `about:blank` observation intentionally emits no view.
 

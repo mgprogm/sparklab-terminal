@@ -26,4 +26,37 @@ describe("ApprovalCard browser actions", () => {
     await userEvent.click(screen.getByRole("button", { name: /Approve once/ }));
     expect(onRespond).toHaveBeenCalledWith("allow");
   });
+
+  it("shows the exact capture path and overwrite warning", async () => {
+    const onRespond = vi.fn();
+    render(
+      <ApprovalCard
+        entry={{
+          kind: "approval",
+          id: "approval-capture",
+          tool: "browser_capture",
+          summary: "capture browser screen to /tmp/captures/page.png",
+          input: {
+            session_id: "web-one",
+            path: "/tmp/captures/page.png",
+          },
+          state: "pending",
+        }}
+        sessionName="work"
+        onRespond={onRespond}
+      />,
+    );
+
+    expect(
+      screen.getByText("Save the current browser screen"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("/tmp/captures/page.png")).toBeInTheDocument();
+    expect(screen.getByText("work")).toBeInTheDocument();
+    expect(
+      screen.getByText(/writes or overwrites the file once/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Auto-approve/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Approve once/ }));
+    expect(onRespond).toHaveBeenCalledWith("allow");
+  });
 });

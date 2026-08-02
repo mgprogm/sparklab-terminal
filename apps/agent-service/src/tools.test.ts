@@ -36,6 +36,68 @@ test("browser handoff is an explicit one-time approved tool", () => {
   );
 });
 
+test("browser capture is an explicit one-time approved file write", () => {
+  const capture = TOOLS.find((t) => t.function.name === "browser_capture");
+  assert.ok(capture);
+  assert.equal(WRITE_TOOLS.has("browser_capture"), true);
+  assert.equal(ONE_TIME_TOOLS.has("browser_capture"), true);
+  assert.deepEqual(capture.function.parameters?.required, [
+    "session_id",
+    "path",
+  ]);
+  assert.equal(
+    describeCall("browser_capture", {
+      session_id: "web-x",
+      path: "/tmp/page.png",
+    }),
+    "capture browser screen to /tmp/page.png",
+  );
+});
+
+test("gateway screenshot upload sends exact bytes to the encoded absolute path", async () => {
+  const originalFetch = globalThis.fetch;
+  const screenshot = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  let seenUrl = "";
+  let seenContentType = "";
+  let seenBody = Buffer.alloc(0);
+  globalThis.fetch = async (input, init) => {
+    if (String(input).endsWith("/api/auth/login")) {
+      return new Response(null, {
+        status: 204,
+        headers: { "set-cookie": "gw_session=capture-test; HttpOnly" },
+      });
+    }
+    seenUrl = String(input);
+    seenContentType = new Headers(init?.headers).get("content-type") ?? "";
+    seenBody = Buffer.from((init?.body as Buffer | undefined) ?? []);
+    return new Response(
+      JSON.stringify({ path: "/tmp/captures/page one.png", size: 4 }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await gateway.uploadSessionFile(
+      "web-x",
+      "/tmp/captures/page one.png",
+      screenshot,
+      "image/png",
+    );
+    assert.deepEqual(result, {
+      path: "/tmp/captures/page one.png",
+      size: 4,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(
+    seenUrl,
+    /\/api\/sessions\/web-x\/fs\/upload\?path=%2Ftmp%2Fcaptures%2Fpage\+one\.png$/,
+  );
+  assert.equal(seenContentType, "image/png");
+  assert.deepEqual(seenBody, screenshot);
+});
+
 test("run_codex is a WRITE tool (approval-gated, consequential)", () => {
   assert.equal(WRITE_TOOLS.has("run_codex"), true);
 });
