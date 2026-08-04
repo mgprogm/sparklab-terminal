@@ -122,6 +122,16 @@ function countRunning(sessions: SessionInfo[]): number {
   return sessions.filter((s) => isRunning(s.currentCommand)).length;
 }
 
+// Per-level indent steps for the org -> project -> session tree. Index 0 is
+// the root depth (no indent); each subsequent level steps in by 1rem. A
+// per-server subtree (multi-server mode) starts its org headers at level 1
+// instead of level 0, so Server > Org > Project > Session nest visually
+// instead of the org row sitting flush with its parent server row.
+const INDENT_CLASSES = ["", "pl-4", "pl-8", "pl-12"] as const;
+function indentClass(level: number): string {
+  return INDENT_CLASSES[Math.min(level, INDENT_CLASSES.length - 1)] ?? "";
+}
+
 /** Collect unique org values from sessions. */
 function uniqueOrgs(sessions: SessionInfo[]): string[] {
   const set = new Set<string>();
@@ -770,9 +780,13 @@ export function SessionList({
     const isCollapsed = !!collapsedGroups[key];
     const runningCount = countRunning(groupSessions);
     const label = orgName ?? "Ungrouped";
+    const level = serverId ? 1 : 0;
 
     return (
-      <div key={`org-${key}`} className="group/org flex items-center">
+      <div
+        key={`org-${key}`}
+        className={cn("group/org flex items-center", indentClass(level))}
+      >
         <button
           type="button"
           className="text-muted-foreground hover:text-secondary-foreground flex min-w-0 flex-1 items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium uppercase tracking-wider transition-colors"
@@ -822,9 +836,13 @@ export function SessionList({
     const key = projectCollapseKey(serverId, orgName, projectName);
     const isCollapsed = !!collapsedGroups[key];
     const runningCount = countRunning(groupSessions);
+    const level = serverId ? 2 : 1;
 
     return (
-      <div key={`proj-${key}`} className="group/proj flex items-center pl-4">
+      <div
+        key={`proj-${key}`}
+        className={cn("group/proj flex items-center", indentClass(level))}
+      >
         <button
           type="button"
           className="text-muted-foreground hover:text-secondary-foreground flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-xs transition-colors"
@@ -909,9 +927,10 @@ export function SessionList({
             );
 
             if (!projCollapsed) {
+              const sessionLevel = serverId ? 3 : 2;
               for (const s of projGroup.sessions) {
                 elements.push(
-                  <div key={s.id} className="pl-8">
+                  <div key={s.id} className={indentClass(sessionLevel)}>
                     {renderSessionRow(s)}
                   </div>,
                 );
@@ -919,9 +938,10 @@ export function SessionList({
             }
           } else {
             // Sessions directly under org (no project).
+            const sessionLevel = serverId ? 2 : 1;
             for (const s of projGroup.sessions) {
               elements.push(
-                <div key={s.id} className="pl-4">
+                <div key={s.id} className={indentClass(sessionLevel)}>
                   {renderSessionRow(s)}
                 </div>,
               );
@@ -979,7 +999,7 @@ export function SessionList({
       } else {
         for (const s of group.sessions) {
           elements.push(
-            <div key={s.id} className="pl-4">
+            <div key={s.id} className={indentClass(1)}>
               {renderSessionRow(s)}
             </div>,
           );
