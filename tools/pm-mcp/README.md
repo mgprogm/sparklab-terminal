@@ -78,6 +78,10 @@ off-box, or leave it at the loopback gateway on the same host.
 
 ## Connect it
 
+For a secure, step-by-step installation on another machine, including a shared
+secret-loading wrapper and project-scoped Claude Code/Codex configuration, see
+[`docs/PM-MCP-REMOTE-SETUP.md`](../../docs/PM-MCP-REMOTE-SETUP.md).
+
 ### Claude Code
 
 ```bash

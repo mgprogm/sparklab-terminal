@@ -7,6 +7,7 @@
 | [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)                   | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
 | [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                         | Agent Chat: `/agent`, auth, terminal/browser tools, approved screenshot export, history, and safety model               |
 | [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md)                       | Virtual-browser setup, capture/save workflow, code map, security invariants, and troubleshooting                        |
+| [PM-MCP-REMOTE-SETUP.md](PM-MCP-REMOTE-SETUP.md)               | Secure remote PM MCP installation for Claude Code and Codex over the public HTTPS gateway                               |
 | [BROWSER-HANDOFF-DESIGN.md](BROWSER-HANDOFF-DESIGN.md)         | Implemented shared interactive-browser architecture, protocol, security model, and lifecycle                            |
 | [BROWSER-HANDOFF-OPERATIONS.md](BROWSER-HANDOFF-OPERATIONS.md) | Browser handoff operations, virtual-mouse semantics, layered diagnosis, production E2E, and incident runbook            |
 | [ADR-BROWSER-HANDOFF-WEBRTC.md](ADR-BROWSER-HANDOFF-WEBRTC.md) | WebRTC migration decision, typed signaling foundation, JPEG fallback, provider blocker, and rollout phases              |
