@@ -19,8 +19,10 @@
     "test:pm": "node test/pm-endpoints.js",
     "test:parse": "node test/parse-result.js",
     "test:agentic": "node test/agentic-endpoints.js",
+    "test:hook-notify": "node test/hook-notify-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
     "generate-vapid": "node scripts/generate-vapid.js",
+    "generate-hook-token": "node scripts/generate-hook-token.js",
     "dev": "node --env-file-if-exists=.env --watch src/server.js",
     "start": "node --env-file-if-exists=.env src/server.js"
   },

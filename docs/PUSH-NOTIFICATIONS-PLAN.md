@@ -358,10 +358,26 @@ sooner.
 
 ---
 
+## 12. Extension: CLI turn-finished hooks (2026-08-04)
+
+The poll loop in §2 detects a shell-transition (non-shell → shell) — blind to
+an entire interactive `claude`/`codex` CLI session, since the pane's
+foreground command never returns to a shell between turns. `POST
+/api/push/hook-notify` is a **second, independent signal source** feeding the
+exact same `push.js`/`sendToAll()` sink via Claude Code's `Stop`/`Notification`
+hooks and Codex's `hooks.Stop`/legacy `notify`. Full design record, security
+model (dedicated token, fail-closed session resolution, leak-guard for
+Codex's argv-exposed legacy `notify` payload), and setup instructions:
+`docs/HOOK-NOTIFICATIONS-SETUP.md`. Protocol: `docs/TERMINAL-PROTOCOL.md`.
+Tested by `apps/terminal-gateway/test/hook-notify-endpoints.js` (`test:hook-notify`).
+
+---
+
 ## Critical files
 
 - `apps/terminal-gateway/src/push.js` — VAPID config, subscription store, `sendToAll` (+ prune).
-- `apps/terminal-gateway/src/server.js` — `/api/push/*` routes, poll loop, gating/baseline, `SHELLS`.
+- `apps/terminal-gateway/src/server.js` — `/api/push/*` routes, poll loop, gating/baseline, `SHELLS`, `POST /api/push/hook-notify` (§12).
+- `apps/terminal-gateway/scripts/hook-notify.sh` / `generate-hook-token.js` — the CLI hook script + its token generator (§12).
 - `apps/terminal-gateway/scripts/generate-vapid.js` — keygen.
 - `apps/terminal-gateway/.env.example` — env documentation.
 - `apps/terminal/public/sw.js` — `push` + `notificationclick`.

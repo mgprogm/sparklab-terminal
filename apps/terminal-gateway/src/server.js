@@ -58,6 +58,14 @@ const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
 // value keeps working unchanged (PM-TOOL-PLAN.md D10). Unset => cookie only.
 const GATEWAY_API_TOKEN =
   process.env.GATEWAY_API_TOKEN || process.env.KANBAN_API_TOKEN || "";
+// Separate, narrow-scope token for POST /api/push/hook-notify ONLY (Claude
+// Code / Codex CLI turn-finished hooks). Deliberately NOT folded into
+// GATEWAY_API_TOKEN: a hook config lives on every machine a user runs
+// claude/codex from and fires on every turn — a materially different (and
+// less trusted) exposure than a manually-invoked MCP client, so a leak here
+// must not also grant Kanban/PM/Agentic access. See
+// docs/HOOK-NOTIFICATIONS-SETUP.md.
+const HOOK_NOTIFY_TOKEN = process.env.HOOK_NOTIFY_TOKEN || "";
 const AGENT_MCP_SCOPED_TOKENS = !["0", "false"].includes(
   String(process.env.AGENT_MCP_SCOPED_TOKENS || "")
     .trim()
@@ -227,6 +235,25 @@ function isArtifactBearerAuthorized(req) {
   if (!m) return false;
   const provided = Buffer.from(m[1]);
   const expected = Buffer.from(GATEWAY_API_TOKEN);
+  return (
+    provided.length === expected.length &&
+    crypto.timingSafeEqual(provided, expected)
+  );
+}
+
+// Bearer-token auth scoped to EXACTLY POST /api/push/hook-notify (never the
+// broader artifact prefix set above). Constant-time compare, same pattern as
+// isArtifactBearerAuthorized but its own token/predicate (D1,
+// docs/HOOK-NOTIFICATIONS-SETUP.md). A hook script has no Origin header, so
+// the CSRF guard is a structural no-op for it, same reasoning already
+// documented for the Kanban/PM bearer path.
+function isHookNotifyAuthorized(req) {
+  if (!HOOK_NOTIFY_TOKEN) return false;
+  const header = req.headers.authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m) return false;
+  const provided = Buffer.from(m[1]);
+  const expected = Buffer.from(HOOK_NOTIFY_TOKEN);
   return (
     provided.length === expected.length &&
     crypto.timingSafeEqual(provided, expected)
@@ -943,6 +970,130 @@ function finishTitle(exitCode) {
   if (exitCode == null) return "Job finished";
   if (exitCode === 0) return "✓ Job finished";
   return `✗ Job failed (exit ${exitCode})`;
+}
+
+// ---------------------------------------------------------------------------
+// Hook-notify: per-turn notifications from an interactive claude/codex CLI
+// session, via POST /api/push/hook-notify. A SECOND, independent signal source
+// feeding the SAME sink (emitNotify/push.sendToAll) as the shell-transition
+// poll loop above — nothing about VAPID, the subscription store, or the SW
+// changes. See docs/HOOK-NOTIFICATIONS-SETUP.md for the full design record.
+// ---------------------------------------------------------------------------
+
+// Resolve a hook's session reference (bare tmux name OR qualified
+// "<serverId>/<tmuxName>") to exactly one LIVE qualified session id.
+//
+// Reviewer note (Codex): a bare-name match against metadata alone is NOT
+// authoritative — dead-session metadata persists indefinitely (see
+// listSessions() above), so a stale/deleted session's name would still
+// resolve. This confirms liveness with one targeted `tmux has-session`
+// (sessionExists(), already used elsewhere) per candidate — cheap (normally
+// exactly one candidate, one exec, possibly over SSH) and fails CLOSED on
+// zero or more-than-one live match rather than guessing.
+async function resolveHookSession(ref) {
+  if (typeof ref !== "string" || !ref)
+    return { qid: null, reason: "unknown_session" };
+  const meta = metadata.list();
+  const candidates = [];
+  if (ref.includes("/")) {
+    if (meta[ref]) candidates.push(ref);
+  } else {
+    for (const qid of Object.keys(meta)) {
+      if (parseSessionRef(qid).tmuxName === ref) candidates.push(qid);
+    }
+  }
+  if (candidates.length === 0) return { qid: null, reason: "unknown_session" };
+
+  const servers = registry.list();
+  const serverById = new Map(servers.map((s) => [s.id, s]));
+  const alive = [];
+  await Promise.all(
+    candidates.map(async (qid) => {
+      const { serverId, tmuxName } = parseSessionRef(qid);
+      const server = serverById.get(serverId);
+      if (!server) return;
+      if (await sessionExists(server, tmuxName)) alive.push(qid);
+    }),
+  );
+  if (alive.length === 0) return { qid: null, reason: "unknown_session" };
+  if (alive.length > 1) return { qid: null, reason: "ambiguous_session" };
+  return { qid: alive[0], reason: null };
+}
+
+// Idempotency: collapse repeated hook calls for the SAME (session, tool, kind,
+// eventId) — a Claude/Codex hook can legitimately retry or double-fire. Keyed
+// on the caller-supplied eventId (turn/prompt id) when present; falls back to
+// a short same-kind cooldown when absent (older CLI versions with no id).
+// Bounded + swept so a long-running gateway never accumulates unbounded state.
+const HOOK_DEDUP_TTL_MS = 10 * 60 * 1000; // 10 min
+const HOOK_DEDUP_MAX_ENTRIES = 2000;
+const hookDedup = new Map(); // key -> expiresAt
+
+function hookDedupSweep(now) {
+  if (hookDedup.size <= HOOK_DEDUP_MAX_ENTRIES) return;
+  for (const [key, expiresAt] of hookDedup) {
+    if (expiresAt <= now) hookDedup.delete(key);
+  }
+}
+
+function hookIsDuplicate(qid, tool, kind, eventId) {
+  const now = Date.now();
+  hookDedupSweep(now);
+  const key = eventId
+    ? `id:${qid}:${tool}:${kind}:${eventId}`
+    : `cooldown:${qid}:${tool}:${kind}`;
+  const expiresAt = hookDedup.get(key);
+  if (expiresAt && expiresAt > now) return true;
+  hookDedup.set(key, now + (eventId ? HOOK_DEDUP_TTL_MS : 2000));
+  return false;
+}
+
+// Global abuse guard, independent of the idempotency cache above (a buggy or
+// malicious hook firing in a tight loop must not exhaust push-service quota).
+// Simple fixed-window counter per session.
+const HOOK_RATE_LIMIT_WINDOW_MS = 60_000;
+const HOOK_RATE_LIMIT_MAX = 20; // per session per minute
+const hookRateLimit = new Map(); // qid -> { count, windowStart }
+
+function hookRateLimited(qid) {
+  const now = Date.now();
+  const rec = hookRateLimit.get(qid);
+  if (!rec || now - rec.windowStart >= HOOK_RATE_LIMIT_WINDOW_MS) {
+    hookRateLimit.set(qid, { count: 1, windowStart: now });
+    return false;
+  }
+  rec.count++;
+  return rec.count > HOOK_RATE_LIMIT_MAX;
+}
+
+// FIXED template copy only — a caller-supplied `detail` is never echoed into
+// the push title/body (it is logged only, capped, enum-like). This is the
+// mitigation for the Codex `notify` argv finding: since Codex's legacy
+// `notify` payload can carry real prompt/response text, the gateway must never
+// relay ANY caller-supplied text into the encrypted push payload.
+// `meta` is the session's metadata record (name/org/project — the SAME
+// user-assigned labels already shown in the sidebar, never CLI content), used
+// only to tell notifications for different sessions apart. Title stays
+// generic (mirrors finishTitle's shell-job pattern); the session identity
+// goes in the body.
+function hookNotifyCopy(tool, kind, meta) {
+  const label = tool === "codex" ? "Codex" : "Claude";
+  const name = meta && meta.name ? meta.name : null;
+  const scope =
+    meta && (meta.org || meta.project)
+      ? ` (${[meta.org, meta.project].filter(Boolean).join("/")})`
+      : "";
+  const suffix = name ? ` — ${name}${scope}` : "";
+  if (kind === "waiting-input") {
+    return {
+      title: `${label} needs input`,
+      body: `A permission prompt is waiting${suffix}.`,
+    };
+  }
+  return {
+    title: `${label} finished`,
+    body: `${label} finished responding${suffix}.`,
+  };
 }
 
 async function pushPollTick() {
@@ -5190,13 +5341,19 @@ async function handleApi(req, res, url) {
   // A2: All other /api/* routes require a valid session (or open mode). The
   // artifact prefixes (/api/kanban/*, /api/pm/*, /api/agentic/*) additionally
   // accept a scoped bearer token so an external AI CLI can drive them without a
-  // cookie login.
+  // cookie login. POST /api/push/hook-notify is a THIRD, deliberately separate
+  // bearer path (its own token, isHookNotifyAuthorized) — kept out of the
+  // artifact-prefix clause above so that token never also grants Kanban/PM/
+  // Agentic access (D1, docs/HOOK-NOTIFICATIONS-SETUP.md).
+  const isHookNotifyRoute =
+    req.method === "POST" && parts[1] === "push" && parts[2] === "hook-notify";
   if (
     !isAuthenticated(req) &&
     !(
       (parts[1] === "kanban" || parts[1] === "pm" || parts[1] === "agentic") &&
       (isArtifactBearerAuthorized(req) || isScopedMcpAuthorized(req, url))
-    )
+    ) &&
+    !(isHookNotifyRoute && isHookNotifyAuthorized(req))
   ) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
@@ -5374,6 +5531,89 @@ async function handleApi(req, res, url) {
     // Last subscription gone => stop the loop (back to zero cost).
     if (push.count() === 0) stopPushLoop();
     return sendJson(res, 200, { ok: true, count: push.count() });
+  }
+
+  // POST /api/push/hook-notify — a Claude Code / Codex CLI hook script telling
+  // the gateway "this session's current turn just finished" (or "is waiting on
+  // you"), closing the gap where the shell-transition poll loop above stays
+  // silent for an entire interactive claude/codex session. Auth'd by
+  // isHookNotifyAuthorized ONLY (checked in the top-level gate above) — a
+  // human cookie session is intentionally also accepted (harmless: a browser
+  // could only ever target its own already-authenticated sessions) but this
+  // route exists for the bearer-token CLI-hook path. See
+  // docs/HOOK-NOTIFICATIONS-SETUP.md for the full design record.
+  if (
+    req.method === "POST" &&
+    parts.length === 3 &&
+    parts[1] === "push" &&
+    parts[2] === "hook-notify"
+  ) {
+    if (!push.isConfigured()) {
+      return sendJson(res, 503, { error: "push not configured" });
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    const TOOLS = new Set(["claude", "codex"]);
+    const KINDS = new Set(["turn-finished", "waiting-input"]);
+    if (
+      !body ||
+      typeof body.session !== "string" ||
+      !body.session ||
+      body.session.length > 256 ||
+      !TOOLS.has(body.tool) ||
+      !KINDS.has(body.kind) ||
+      (body.eventId !== undefined &&
+        (typeof body.eventId !== "string" || body.eventId.length > 128)) ||
+      (body.detail !== undefined &&
+        (typeof body.detail !== "string" || body.detail.length > 64))
+    ) {
+      return sendJson(res, 400, { error: "invalid hook-notify body" });
+    }
+    // `detail` is accepted for observability/logging ONLY — it is NEVER
+    // forwarded into the push title/body (see hookNotifyCopy). Log it
+    // truncated; never log the raw request body (defense in depth against a
+    // caller stuffing more than `detail` into the JSON).
+    if (body.detail) {
+      console.log(
+        `[push] hook-notify detail tool=${body.tool} kind=${body.kind} detail=${body.detail}`,
+      );
+    }
+    const { qid, reason } = await resolveHookSession(body.session);
+    if (!qid) {
+      return sendJson(res, 200, { ok: false, reason });
+    }
+    const meta = metadata.get(qid) || {};
+    if (meta.muted) {
+      return sendJson(res, 200, { ok: false, reason: "muted" });
+    }
+    if (hookRateLimited(qid)) {
+      return sendJson(res, 200, { ok: false, reason: "rate_limited" });
+    }
+    if (hookIsDuplicate(qid, body.tool, body.kind, body.eventId)) {
+      return sendJson(res, 200, { ok: false, reason: "duplicate" });
+    }
+    const { title, body: notifBody } = hookNotifyCopy(
+      body.tool,
+      body.kind,
+      meta,
+    );
+    emitNotify(
+      { title, body: notifBody, sessionId: qid, tag: `hook-${qid}` },
+      { sessionId: qid, kind: "hook", tool: body.tool, hookKind: body.kind },
+    );
+    return sendJson(res, 202, { ok: true, sessionId: qid });
   }
 
   // ---- Multi-server: /api/servers ----

@@ -155,6 +155,20 @@ Payload is **generic** — `{ title, body, sessionId, tag, durationMs?, exitCode
 
 The service worker's `push` handler **always** calls `showNotification` — the ONE exception is a permission-safe omit when a focused, visible client already shows that `?session=<id>` (visible-client relaxation). It attaches `actions: [open, dismiss-all]` (sliced to `Notification.maxActions`; Chromium/Android only — iOS ignores them). `notificationclick`: `dismiss-all` closes all notifications; `open`/default focuses/opens the app at `?session=<id>`.
 
+#### `POST /api/push/hook-notify` → 202 / 200 / 400 / 401 / 503
+
+A **second, independent** push signal source for interactive `claude`/`codex` CLI sessions, closing the gap where the poll loop above stays silent for an entire session (no shell transition between turns). Full design record and install guide: `docs/HOOK-NOTIFICATIONS-SETUP.md`.
+
+Auth is a **dedicated** bearer token, `HOOK_NOTIFY_TOKEN` — checked by its own predicate (`isHookNotifyAuthorized`), scoped to exactly this route, never folded into the broader `GATEWAY_API_TOKEN`/`KANBAN_API_TOKEN` artifact-bearer allowlist. No token configured → `401` always (feature inert). `503` when push is not configured (same as `subscribe`).
+
+Body: `{ session: string, tool: "claude"|"codex", kind: "turn-finished"|"waiting-input", eventId?: string, detail?: string }`. `session` is a bare tmux name (or qualified `<serverId>/<tmuxName>`) — malformed/oversized fields, or an unknown `tool`/`kind` enum, → `400`. `detail` (≤64 chars) is accepted for logging/observability only and is **never** echoed into the push payload.
+
+Session resolution is **fail-closed**, not a metadata trust: dead-session metadata persists indefinitely (`GET /api/sessions` can return `alive:false` rows forever), so the gateway confirms **liveness** with a targeted `tmux has-session` per metadata candidate matching the given name — zero live matches or more than one both return `200 { ok:false, reason:"unknown_session"|"ambiguous_session" }`, never a guess.
+
+On a resolved session: `muted` (from the same `sessions.json` field as the poll loop) suppresses with `200 { ok:false, reason:"muted" }`; `minDurationMs`/`notifyOnStart` do **not** apply here (per-turn granularity is the point). Idempotent — `eventId` dedupes for 10 min (`200 { ok:false, reason:"duplicate" }` on repeat); absent `eventId` falls back to a 2s same-kind cooldown. A per-session rate limit (20/min) returns `200 { ok:false, reason:"rate_limited" }` beyond that. Success is `202 { ok:true, sessionId }`.
+
+Payload is built from a **fixed template** plus the session's own name/org/project (user-assigned labels from `sessions.json`, never CLI content) — e.g. `{ title: "Claude finished", body: "Claude finished responding — my-session (work/backend).", sessionId, tag: "hook-<sessionId>" }`. No caller-supplied text (including `detail`) ever reaches the encrypted payload.
+
 ### File-explorer endpoints: `GET|POST|PATCH|DELETE /api/sessions/:id/fs/*`
 
 Six routes that browse and manage the filesystem of whichever server the session lives on (local or a registered remote over SSH). Every route runs the standard `parseSessionRef` + `ID_RE` + `registry.get` + `sessionExists` guard — unknown or malformed session id → `404` on all of them. The underlying commands go through the non-tmux exec seam `serverCmdArgv`/`serverCmd`/`serverCmdStdin` (siblings of `serverExecArgv`, added alongside these routes). Schemas for all request/response shapes live in `packages/shared-types/src/terminal.ts` (`FsEntry`, `FsListResponse`, `FsReadResponse`, `FsMkdirRequest/Response`, `FsRenameRequest/Response`, `FsDeleteResponse`, `FsUploadResponse`).
