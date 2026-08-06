@@ -11,6 +11,10 @@ import {
   ApiErrorSchema,
   CreateSessionRequestSchema,
   CreateSessionResponseSchema,
+  FsGitBaseResponseSchema,
+  FsReadResponseSchema,
+  FsStatResponseSchema,
+  FsWriteResponseSchema,
   ListSessionsResponseSchema,
   SessionInfoSchema,
   WsClientMessageSchema,
@@ -151,6 +155,126 @@ describe("ListSessionsResponseSchema", () => {
 
   it("rejects non-array", () => {
     expect(() => ListSessionsResponseSchema.parse({ sessions: [] })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// File Explorer responses
+// ---------------------------------------------------------------------------
+
+describe("FsReadResponseSchema", () => {
+  const basePayload = {
+    path: "/tmp/example.txt",
+    size: 5,
+    binary: false,
+    truncated: false,
+    encoding: "utf-8" as const,
+    content: "hello",
+  };
+
+  it("accepts a numeric mtime", () => {
+    const payload = { ...basePayload, mtime: 1720900000000 };
+    expect(FsReadResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("accepts a null mtime", () => {
+    const payload = { ...basePayload, mtime: null };
+    expect(FsReadResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("rejects a string mtime", () => {
+    expect(() =>
+      FsReadResponseSchema.parse({ ...basePayload, mtime: "1720900000000" }),
+    ).toThrow();
+  });
+});
+
+describe("FsStatResponseSchema", () => {
+  it("accepts the exists:false shape", () => {
+    const payload = { path: "/tmp/missing.txt", exists: false as const };
+    expect(FsStatResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("accepts the exists:true shape", () => {
+    const payload = {
+      path: "/tmp/example.txt",
+      exists: true as const,
+      type: "file" as const,
+      size: 5,
+      mtime: 1720900000000,
+    };
+    expect(FsStatResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("rejects exists:true without its required stat fields", () => {
+    expect(() =>
+      FsStatResponseSchema.parse({
+        path: "/tmp/example.txt",
+        exists: true,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("FsWriteResponseSchema", () => {
+  it("accepts a complete write response", () => {
+    const payload = {
+      path: "/tmp/example.txt",
+      size: 5,
+      mtime: 1720900000000,
+    };
+    expect(FsWriteResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("rejects a response missing mtime", () => {
+    expect(() =>
+      FsWriteResponseSchema.parse({ path: "/tmp/example.txt", size: 5 }),
+    ).toThrow();
+  });
+});
+
+describe("FsGitBaseResponseSchema", () => {
+  it("accepts isRepo:false", () => {
+    const payload = { isRepo: false as const };
+    expect(FsGitBaseResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("accepts an untracked repo file", () => {
+    const payload = { isRepo: true as const, tracked: false as const };
+    expect(FsGitBaseResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("accepts a tracked binary file", () => {
+    const payload = {
+      isRepo: true as const,
+      tracked: true as const,
+      binary: true as const,
+    };
+    expect(FsGitBaseResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("accepts a tracked truncated file", () => {
+    const payload = {
+      isRepo: true as const,
+      tracked: true as const,
+      truncated: true as const,
+    };
+    expect(FsGitBaseResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("accepts tracked text content", () => {
+    const payload = {
+      isRepo: true as const,
+      tracked: true as const,
+      content: "committed content\n",
+    };
+    expect(FsGitBaseResponseSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("rejects a tracked response with no result discriminator", () => {
+    expect(() =>
+      FsGitBaseResponseSchema.parse({ isRepo: true, tracked: true }),
+    ).toThrow();
   });
 });
 

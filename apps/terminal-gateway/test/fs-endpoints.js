@@ -1,7 +1,10 @@
-// File Explorer fs/* integration test — proves the six gateway routes against a
+// File Explorer fs/* integration test — proves the gateway routes against a
 // real gateway + real tmux + a real scratch filesystem on the LOCAL server:
 //   GET    /api/sessions/:id/fs/list?path=&showHidden=
+//   GET    /api/sessions/:id/fs/stat?path=
+//   GET    /api/sessions/:id/fs/git-base?path=
 //   GET    /api/sessions/:id/fs/read?path=
+//   PUT    /api/sessions/:id/fs/write?path=&baseMtime=&force=
 //   GET    /api/sessions/:id/fs/download?path=
 //   POST   /api/sessions/:id/fs/upload?path=      (raw body)
 //   POST   /api/sessions/:id/fs/mkdir             ({path})
@@ -124,6 +127,9 @@ const enc = (id) => encodeURIComponent(id);
 // Encode a filesystem path for a query string.
 const qp = (p) => encodeURIComponent(p);
 
+const git = (dir, ...args) =>
+  execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+
 async function login() {
   const res = await fetch(`${BASE}/api/auth/login`, {
     method: "POST",
@@ -170,6 +176,23 @@ async function main() {
   fs.writeFileSync(P(NAME_SPACE), SPACE_CONTENT);
   fs.writeFileSync(P(NAME_QUOTE), QUOTE_CONTENT);
   fs.writeFileSync(P(NAME_NL), NL_CONTENT);
+
+  // Real git baseline fixture: two text files and one oversized text blob are
+  // committed; another file remains untracked.
+  const repo = P("repo");
+  fs.mkdirSync(repo);
+  git(repo, "init", "-q");
+  git(repo, "config", "user.email", "fs-endpoints@example.com");
+  git(repo, "config", "user.name", "FS Endpoints Test");
+  const trackedPath = path.join(repo, "tracked.txt");
+  const trackedHeadContent = "committed baseline\nsecond line\n";
+  fs.writeFileSync(trackedPath, trackedHeadContent);
+  const oversizedTrackedPath = path.join(repo, "oversized.txt");
+  fs.writeFileSync(oversizedTrackedPath, Buffer.alloc(FS_READ_CAP + 1, 0x67));
+  const untrackedPath = path.join(repo, "untracked.txt");
+  fs.writeFileSync(untrackedPath, "never committed\n");
+  git(repo, "add", "tracked.txt", "oversized.txt");
+  git(repo, "commit", "-q", "-m", "baseline fixtures");
 
   await startServer();
   console.log(`gateway up on :${PORT} (auth enabled)`);
@@ -283,7 +306,40 @@ async function main() {
   }
 
   // =====================================================================
-  // 3. LOAD-BEARING quoting proof — awkward names list + read intact
+  // 3. stat — existing mtime matches list; missing path is exists:false, 200
+  // =====================================================================
+  {
+    const res = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/stat?path=${qp(P("hello.txt"))}`,
+    );
+    assert(res.status === 200, `fs/stat -> ${res.status}, expected 200`);
+    const j = await res.json();
+    assert(j.exists === true, `hello.txt stat exists=${j.exists}`);
+    assert(
+      typeof j.mtime === "number" && j.mtime === listByName["hello.txt"].mtime,
+      `stat mtime=${j.mtime}, list mtime=${listByName["hello.txt"].mtime}`,
+    );
+    console.log("  ok: stat existing-file mtime exactly matches list mtime");
+
+    const resMissing = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/stat?path=${qp(P("stat-missing.txt"))}`,
+    );
+    assert(
+      resMissing.status === 200,
+      `stat missing -> ${resMissing.status}, expected 200`,
+    );
+    const missing = await resMissing.json();
+    assert(
+      missing.exists === false,
+      `stat missing returned ${JSON.stringify(missing)}`,
+    );
+    console.log("  ok: stat missing path -> exists:false, 200");
+  }
+
+  // =====================================================================
+  // 4. LOAD-BEARING quoting proof — awkward names list + read intact
   // =====================================================================
   {
     for (const [name, content] of [
@@ -316,7 +372,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 4. read — text exact, oversized truncated, binary omits content
+  // 5. read — text exact, oversized truncated, binary omits content
   // =====================================================================
   {
     const resT = await req(
@@ -387,7 +443,202 @@ async function main() {
   }
 
   // =====================================================================
-  // 5. download — binary bytes round-trip EXACTLY
+  // 6. write — exact bytes, conflict/force, cap, directory, create
+  // =====================================================================
+  {
+    const dest = P("write-target.txt");
+    fs.writeFileSync(dest, "original\n");
+    const crlfPayload = Buffer.from("first\r\nsecond\r\n", "utf8");
+    const res = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(dest)}`,
+      { raw: crlfPayload, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      res.status === 200,
+      `write overwrite -> ${res.status}, expected 200`,
+    );
+    assert(
+      fs.readFileSync(dest).equals(crlfPayload),
+      "write overwrite changed CRLF payload bytes",
+    );
+    console.log("  ok: write overwrites with exact CRLF bytes (200)");
+
+    const statRes = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/stat?path=${qp(dest)}`,
+    );
+    const current = await statRes.json();
+    const wrongMtime = current.mtime + 1;
+    const stalePayload = Buffer.from("stale write must not land\n");
+    const beforeStale = fs.readFileSync(dest);
+    const resStale = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(dest)}&baseMtime=${wrongMtime}`,
+      { raw: stalePayload, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      resStale.status === 409,
+      `stale write -> ${resStale.status}, expected 409`,
+    );
+    assert(
+      fs.readFileSync(dest).equals(beforeStale),
+      "stale write changed target content",
+    );
+    console.log("  ok: stale baseMtime -> 409 with target unchanged");
+
+    const resForce = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(dest)}&baseMtime=${wrongMtime}&force=1`,
+      { raw: stalePayload, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      resForce.status === 200,
+      `forced stale write -> ${resForce.status}, expected 200`,
+    );
+    assert(
+      fs.readFileSync(dest).equals(stalePayload),
+      "forced stale write did not update target content",
+    );
+    console.log("  ok: force=1 retries stale write and updates content (200)");
+
+    const capTarget = P("write-cap-target.txt");
+    const capOriginal = Buffer.from("keep this content intact\n");
+    fs.writeFileSync(capTarget, capOriginal);
+    const resBig = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(capTarget)}`,
+      {
+        raw: Buffer.alloc(FS_READ_CAP + 1, 0x78),
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(
+      resBig.status === 413,
+      `oversized write -> ${resBig.status}, expected 413`,
+    );
+    assert(
+      fs.readFileSync(capTarget).equals(capOriginal),
+      "oversized write changed target content",
+    );
+    console.log("  ok: write over 256KB -> 413 with target unchanged");
+
+    const resDir = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(P("emptydir"))}`,
+      { raw: Buffer.from("not a file"), origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      resDir.status === 400,
+      `write to directory -> ${resDir.status}, expected 400`,
+    );
+    console.log("  ok: write to directory -> 400");
+
+    const created = P("write-created.txt");
+    const createdPayload = Buffer.from("created by fs/write\r\n");
+    const resCreateFile = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(created)}`,
+      { raw: createdPayload, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      resCreateFile.status === 200,
+      `write missing target -> ${resCreateFile.status}, expected 200`,
+    );
+    assert(
+      fs.existsSync(created) && fs.readFileSync(created).equals(createdPayload),
+      "write missing target did not create exact sent content",
+    );
+    console.log("  ok: write missing target creates exact content (200)");
+  }
+
+  // =====================================================================
+  // 7. git-base — non-repo, untracked, HEAD content, dirty tree, truncation
+  // =====================================================================
+  {
+    const resOutside = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/git-base?path=${qp(P("hello.txt"))}`,
+    );
+    assert(
+      resOutside.status === 200,
+      `git-base outside repo -> ${resOutside.status}, expected 200`,
+    );
+    const outside = await resOutside.json();
+    assert(
+      outside.isRepo === false,
+      `git-base outside repo returned ${JSON.stringify(outside)}`,
+    );
+    console.log("  ok: git-base outside repo -> isRepo:false");
+
+    const resUntracked = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/git-base?path=${qp(untrackedPath)}`,
+    );
+    const untracked = await resUntracked.json();
+    assert(
+      resUntracked.status === 200 &&
+        untracked.isRepo === true &&
+        untracked.tracked === false,
+      `git-base untracked returned ${resUntracked.status} ${JSON.stringify(untracked)}`,
+    );
+    console.log("  ok: git-base untracked file -> isRepo:true, tracked:false");
+
+    const expectedHead = git(repo, "show", "HEAD:tracked.txt");
+    const resClean = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/git-base?path=${qp(trackedPath)}`,
+    );
+    const clean = await resClean.json();
+    assert(
+      resClean.status === 200 && clean.content === expectedHead,
+      "git-base clean tracked content did not match git show HEAD:tracked.txt",
+    );
+    console.log(
+      "  ok: git-base clean tracked content exactly matches git show HEAD",
+    );
+
+    fs.writeFileSync(trackedPath, "working tree is now modified\n");
+    const resDirty = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/git-base?path=${qp(trackedPath)}`,
+    );
+    const dirty = await resDirty.json();
+    assert(
+      resDirty.status === 200 && dirty.content === expectedHead,
+      "git-base dirty tracked file did not preserve committed HEAD content",
+    );
+    assert(
+      dirty.content !== fs.readFileSync(trackedPath, "utf8"),
+      "git-base dirty tracked file returned working-tree content",
+    );
+    console.log(
+      "  ok: git-base dirty tracked file still returns original HEAD content",
+    );
+
+    const resOversized = await req(
+      "GET",
+      `/api/sessions/${eid}/fs/git-base?path=${qp(oversizedTrackedPath)}`,
+    );
+    const oversized = await resOversized.json();
+    assert(
+      resOversized.status === 200 &&
+        oversized.isRepo === true &&
+        oversized.tracked === true &&
+        oversized.truncated === true,
+      `git-base oversized returned ${resOversized.status} ${JSON.stringify(oversized)}`,
+    );
+    assert(
+      !("content" in oversized),
+      "git-base oversized response must omit content",
+    );
+    console.log(
+      "  ok: git-base oversized committed blob -> truncated:true, no content",
+    );
+  }
+
+  // =====================================================================
+  // 8. download — binary bytes round-trip EXACTLY
   // =====================================================================
   {
     const res = await req(
@@ -416,7 +667,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 6. upload — raw body writes exact bytes to a name WITH A SPACE; cap 413
+  // 9. upload — raw body writes exact bytes to a name WITH A SPACE; cap 413
   // =====================================================================
   {
     const dest = P("uploaded file.bin"); // space in dest name
@@ -465,7 +716,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 7. mkdir — creates (201); re-create -> 409
+  // 10. mkdir — creates (201); re-create -> 409
   // =====================================================================
   {
     const newDir = P("made-dir");
@@ -490,7 +741,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 8. rename — moves (200); clobber without overwrite -> 409; with -> 200
+  // 11. rename — moves (200); clobber without overwrite -> 409; with -> 200
   // =====================================================================
   {
     const from = P("rename-src.txt");
@@ -541,7 +792,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 9. delete — file (200); non-empty dir refused w/o recursive (409); w/ (200)
+  // 12. delete — file (200); non-empty dir refused w/o recursive (409); w/ (200)
   // =====================================================================
   {
     const f = P("delete-me.txt");
@@ -593,7 +844,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 10. Guards — bad session id, missing/relative path, nonexistent path
+  // 13. Guards — bad session id, missing/relative path, nonexistent path
   // =====================================================================
   {
     const ghostQ = enc("local/web-00000000-0000-0000-0000-000000000000");
@@ -601,7 +852,18 @@ async function main() {
     for (const bad of [ghostQ, malformedQ]) {
       const routes = [
         ["GET", `/api/sessions/${bad}/fs/list?path=${qp(scratch)}`, {}],
+        ["GET", `/api/sessions/${bad}/fs/stat?path=${qp(P("hello.txt"))}`, {}],
+        [
+          "GET",
+          `/api/sessions/${bad}/fs/git-base?path=${qp(P("hello.txt"))}`,
+          {},
+        ],
         ["GET", `/api/sessions/${bad}/fs/read?path=${qp(P("hello.txt"))}`, {}],
+        [
+          "PUT",
+          `/api/sessions/${bad}/fs/write?path=${qp(P("hello.txt"))}`,
+          { raw: Buffer.from("z"), origin: ALLOWED_ORIGIN },
+        ],
         [
           "GET",
           `/api/sessions/${bad}/fs/download?path=${qp(P("hello.txt"))}`,
@@ -636,9 +898,7 @@ async function main() {
         );
       }
     }
-    console.log(
-      "  ok: unknown + malformed session id -> 404 on all six routes",
-    );
+    console.log("  ok: unknown + malformed session id -> 404 on all fs routes");
 
     // missing path -> 400 (list resolves cwd, so test read/download/upload/delete)
     const resNoPath = await req("GET", `/api/sessions/${eid}/fs/read`);
@@ -694,7 +954,7 @@ async function main() {
   }
 
   // =====================================================================
-  // 11. Origin/CSRF — a write with a forbidden Origin is 403 (before any fs op)
+  // 14. Origin/CSRF — forbidden writes are 403 before any fs operation
   // =====================================================================
   {
     const sentinel = P("csrf-should-not-exist");
@@ -710,8 +970,28 @@ async function main() {
       !fs.existsSync(sentinel),
       "forbidden-origin mkdir still created the dir!",
     );
+
+    const writeTarget = P("csrf-write-target.txt");
+    const original = Buffer.from("csrf sentinel content\n");
+    fs.writeFileSync(writeTarget, original);
+    const resWrite = await req(
+      "PUT",
+      `/api/sessions/${eid}/fs/write?path=${qp(writeTarget)}`,
+      {
+        raw: Buffer.from("forbidden replacement\n"),
+        origin: "http://evil.example.com",
+      },
+    );
+    assert(
+      resWrite.status === 403,
+      `forbidden-origin write -> ${resWrite.status}, expected 403`,
+    );
+    assert(
+      fs.readFileSync(writeTarget).equals(original),
+      "forbidden-origin write changed target content",
+    );
     console.log(
-      "  ok: write with forbidden Origin -> 403 (CSRF guard fires, no fs op)",
+      "  ok: forbidden-origin mkdir/write -> 403 with targets unchanged",
     );
   }
 
@@ -733,7 +1013,8 @@ async function main() {
 
   console.log(
     "\nPASS: fs endpoints — list (cwd-seed + explicit, hidden filter, ms mtime), " +
-      "read (text/truncated/binary), download (exact bytes), upload (exact bytes + 413), " +
+      "stat, read (text/truncated/binary), write (exact/conflict/force/cap/create), " +
+      "git-base (repo/tracked/HEAD/truncated), download (exact bytes), upload (exact bytes + 413), " +
       "mkdir/rename/delete semantics, awkward-name quoting proof, guards (404/400), CSRF 403.",
   );
   cleanup();

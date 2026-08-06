@@ -6271,7 +6271,11 @@ async function handleApi(req, res, url) {
       if (/not a git repository/i.test(stderr)) {
         return sendJson(res, 200, { isRepo: false });
       }
-      if (/does not exist in|bad revision/i.test(stderr)) {
+      if (
+        /does not exist in|exists on disk, but not in|bad revision/i.test(
+          stderr,
+        )
+      ) {
         return sendJson(res, 200, { isRepo: true, tracked: false });
       }
       return sendJson(res, fsErrorStatus(err), {
