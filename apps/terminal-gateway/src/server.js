@@ -6240,6 +6240,66 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // GET /api/sessions/:id/fs/git-base?path=<abs>
+  if (
+    req.method === "GET" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "git-base"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+
+    const dir = path.dirname(p);
+    const basename = path.basename(p);
+    let buf;
+    try {
+      const r = await serverCmd(
+        server,
+        ["git", "-C", dir, "show", `HEAD:./${basename}`],
+        { timeout: 8000, encoding: "buffer" },
+      );
+      buf = r.stdout;
+    } catch (err) {
+      const stderr = String(err.stderr || err.message || "");
+      if (/not a git repository/i.test(stderr)) {
+        return sendJson(res, 200, { isRepo: false });
+      }
+      if (/does not exist in|bad revision/i.test(stderr)) {
+        return sendJson(res, 200, { isRepo: true, tracked: false });
+      }
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to read git baseline"),
+      });
+    }
+
+    if (buf.includes(0)) {
+      return sendJson(res, 200, {
+        isRepo: true,
+        tracked: true,
+        binary: true,
+      });
+    }
+    if (buf.length > FS_READ_CAP) {
+      return sendJson(res, 200, {
+        isRepo: true,
+        tracked: true,
+        truncated: true,
+      });
+    }
+    return sendJson(res, 200, {
+      isRepo: true,
+      tracked: true,
+      content: buf.toString("utf-8"),
+    });
+  }
+
   // GET /api/sessions/:id/fs/read?path=<abs>  (text preview, capped)
   if (
     req.method === "GET" &&
