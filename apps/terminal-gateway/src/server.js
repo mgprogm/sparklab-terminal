@@ -6209,6 +6209,7 @@ async function handleApi(req, res, url) {
 
     // True size + type (reject directories with a clear error).
     let size = 0;
+    let mtime = null;
     try {
       const st = await serverCmd(server, [
         "find",
@@ -6216,13 +6217,15 @@ async function handleApi(req, res, url) {
         "-maxdepth",
         "0",
         "-printf",
-        "%y\\t%s",
+        "%y\\t%s\\t%T@",
       ]);
-      const [ty, sz] = st.stdout.split("\t");
+      const [ty, sz, mtimeRaw] = st.stdout.split("\t");
       if (ty === "d") {
         return sendJson(res, 400, { error: "path is a directory" });
       }
       size = Number(sz) || 0;
+      const mtimeSec = parseFloat(mtimeRaw);
+      mtime = Number.isFinite(mtimeSec) ? Math.round(mtimeSec * 1000) : null;
     } catch (err) {
       return sendJson(res, fsErrorStatus(err), {
         error: fsErrorMessage(err, "cannot access path"),
@@ -6254,6 +6257,7 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, {
         path: p,
         size,
+        mtime,
         binary: true,
         truncated: false,
         encoding: null,
@@ -6262,6 +6266,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, {
       path: p,
       size,
+      mtime,
       binary: false,
       truncated,
       encoding: "utf-8",
