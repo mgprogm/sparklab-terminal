@@ -14,6 +14,8 @@
 import {
   type FsDeleteResponse,
   FsDeleteResponseSchema,
+  type FsGitBaseResponse,
+  FsGitBaseResponseSchema,
   type FsListResponse,
   FsListResponseSchema,
   type FsMkdirRequest,
@@ -24,8 +26,12 @@ import {
   type FsRenameRequest,
   type FsRenameResponse,
   FsRenameResponseSchema,
+  type FsStatResponse,
+  FsStatResponseSchema,
   type FsUploadResponse,
   FsUploadResponseSchema,
+  type FsWriteResponse,
+  FsWriteResponseSchema,
 } from "@sparklab/shared-types";
 import {
   keepPreviousData,
@@ -45,6 +51,24 @@ export class FsError extends Error {
     super(message);
     this.name = "FsError";
     this.status = status;
+  }
+}
+
+/** Carries the current file state when a write loses an mtime race. */
+export class FsConflictError extends FsError {
+  exists: boolean;
+  currentMtime?: number | null;
+  currentSize?: number;
+  constructor(
+    exists: boolean,
+    currentMtime?: number | null,
+    currentSize?: number,
+  ) {
+    super(409, "stale");
+    this.name = "FsConflictError";
+    this.exists = exists;
+    this.currentMtime = currentMtime;
+    this.currentSize = currentSize;
   }
 }
 
@@ -82,6 +106,10 @@ export const fsKeys = {
     [...fsKeys.lists(sessionId), path ?? "@cwd", showHidden] as const,
   read: (sessionId: string, path: string) =>
     [...fsKeys.all, "read", sessionId, path] as const,
+  stat: (sessionId: string, path: string) =>
+    [...fsKeys.all, "stat", sessionId, path] as const,
+  gitBase: (sessionId: string, path: string) =>
+    [...fsKeys.all, "git-base", sessionId, path] as const,
 };
 
 // ---- Fetch helpers ----
@@ -120,6 +148,30 @@ async function fetchFsRead(
   if (!res.ok) await throwForResponse(res);
   const data: unknown = await res.json();
   return FsReadResponseSchema.parse(data);
+}
+
+async function fetchFsStat(
+  sessionId: string,
+  path: string,
+): Promise<FsStatResponse> {
+  const params = new URLSearchParams({ path });
+  const res = await fetch(fsPath(sessionId, `stat?${params.toString()}`));
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) await throwForResponse(res);
+  const data: unknown = await res.json();
+  return FsStatResponseSchema.parse(data);
+}
+
+async function fetchFsGitBase(
+  sessionId: string,
+  path: string,
+): Promise<FsGitBaseResponse> {
+  const params = new URLSearchParams({ path });
+  const res = await fetch(fsPath(sessionId, `git-base?${params.toString()}`));
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) await throwForResponse(res);
+  const data: unknown = await res.json();
+  return FsGitBaseResponseSchema.parse(data);
 }
 
 async function mkdirApi(
@@ -184,6 +236,34 @@ async function uploadApi(
   return FsUploadResponseSchema.parse(data);
 }
 
+async function writeApi(
+  sessionId: string,
+  path: string,
+  content: string,
+  baseMtime: number | null,
+  force: boolean,
+): Promise<FsWriteResponse> {
+  const params = new URLSearchParams({ path, force: force ? "1" : "0" });
+  if (baseMtime != null) params.set("baseMtime", String(baseMtime));
+  const res = await fetch(fsPath(sessionId, `write?${params.toString()}`), {
+    method: "PUT",
+    body: content,
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (res.status === 409) {
+    const err = (await res.json()) as {
+      error: "stale";
+      exists: boolean;
+      currentMtime?: number | null;
+      currentSize?: number;
+    };
+    throw new FsConflictError(err.exists, err.currentMtime, err.currentSize);
+  }
+  if (!res.ok) await throwForResponse(res);
+  const data: unknown = await res.json();
+  return FsWriteResponseSchema.parse(data);
+}
+
 // ---- Queries ----
 
 export function useFsList(
@@ -208,6 +288,33 @@ export function useFsRead(sessionId: string | null, path: string | null) {
     queryKey: fsKeys.read(sessionId ?? "", path ?? ""),
     queryFn: () => fetchFsRead(sessionId!, path!),
     enabled: !!sessionId && !!path,
+    staleTime: 30 * 1000,
+  });
+}
+
+export function useFsStat(
+  sessionId: string | null,
+  path: string | null,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: fsKeys.stat(sessionId ?? "", path ?? ""),
+    queryFn: () => fetchFsStat(sessionId!, path!),
+    enabled: !!sessionId && !!path && (options?.enabled ?? true),
+    refetchInterval: 5000,
+    staleTime: 30 * 1000,
+  });
+}
+
+export function useFsGitBase(
+  sessionId: string | null,
+  path: string | null,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: fsKeys.gitBase(sessionId ?? "", path ?? ""),
+    queryFn: () => fetchFsGitBase(sessionId!, path!),
+    enabled: !!sessionId && !!path && (options?.enabled ?? true),
     staleTime: 30 * 1000,
   });
 }
@@ -249,6 +356,24 @@ export function useFsUpload(sessionId: string) {
       uploadApi(sessionId, vars.destPath, vars.file),
     onSuccess: () =>
       void qc.invalidateQueries({ queryKey: fsKeys.lists(sessionId) }),
+  });
+}
+
+export function useFsWrite(sessionId: string) {
+  return useMutation({
+    mutationFn: (vars: {
+      path: string;
+      content: string;
+      baseMtime: number | null;
+      force?: boolean;
+    }) =>
+      writeApi(
+        sessionId,
+        vars.path,
+        vars.content,
+        vars.baseMtime,
+        vars.force ?? false,
+      ),
   });
 }
 
