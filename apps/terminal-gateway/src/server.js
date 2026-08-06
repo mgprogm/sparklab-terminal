@@ -5011,6 +5011,25 @@ function fsTypeOf(y) {
   return "other";
 }
 
+// Type, size, and mtime of one path via a single find invocation.
+async function statPath(server, p) {
+  const { stdout } = await serverCmd(server, [
+    "find",
+    p,
+    "-maxdepth",
+    "0",
+    "-printf",
+    "%y\\t%s\\t%T@",
+  ]);
+  const [ty, sz, mtimeRaw] = stdout.split("\t");
+  const mtimeSec = parseFloat(mtimeRaw);
+  return {
+    type: fsTypeOf(ty),
+    size: Number(sz) || 0,
+    mtime: Number.isFinite(mtimeSec) ? Math.round(mtimeSec * 1000) : null,
+  };
+}
+
 // The current type of a single path via `find <path> -maxdepth 0 -printf '%y'`.
 // Returns the type char ('d'/'f'/'l'/...) or throws (mapped to 404/403/502).
 async function fsStatType(server, p) {
@@ -6191,6 +6210,36 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, body);
   }
 
+  // GET /api/sessions/:id/fs/stat?path=<abs>
+  if (
+    req.method === "GET" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "stat"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+
+    try {
+      const stat = await statPath(server, p);
+      return sendJson(res, 200, { path: p, exists: true, ...stat });
+    } catch (err) {
+      const status = fsErrorStatus(err);
+      if (status === 404) {
+        return sendJson(res, 200, { path: p, exists: false });
+      }
+      return sendJson(res, status, {
+        error: fsErrorMessage(err, "cannot access path"),
+      });
+    }
+  }
+
   // GET /api/sessions/:id/fs/read?path=<abs>  (text preview, capped)
   if (
     req.method === "GET" &&
@@ -6211,21 +6260,12 @@ async function handleApi(req, res, url) {
     let size = 0;
     let mtime = null;
     try {
-      const st = await serverCmd(server, [
-        "find",
-        p,
-        "-maxdepth",
-        "0",
-        "-printf",
-        "%y\\t%s\\t%T@",
-      ]);
-      const [ty, sz, mtimeRaw] = st.stdout.split("\t");
-      if (ty === "d") {
+      const stat = await statPath(server, p);
+      if (stat.type === "dir") {
         return sendJson(res, 400, { error: "path is a directory" });
       }
-      size = Number(sz) || 0;
-      const mtimeSec = parseFloat(mtimeRaw);
-      mtime = Number.isFinite(mtimeSec) ? Math.round(mtimeSec * 1000) : null;
+      size = stat.size;
+      mtime = stat.mtime;
     } catch (err) {
       return sendJson(res, fsErrorStatus(err), {
         error: fsErrorMessage(err, "cannot access path"),
