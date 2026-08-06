@@ -44,6 +44,7 @@ import {
   TooltipTrigger,
 } from "@sparklab/ui/components/ui/tooltip";
 import { cn } from "@sparklab/ui/lib/utils";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ChevronRight,
@@ -69,6 +70,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
+import { FileEditor } from "./file-editor";
 import {
   basename,
   dirname,
@@ -77,11 +79,15 @@ import {
   FsError,
   joinPath,
   useFsDelete,
+  FsConflictError,
+  fsKeys,
+  useFsGitBase,
   useFsList,
   useFsMkdir,
   useFsRead,
   useFsRename,
   useFsUpload,
+  useFsWrite,
 } from "../hooks/use-file-explorer";
 import { useMediaQuery } from "../hooks/use-media-query";
 
@@ -91,6 +97,13 @@ import type { FsEntry } from "@sparklab/shared-types";
 const DEFAULT_LIST_PCT = 58;
 const MIN_PANE_PCT = 25;
 const MAX_PANE_PCT = 75;
+
+type PendingDiscardAction =
+  | { type: "discard" }
+  | { type: "select"; entry: FsEntry }
+  | { type: "navigate"; path: string }
+  | { type: "back" }
+  | { type: "close" };
 
 // ---- Formatting helpers ----
 
@@ -154,6 +167,7 @@ export function FileExplorerDialog({
 }) {
   const isMobile = useMediaQuery("(max-width: 767px)");
   const sid = sessionId ?? "";
+  const queryClient = useQueryClient();
 
   // Current directory: seeded from the first list response (null => "resolve
   // the session cwd"). Reset whenever the dialog (re)opens or the session
@@ -162,6 +176,17 @@ export function FileExplorerDialog({
   const [selected, setSelected] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
+  const [draftContent, setDraftContent] = useState<string | null>(null);
+  const [loadedMtime, setLoadedMtime] = useState<number | null>(null);
+  const [resetToken, setResetToken] = useState(0);
+  const [saveConflict, setSaveConflict] = useState<{
+    exists: boolean;
+    currentMtime?: number | null;
+    currentSize?: number;
+  } | null>(null);
+  const [pendingDiscard, setPendingDiscard] = useState(false);
+  const [pendingDiscardAction, setPendingDiscardAction] =
+    useState<PendingDiscardAction | null>(null);
 
   // Write-op dialogs.
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -187,11 +212,21 @@ export function FileExplorerDialog({
     open && !unreachable,
   );
   const readQuery = useFsRead(sessionId, previewPath);
+  const isEditablePreview = Boolean(
+    previewPath &&
+    readQuery.data &&
+    !readQuery.data.binary &&
+    !readQuery.data.truncated,
+  );
+  const gitBaseQuery = useFsGitBase(sessionId, previewPath, {
+    enabled: isEditablePreview,
+  });
 
   const mkdir = useFsMkdir(sid);
   const rename = useFsRename(sid);
   const remove = useFsDelete(sid);
   const upload = useFsUpload(sid);
+  const write = useFsWrite(sid);
 
   // Reset local state when the dialog opens or the session changes.
   useEffect(() => {
@@ -199,9 +234,21 @@ export function FileExplorerDialog({
       setCurrentPath(null);
       setSelected(null);
       setPreviewPath(null);
+      setDraftContent(null);
+      setLoadedMtime(null);
+      setResetToken(0);
+      setSaveConflict(null);
+      setPendingDiscard(false);
+      setPendingDiscardAction(null);
       setOpError(null);
     }
   }, [open, sessionId]);
+
+  useEffect(() => {
+    if (readQuery.data?.path === previewPath) {
+      setLoadedMtime(readQuery.data.mtime);
+    }
+  }, [previewPath, readQuery.data]);
 
   // Seed the current directory from the first successful listing. Must
   // ignore placeholder data (keepPreviousData carries the last-viewed
@@ -220,28 +267,155 @@ export function FileExplorerDialog({
   }, [listQuery.data, listQuery.isPlaceholderData, currentPath]);
 
   const canWrite = currentPath != null && !unreachable;
+  const isDirty =
+    draftContent !== null && draftContent !== readQuery.data?.content;
+
+  const clearPreviewEditState = () => {
+    setDraftContent(null);
+    setLoadedMtime(null);
+    setSaveConflict(null);
+  };
 
   // ---- Navigation ----
-  const navigateTo = (path: string) => {
+  const performNavigateTo = (path: string) => {
     setCurrentPath(path);
     setSelected(null);
     setPreviewPath(null);
+    clearPreviewEditState();
     setOpError(null);
+  };
+
+  const performSelectEntry = (entry: FsEntry) => {
+    setSelected(entry.name);
+    const full = joinPath(currentPath ?? "/", entry.name);
+    const nextPreviewPath = entry.type === "dir" ? null : full;
+    if (nextPreviewPath !== previewPath) clearPreviewEditState();
+    // Files (and symlinks/other, which the read endpoint resolves) preview;
+    // directories only highlight until double-clicked.
+    setPreviewPath(nextPreviewPath);
+  };
+
+  const requestDiscard = (action: PendingDiscardAction) => {
+    setPendingDiscardAction(action);
+    setPendingDiscard(true);
+  };
+
+  const navigateTo = (path: string) => {
+    if (isDirty) {
+      requestDiscard({ type: "navigate", path });
+      return;
+    }
+    performNavigateTo(path);
   };
 
   const openEntry = (entry: FsEntry) => {
     const full = joinPath(currentPath ?? "/", entry.name);
-    if (entry.type === "dir") {
-      navigateTo(full);
-    }
+    if (entry.type === "dir") navigateTo(full);
   };
 
   const selectEntry = (entry: FsEntry) => {
-    setSelected(entry.name);
     const full = joinPath(currentPath ?? "/", entry.name);
-    // Files (and symlinks/other, which the read endpoint resolves) preview;
-    // directories only highlight until double-clicked.
-    setPreviewPath(entry.type === "dir" ? null : full);
+    const nextPreviewPath = entry.type === "dir" ? null : full;
+    if (isDirty && nextPreviewPath !== previewPath) {
+      requestDiscard({ type: "select", entry });
+      return;
+    }
+    performSelectEntry(entry);
+  };
+
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && isDirty) {
+      requestDiscard({ type: "close" });
+      return;
+    }
+    onOpenChange(nextOpen);
+  };
+
+  const handleMobileBack = () => {
+    if (isDirty) {
+      requestDiscard({ type: "back" });
+      return;
+    }
+    setPreviewPath(null);
+    setSelected(null);
+    clearPreviewEditState();
+  };
+
+  const confirmDiscard = () => {
+    const action = pendingDiscardAction;
+    setDraftContent(null);
+    setSaveConflict(null);
+    setResetToken((token) => token + 1);
+    setPendingDiscard(false);
+    setPendingDiscardAction(null);
+
+    if (action?.type === "select") performSelectEntry(action.entry);
+    if (action?.type === "navigate") performNavigateTo(action.path);
+    if (action?.type === "back") {
+      setPreviewPath(null);
+      setSelected(null);
+      setLoadedMtime(null);
+    }
+    if (action?.type === "close") onOpenChange(false);
+  };
+
+  const handleSave = () => {
+    if (
+      !previewPath ||
+      !readQuery.data ||
+      !isEditablePreview ||
+      write.isPending
+    )
+      return;
+    const path = previewPath;
+    setOpError(null);
+    setSaveConflict(null);
+    write.mutate(
+      {
+        path,
+        content: draftContent ?? readQuery.data.content ?? "",
+        baseMtime: loadedMtime,
+        force: false,
+      },
+      {
+        onSuccess: (response) => {
+          setDraftContent(null);
+          setSaveConflict(null);
+          setLoadedMtime(response.mtime);
+          void queryClient.invalidateQueries({
+            queryKey: fsKeys.read(sid, path),
+          });
+        },
+        onError: (error) => {
+          if (error instanceof FsConflictError) {
+            setSaveConflict({
+              exists: error.exists,
+              ...(error.currentMtime !== undefined
+                ? { currentMtime: error.currentMtime }
+                : {}),
+              ...(error.currentSize !== undefined
+                ? { currentSize: error.currentSize }
+                : {}),
+            });
+          } else {
+            setOpError(fsErrorMessage(error));
+          }
+        },
+      },
+    );
+  };
+
+  const handleConflictReload = async () => {
+    const result = await readQuery.refetch();
+    if (result.isSuccess && result.data) {
+      setLoadedMtime(result.data.mtime);
+      setDraftContent(null);
+      setSaveConflict(null);
+      setResetToken((token) => token + 1);
+      setOpError(null);
+    } else if (result.error) {
+      setOpError(fsErrorMessage(result.error));
+    }
   };
 
   // ---- Write ops ----
@@ -372,6 +546,19 @@ export function FileExplorerDialog({
   const entries = listQuery.data ? sortEntries(listQuery.data.entries) : [];
   const showListPane = !isMobile || previewPath == null;
   const showPreviewPane = !isMobile || previewPath != null;
+  const gitBaseContent =
+    gitBaseQuery.data?.isRepo === true &&
+    gitBaseQuery.data.tracked === true &&
+    "content" in gitBaseQuery.data
+      ? gitBaseQuery.data.content
+      : null;
+  const language = previewPath
+    ? basename(previewPath).match(/\.([^.]+)$/)?.[1]
+    : undefined;
+  const canRefreshDiff =
+    isEditablePreview &&
+    !gitBaseQuery.isFetching &&
+    (gitBaseContent !== null || gitBaseQuery.isFetched);
 
   // Drag the divider to resize the list vs. preview panes (desktop only).
   // Tracks the pointer's X within the pane container and sets the list pane's
@@ -400,7 +587,7 @@ export function FileExplorerDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="flex h-[min(90dvh,860px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
         <DialogHeader className="border-border gap-1.5 border-b px-4 py-3 text-left">
           <div className="flex items-center gap-2">
@@ -737,10 +924,7 @@ export function FileExplorerDialog({
                 <button
                   type="button"
                   className="text-muted-foreground hover:text-foreground border-border flex items-center gap-1.5 border-b px-3 py-2 text-xs"
-                  onClick={() => {
-                    setPreviewPath(null);
-                    setSelected(null);
-                  }}
+                  onClick={handleMobileBack}
                 >
                   <ArrowLeft className="size-3.5" />
                   Back to files
@@ -762,35 +946,120 @@ export function FileExplorerDialog({
               ) : readQuery.data ? (
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="border-border flex items-center justify-between gap-2 border-b px-3 py-2">
-                    <span className="text-foreground min-w-0 truncate text-xs font-medium">
-                      {basename(readQuery.data.path)}
+                    <span className="text-foreground flex min-w-0 items-center gap-1.5 truncate text-xs font-medium">
+                      <span className="truncate">
+                        {basename(readQuery.data.path)}
+                      </span>
+                      {isEditablePreview && isDirty && (
+                        <span
+                          className="bg-chart-2 size-1.5 shrink-0 rounded-full"
+                          aria-label="Unsaved changes"
+                        />
+                      )}
                     </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 shrink-0"
-                      onClick={() => downloadFsFile(sid, readQuery.data!.path)}
-                    >
-                      <Download className="size-3.5" />
-                      Download
-                    </Button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      {isEditablePreview && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7"
+                            disabled={!isDirty || write.isPending}
+                            onClick={handleSave}
+                          >
+                            {write.isPending && (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            )}
+                            Save
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7"
+                            disabled={!isDirty}
+                            onClick={() => requestDiscard({ type: "discard" })}
+                          >
+                            Discard
+                          </Button>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-7"
+                                aria-label="Refresh diff"
+                                disabled={!canRefreshDiff}
+                                onClick={() => void gitBaseQuery.refetch()}
+                              >
+                                <RefreshCw
+                                  className={cn(
+                                    "size-3.5",
+                                    gitBaseQuery.isFetching && "animate-spin",
+                                  )}
+                                />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Refresh diff</TooltipContent>
+                          </Tooltip>
+                        </>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0"
+                        onClick={() =>
+                          downloadFsFile(sid, readQuery.data!.path)
+                        }
+                      >
+                        <Download className="size-3.5" />
+                        Download
+                      </Button>
+                    </div>
                   </div>
+
+                  {isEditablePreview && saveConflict && (
+                    <div className="border-border bg-muted-foreground/5 flex items-center justify-between gap-3 border-b px-3 py-1.5">
+                      <p className="text-muted-foreground text-xs">
+                        This file changed on disk since you opened it.
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 shrink-0"
+                        disabled={readQuery.isFetching}
+                        onClick={() => void handleConflictReload()}
+                      >
+                        {readQuery.isFetching && (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        )}
+                        Reload
+                      </Button>
+                    </div>
+                  )}
 
                   {readQuery.data.binary ? (
                     <div className="text-muted-foreground flex flex-1 items-center justify-center p-4 text-center text-xs">
                       Binary file — preview unavailable.
                     </div>
-                  ) : (
+                  ) : readQuery.data.truncated ? (
                     <div className="flex min-h-0 flex-1 flex-col">
-                      {readQuery.data.truncated && (
-                        <p className="text-muted-foreground bg-muted-foreground/5 border-border border-b px-3 py-1.5 text-xs">
-                          Preview truncated to the first 256 KB.
-                        </p>
-                      )}
+                      <p className="text-muted-foreground bg-muted-foreground/5 border-border border-b px-3 py-1.5 text-xs">
+                        Preview truncated to the first 256 KB.
+                      </p>
                       <pre className="text-foreground [&::-webkit-scrollbar-thumb]:bg-border flex-1 overflow-auto whitespace-pre px-3 py-2 font-mono text-xs [scrollbar-color:var(--border)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar]:w-1.5">
                         {readQuery.data.content ?? ""}
                       </pre>
                     </div>
+                  ) : (
+                    <FileEditor
+                      key={`${previewPath}-${loadedMtime}-${resetToken}`}
+                      content={readQuery.data.content!}
+                      gitBaseContent={gitBaseContent}
+                      readOnly={false}
+                      language={language}
+                      onChange={(next) => setDraftContent(next)}
+                      onSave={handleSave}
+                    />
                   )}
                 </div>
               ) : null}
@@ -954,6 +1223,45 @@ export function FileExplorerDialog({
                 <Loader2 className="size-3.5 animate-spin" />
               )}
               Overwrite
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Unsaved changes confirm */}
+      <AlertDialog
+        open={pendingDiscard}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPendingDiscard(false);
+            setPendingDiscardAction(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your edits to this file will be permanently lost.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => {
+                setPendingDiscard(false);
+                setPendingDiscardAction(null);
+              }}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault();
+                confirmDiscard();
+              }}
+            >
+              Discard
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
