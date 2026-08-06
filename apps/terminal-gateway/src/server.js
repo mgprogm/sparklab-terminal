@@ -6382,6 +6382,111 @@ async function handleApi(req, res, url) {
     return true;
   }
 
+  // PUT /api/sessions/:id/fs/write?path=<abs>&baseMtime=<epoch>&force=0|1
+  if (
+    req.method === "PUT" &&
+    parts.length === 5 &&
+    parts[1] === "sessions" &&
+    parts[3] === "fs" &&
+    parts[4] === "write"
+  ) {
+    const s = await fsResolveSession(res, parts[2]);
+    if (!s) return true;
+    const { server } = s;
+    const p = url.searchParams.get("path");
+    if (!isAbsPath(p)) {
+      return sendJson(res, 400, { error: "path must be an absolute path" });
+    }
+
+    let existing = null;
+    try {
+      existing = await statPath(server, p);
+      if (existing.type !== "file") {
+        return sendJson(res, 400, { error: "not a regular file" });
+      }
+      if (existing.size > FS_READ_CAP) {
+        return sendJson(res, 400, { error: "file too large to edit" });
+      }
+    } catch (err) {
+      const status = fsErrorStatus(err);
+      if (status !== 404) {
+        return sendJson(res, status, {
+          error: fsErrorMessage(err, "cannot access path"),
+        });
+      }
+    }
+
+    const baseMtime = url.searchParams.get("baseMtime");
+    const force = url.searchParams.get("force");
+    if (baseMtime !== null && baseMtime !== "" && force !== "1") {
+      if (!existing) {
+        return sendJson(res, 409, { error: "stale", exists: false });
+      }
+      if (existing.mtime !== Number(baseMtime)) {
+        return sendJson(res, 409, {
+          error: "stale",
+          exists: true,
+          currentMtime: existing.mtime,
+          currentSize: existing.size,
+        });
+      }
+    }
+
+    let buf;
+    try {
+      buf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        let total = 0;
+        let over = false;
+        const tooLarge = () => {
+          const e = new Error("write too large");
+          e.code = "WRITE_TOO_LARGE";
+          return e;
+        };
+        req.on("data", (c) => {
+          total += c.length;
+          if (total > FS_READ_CAP) {
+            if (!over) {
+              over = true;
+              chunks.length = 0;
+            }
+            if (total > FS_READ_CAP + 64 * 1024 * 1024) {
+              req.destroy();
+              reject(tooLarge());
+            }
+            return;
+          }
+          chunks.push(c);
+        });
+        req.on("end", () =>
+          over ? reject(tooLarge()) : resolve(Buffer.concat(chunks)),
+        );
+        req.on("error", reject);
+      });
+    } catch (err) {
+      if (err.code === "WRITE_TOO_LARGE") {
+        return sendJson(res, 413, {
+          error: `write exceeds ${FS_READ_CAP} bytes`,
+        });
+      }
+      return sendJson(res, 400, { error: "failed to read write body" });
+    }
+
+    try {
+      await serverCmdStdin(server, ["tee", "--", p], buf);
+      const stat = await statPath(server, p);
+      return sendJson(res, 200, {
+        path: p,
+        size: stat.size,
+        mtime: stat.mtime,
+      });
+    } catch (err) {
+      return sendJson(res, fsErrorStatus(err), {
+        error: fsErrorMessage(err, "failed to write file"),
+      });
+    }
+  }
+
   // POST /api/sessions/:id/fs/upload?path=<abs-dest>  (raw body -> tee, streamed)
   if (
     req.method === "POST" &&
