@@ -138,7 +138,7 @@ async function fetchFsList(
   return FsListResponseSchema.parse(data);
 }
 
-async function fetchFsRead(
+export async function fetchFsReadOnce(
   sessionId: string,
   path: string,
 ): Promise<FsReadResponse> {
@@ -286,7 +286,7 @@ export function useFsList(
 export function useFsRead(sessionId: string | null, path: string | null) {
   return useQuery({
     queryKey: fsKeys.read(sessionId ?? "", path ?? ""),
-    queryFn: () => fetchFsRead(sessionId!, path!),
+    queryFn: () => fetchFsReadOnce(sessionId!, path!),
     enabled: !!sessionId && !!path,
     staleTime: 30 * 1000,
   });

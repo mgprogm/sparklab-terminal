@@ -62,6 +62,7 @@ import {
   RefreshCw,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import {
   useEffect,
@@ -70,11 +71,13 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
+import { FileConflictView } from "./file-conflict-view";
 import { FileEditor } from "./file-editor";
 import {
   basename,
   dirname,
   downloadFsFile,
+  fetchFsReadOnce,
   fsErrorMessage,
   FsError,
   joinPath,
@@ -86,6 +89,7 @@ import {
   useFsMkdir,
   useFsRead,
   useFsRename,
+  useFsStat,
   useFsUpload,
   useFsWrite,
 } from "../hooks/use-file-explorer";
@@ -104,6 +108,18 @@ type PendingDiscardAction =
   | { type: "navigate"; path: string }
   | { type: "back" }
   | { type: "close" };
+
+type FileConflict = {
+  source: "save" | "external";
+  exists: boolean;
+  currentMtime?: number | null;
+  currentSize?: number;
+  pendingWrite?: {
+    path: string;
+    content: string;
+    baseMtime: number | null;
+  };
+};
 
 // ---- Formatting helpers ----
 
@@ -177,13 +193,18 @@ export function FileExplorerDialog({
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [draftContent, setDraftContent] = useState<string | null>(null);
+  const [editorContentOverride, setEditorContentOverride] = useState<
+    string | null
+  >(null);
   const [loadedMtime, setLoadedMtime] = useState<number | null>(null);
   const [resetToken, setResetToken] = useState(0);
-  const [saveConflict, setSaveConflict] = useState<{
-    exists: boolean;
-    currentMtime?: number | null;
-    currentSize?: number;
-  } | null>(null);
+  const [conflict, setConflict] = useState<FileConflict | null>(null);
+  const [diffViewOpen, setDiffViewOpen] = useState(false);
+  const [diffRemoteContent, setDiffRemoteContent] = useState<string | null>(
+    null,
+  );
+  const [diffUnavailable, setDiffUnavailable] = useState<string | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState(false);
   const [pendingDiscardAction, setPendingDiscardAction] =
     useState<PendingDiscardAction | null>(null);
@@ -203,6 +224,9 @@ export function FileExplorerDialog({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const paneContainerRef = useRef<HTMLDivElement>(null);
+  const lastHandledStatUpdateRef = useRef(0);
+  const dismissedExternalVersionRef = useRef<string | null>(null);
+  const diffFetchIdRef = useRef(0);
   const [listWidthPct, setListWidthPct] = useState(DEFAULT_LIST_PCT);
 
   const listQuery = useFsList(
@@ -221,6 +245,9 @@ export function FileExplorerDialog({
   const gitBaseQuery = useFsGitBase(sessionId, previewPath, {
     enabled: isEditablePreview,
   });
+  const statQuery = useFsStat(sessionId, previewPath, {
+    enabled: open && isEditablePreview,
+  });
 
   const mkdir = useFsMkdir(sid);
   const rename = useFsRename(sid);
@@ -235,9 +262,17 @@ export function FileExplorerDialog({
       setSelected(null);
       setPreviewPath(null);
       setDraftContent(null);
+      setEditorContentOverride(null);
       setLoadedMtime(null);
       setResetToken(0);
-      setSaveConflict(null);
+      setConflict(null);
+      setDiffViewOpen(false);
+      setDiffRemoteContent(null);
+      setDiffUnavailable(null);
+      setDiffLoading(false);
+      lastHandledStatUpdateRef.current = 0;
+      dismissedExternalVersionRef.current = null;
+      diffFetchIdRef.current += 1;
       setPendingDiscard(false);
       setPendingDiscardAction(null);
       setOpError(null);
@@ -249,6 +284,37 @@ export function FileExplorerDialog({
       setLoadedMtime(readQuery.data.mtime);
     }
   }, [previewPath, readQuery.data]);
+
+  useEffect(() => {
+    const stat = statQuery.data;
+    if (
+      !stat ||
+      stat.path !== previewPath ||
+      loadedMtime === null ||
+      statQuery.dataUpdatedAt === lastHandledStatUpdateRef.current
+    )
+      return;
+
+    lastHandledStatUpdateRef.current = statQuery.dataUpdatedAt;
+    const changed = !stat.exists || stat.mtime !== loadedMtime;
+    if (!changed) return;
+
+    const version = stat.exists
+      ? `${stat.path}:true:${String(stat.mtime)}:${String(stat.size)}`
+      : `${stat.path}:false`;
+    if (dismissedExternalVersionRef.current === version) return;
+
+    setConflict((current) => {
+      if (current?.source === "save") return current;
+      return {
+        source: "external",
+        exists: stat.exists,
+        ...(stat.exists
+          ? { currentMtime: stat.mtime, currentSize: stat.size }
+          : {}),
+      };
+    });
+  }, [loadedMtime, previewPath, statQuery.data, statQuery.dataUpdatedAt]);
 
   // Seed the current directory from the first successful listing. Must
   // ignore placeholder data (keepPreviousData carries the last-viewed
@@ -272,8 +338,16 @@ export function FileExplorerDialog({
 
   const clearPreviewEditState = () => {
     setDraftContent(null);
+    setEditorContentOverride(null);
     setLoadedMtime(null);
-    setSaveConflict(null);
+    setConflict(null);
+    setDiffViewOpen(false);
+    setDiffRemoteContent(null);
+    setDiffUnavailable(null);
+    setDiffLoading(false);
+    lastHandledStatUpdateRef.current = 0;
+    dismissedExternalVersionRef.current = null;
+    diffFetchIdRef.current += 1;
   };
 
   // ---- Navigation ----
@@ -344,7 +418,12 @@ export function FileExplorerDialog({
   const confirmDiscard = () => {
     const action = pendingDiscardAction;
     setDraftContent(null);
-    setSaveConflict(null);
+    setEditorContentOverride(null);
+    setConflict(null);
+    setDiffViewOpen(false);
+    setDiffRemoteContent(null);
+    setDiffUnavailable(null);
+    diffFetchIdRef.current += 1;
     setResetToken((token) => token + 1);
     setPendingDiscard(false);
     setPendingDiscardAction(null);
@@ -368,19 +447,25 @@ export function FileExplorerDialog({
     )
       return;
     const path = previewPath;
+    const content = draftContent ?? readQuery.data.content ?? "";
+    const pendingWrite = { path, content, baseMtime: loadedMtime };
     setOpError(null);
-    setSaveConflict(null);
+    setConflict(null);
     write.mutate(
       {
-        path,
-        content: draftContent ?? readQuery.data.content ?? "",
-        baseMtime: loadedMtime,
+        ...pendingWrite,
         force: false,
       },
       {
         onSuccess: (response) => {
           setDraftContent(null);
-          setSaveConflict(null);
+          setEditorContentOverride(null);
+          setConflict(null);
+          setDiffViewOpen(false);
+          setDiffRemoteContent(null);
+          setDiffUnavailable(null);
+          diffFetchIdRef.current += 1;
+          lastHandledStatUpdateRef.current = statQuery.dataUpdatedAt;
           setLoadedMtime(response.mtime);
           void queryClient.invalidateQueries({
             queryKey: fsKeys.read(sid, path),
@@ -388,8 +473,10 @@ export function FileExplorerDialog({
         },
         onError: (error) => {
           if (error instanceof FsConflictError) {
-            setSaveConflict({
+            setConflict({
+              source: "save",
               exists: error.exists,
+              pendingWrite,
               ...(error.currentMtime !== undefined
                 ? { currentMtime: error.currentMtime }
                 : {}),
@@ -410,12 +497,97 @@ export function FileExplorerDialog({
     if (result.isSuccess && result.data) {
       setLoadedMtime(result.data.mtime);
       setDraftContent(null);
-      setSaveConflict(null);
+      setEditorContentOverride(null);
+      setConflict(null);
+      setDiffViewOpen(false);
+      setDiffRemoteContent(null);
+      setDiffUnavailable(null);
+      diffFetchIdRef.current += 1;
+      dismissedExternalVersionRef.current = null;
       setResetToken((token) => token + 1);
       setOpError(null);
     } else if (result.error) {
       setOpError(fsErrorMessage(result.error));
     }
+  };
+
+  const handleViewDiff = async () => {
+    if (!previewPath || !sessionId) return;
+    const requestId = diffFetchIdRef.current + 1;
+    diffFetchIdRef.current = requestId;
+    setDiffViewOpen(true);
+    setDiffRemoteContent(null);
+    setDiffUnavailable(null);
+    setDiffLoading(true);
+
+    try {
+      const remote = await fetchFsReadOnce(sessionId, previewPath);
+      if (diffFetchIdRef.current !== requestId) return;
+      if (remote.binary) {
+        setDiffUnavailable("Diff unavailable — the on-disk file is binary.");
+      } else if (remote.truncated) {
+        setDiffUnavailable(
+          "Diff unavailable — the on-disk file is larger than the preview limit.",
+        );
+      } else {
+        setDiffRemoteContent(remote.content ?? "");
+      }
+    } catch (error) {
+      if (diffFetchIdRef.current === requestId) {
+        setDiffUnavailable(`Diff unavailable — ${fsErrorMessage(error)}.`);
+      }
+    } finally {
+      if (diffFetchIdRef.current === requestId) setDiffLoading(false);
+    }
+  };
+
+  const closeDiffView = () => {
+    setEditorContentOverride(draftContent ?? readQuery.data?.content ?? "");
+    setDiffViewOpen(false);
+  };
+
+  const dismissConflict = () => {
+    if (conflict && previewPath) {
+      dismissedExternalVersionRef.current = conflict.exists
+        ? `${previewPath}:true:${String(conflict.currentMtime)}:${String(conflict.currentSize)}`
+        : `${previewPath}:false`;
+    }
+    setEditorContentOverride(draftContent ?? readQuery.data?.content ?? "");
+    setConflict(null);
+    setDiffViewOpen(false);
+    setDiffRemoteContent(null);
+    setDiffUnavailable(null);
+    diffFetchIdRef.current += 1;
+  };
+
+  const handleOverwriteConflict = () => {
+    if (conflict?.source !== "save" || !conflict.pendingWrite) return;
+    const pendingWrite = conflict.pendingWrite;
+    setOpError(null);
+    write.mutate(
+      {
+        ...pendingWrite,
+        content: draftContent ?? readQuery.data?.content ?? "",
+        force: true,
+      },
+      {
+        onSuccess: (response) => {
+          setDraftContent(null);
+          setEditorContentOverride(null);
+          setLoadedMtime(response.mtime);
+          setConflict(null);
+          setDiffViewOpen(false);
+          setDiffRemoteContent(null);
+          setDiffUnavailable(null);
+          diffFetchIdRef.current += 1;
+          lastHandledStatUpdateRef.current = statQuery.dataUpdatedAt;
+          void queryClient.invalidateQueries({
+            queryKey: fsKeys.read(sid, pendingWrite.path),
+          });
+        },
+        onError: (error) => setOpError(fsErrorMessage(error)),
+      },
+    );
   };
 
   // ---- Write ops ----
@@ -1017,23 +1189,60 @@ export function FileExplorerDialog({
                     </div>
                   </div>
 
-                  {isEditablePreview && saveConflict && (
+                  {isEditablePreview && conflict && (
                     <div className="border-border bg-muted-foreground/5 flex items-center justify-between gap-3 border-b px-3 py-1.5">
                       <p className="text-muted-foreground text-xs">
                         This file changed on disk since you opened it.
                       </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 shrink-0"
-                        disabled={readQuery.isFetching}
-                        onClick={() => void handleConflictReload()}
-                      >
-                        {readQuery.isFetching && (
-                          <Loader2 className="size-3.5 animate-spin" />
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7"
+                          disabled={diffLoading}
+                          onClick={() => void handleViewDiff()}
+                        >
+                          {diffLoading && (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          )}
+                          View diff
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7"
+                          disabled={readQuery.isFetching}
+                          onClick={() => void handleConflictReload()}
+                        >
+                          {readQuery.isFetching && (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          )}
+                          Reload
+                        </Button>
+                        {conflict.source === "save" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7"
+                            disabled={write.isPending}
+                            onClick={handleOverwriteConflict}
+                          >
+                            {write.isPending && (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            )}
+                            Overwrite anyway
+                          </Button>
                         )}
-                        Reload
-                      </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-7"
+                          aria-label="Dismiss conflict"
+                          onClick={dismissConflict}
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   )}
 
@@ -1050,10 +1259,26 @@ export function FileExplorerDialog({
                         {readQuery.data.content ?? ""}
                       </pre>
                     </div>
+                  ) : diffViewOpen ? (
+                    diffRemoteContent !== null ? (
+                      <FileConflictView
+                        local={draftContent ?? readQuery.data?.content ?? ""}
+                        remote={diffRemoteContent ?? ""}
+                        onClose={closeDiffView}
+                      />
+                    ) : (
+                      <div className="text-muted-foreground flex flex-1 items-center justify-center p-4 text-center text-xs">
+                        {diffLoading ? (
+                          <Loader2 className="size-5 animate-spin" />
+                        ) : (
+                          (diffUnavailable ?? "Diff unavailable.")
+                        )}
+                      </div>
+                    )
                   ) : (
                     <FileEditor
                       key={`${previewPath}-${loadedMtime}-${resetToken}`}
-                      content={readQuery.data.content!}
+                      content={editorContentOverride ?? readQuery.data.content!}
                       gitBaseContent={gitBaseContent}
                       readOnly={false}
                       language={language}
