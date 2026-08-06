@@ -520,6 +520,8 @@ export const FsReadResponseSchema = z.object({
   path: z.string(),
   /** True size of the file in bytes (may exceed the returned `content`). */
   size: z.number(),
+  /** Last-modified time in Unix epoch milliseconds, or null when unavailable. */
+  mtime: z.number().nullable(),
   /** Whether the file was detected as binary (a NUL byte in the read buffer). */
   binary: z.boolean(),
   /** Whether the file exceeded the 256 KB read cap (content is the first cap
@@ -532,6 +534,57 @@ export const FsReadResponseSchema = z.object({
   content: z.string().optional(),
 });
 export type FsReadResponse = z.infer<typeof FsReadResponseSchema>;
+
+/** Response body for GET /api/sessions/:id/fs/stat (200 OK). */
+export const FsStatResponseSchema = z.union([
+  z.object({
+    path: z.string(),
+    exists: z.literal(false),
+  }),
+  z.object({
+    path: z.string(),
+    exists: z.literal(true),
+    type: FsEntryTypeSchema,
+    size: z.number(),
+    mtime: z.number().nullable(),
+  }),
+]);
+export type FsStatResponse = z.infer<typeof FsStatResponseSchema>;
+
+/** Response body for PUT /api/sessions/:id/fs/write (200 OK). */
+export const FsWriteResponseSchema = z.object({
+  path: z.string(),
+  size: z.number(),
+  mtime: z.number().nullable(),
+});
+export type FsWriteResponse = z.infer<typeof FsWriteResponseSchema>;
+
+/** Response body for GET /api/sessions/:id/fs/git-base (200 OK). */
+export const FsGitBaseResponseSchema = z.union([
+  z.object({
+    isRepo: z.literal(false),
+  }),
+  z.object({
+    isRepo: z.literal(true),
+    tracked: z.literal(false),
+  }),
+  z.object({
+    isRepo: z.literal(true),
+    tracked: z.literal(true),
+    binary: z.literal(true),
+  }),
+  z.object({
+    isRepo: z.literal(true),
+    tracked: z.literal(true),
+    truncated: z.literal(true),
+  }),
+  z.object({
+    isRepo: z.literal(true),
+    tracked: z.literal(true),
+    content: z.string(),
+  }),
+]);
+export type FsGitBaseResponse = z.infer<typeof FsGitBaseResponseSchema>;
 
 // GET /api/sessions/:id/fs/download?path=<abs> — streams the raw file bytes
 // with Content-Type application/octet-stream and a Content-Disposition
