@@ -75,11 +75,20 @@ const conflictTheme = EditorView.theme({
   "&.cm-merge-b .cm-changedLine": {
     backgroundColor: "color-mix(in srgb, var(--chart-1) 10%, transparent)",
   },
-  "&light.cm-merge-a .cm-changedText, &dark.cm-merge-a .cm-changedText": {
+  ".cm-merge-a .cm-changedText": {
     background: "color-mix(in srgb, var(--destructive) 18%, transparent)",
   },
-  "&light.cm-merge-b .cm-changedText, &dark.cm-merge-b .cm-changedText": {
+  ".cm-merge-b .cm-changedText": {
     background: "color-mix(in srgb, var(--chart-1) 18%, transparent)",
+  },
+  ".cm-collapsedLines": {
+    color: "var(--muted-foreground)",
+    background: "color-mix(in srgb, var(--muted-foreground) 8%, transparent)",
+    fontStyle: "italic",
+  },
+  ".cm-collapsedLines:hover": {
+    color: "var(--foreground)",
+    background: "color-mix(in srgb, var(--muted-foreground) 14%, transparent)",
   },
 });
 
@@ -112,6 +121,7 @@ export function FileConflictView({
       parent: host,
       gutter: true,
       highlightChanges: true,
+      collapseUnchanged: { margin: 3, minSize: 4 },
     });
     view.dom.style.height = "100%";
 
