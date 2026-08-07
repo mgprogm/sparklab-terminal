@@ -923,7 +923,7 @@ export function FileExplorerDialog({
           {showListPane && (
             <div
               className={cn(
-                "flex min-w-0 flex-col overflow-hidden",
+                "@container flex min-w-0 flex-col overflow-hidden",
                 isMobile || !showPreviewPane ? "flex-1" : "",
               )}
               style={
@@ -1047,10 +1047,10 @@ export function FileExplorerDialog({
                               </button>
                             </span>
 
-                            <span className="text-muted-foreground w-16 shrink-0 text-right text-xs tabular-nums">
+                            <span className="text-muted-foreground @sm:inline hidden w-16 shrink-0 text-right text-xs tabular-nums">
                               {formatSize(entry)}
                             </span>
-                            <span className="text-muted-foreground hidden w-36 shrink-0 text-right text-xs tabular-nums sm:inline">
+                            <span className="text-muted-foreground @lg:inline hidden w-36 shrink-0 text-right text-xs tabular-nums">
                               {formatMtime(entry.mtime)}
                             </span>
                           </div>
