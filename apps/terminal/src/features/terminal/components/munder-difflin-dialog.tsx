@@ -3,15 +3,15 @@
 /**
  * MunderDifflinDialog — a thin host seam, structured exactly like
  * KanbanDialog: the body is a single same-origin `<iframe>` pointed at
- * `/munder-difflin/app.html`. That document IS the VNC client — a from-scratch
- * RFB (RFC 6143) implementation (handshake, framebuffer decode onto a
- * `<canvas>`, keyboard/mouse encoding), no noVNC, no websockify. It talks
- * directly to the GATEWAY's `/api/munder-difflin/rfb` WebSocket, which is a
- * dumb byte pipe straight to x11vnc's RFB TCP port for the headless
- * munder-difflin Electron app (Xvfb + x11vnc; see the run-desktop skill in
- * ~/workspaces/sparklab/munder-difflin — see server.js's `munderDifflinWss`
- * for the gateway side). Swap the file behind the iframe and you swap the
- * artifact, same as Kanban/PM.
+ * `/munder-difflin/app.html`. That document nests a further iframe at the
+ * GATEWAY's own `/api/munder-difflin/vnc.html` for the headless munder-difflin
+ * Electron app (Xvfb + x11vnc; see the run-desktop skill in
+ * ~/workspaces/sparklab/munder-difflin). The gateway serves noVNC's static
+ * client straight off disk and terminates the VNC WebSocket itself, relaying
+ * raw bytes to x11vnc's RFB TCP port directly — no `websockify` process
+ * involved (see server.js's `serveMunderDifflinStatic` + `munderDifflinWss`).
+ * Swap the file behind the iframe and you swap the artifact, same as
+ * Kanban/PM.
  *
  * Why go through the gateway instead of x11vnc's raw port: x11vnc has no auth
  * of its own (anyone who could reach it could view AND control the app), and
@@ -26,9 +26,10 @@
  * gateway origin already equals the app's origin.)
  *
  * Sandbox flags mirror KanbanDialog's rationale (DOM/CSS/JS isolation, not a
- * security boundary — same-origin first-party content either way). No
- * `allow-forms`/`allow-modals` here (unlike Kanban) — app.html has no forms
- * or window.confirm()/alert() calls, just canvas + WebSocket + input events.
+ * security boundary — same-origin first-party content either way). Because
+ * sandboxing flags apply recursively to nested browsing contexts, the same
+ * flag set also governs the inner noVNC frame: `allow-scripts` lets noVNC's
+ * own JS (RFB protocol, canvas rendering, WebSocket) run.
  *
  * Munder Difflin is gateway-global like Kanban/PM/Agentic (not session- or
  * server-scoped) — the dialog needs no session or server props.
@@ -64,15 +65,15 @@ export function MunderDifflinDialog({
             </DialogTitle>
           </div>
           <DialogDescription className="sr-only">
-            Live view of the munder-difflin Electron app, streamed over a direct
-            VNC (RFB) connection through the gateway.
+            Live view of the munder-difflin Electron app, streamed over noVNC
+            through the gateway's reverse proxy.
           </DialogDescription>
         </DialogHeader>
 
         <iframe
           src={`/munder-difflin/app.html?gateway=${encodeURIComponent(GATEWAY_URL)}`}
           title="Munder Difflin viewer"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
           className="h-full w-full border-0"
         />
       </DialogContent>

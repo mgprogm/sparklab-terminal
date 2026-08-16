@@ -10,43 +10,21 @@
   Munder Difflin (~/workspaces/sparklab/munder-difflin) is a separate Electron
   desktop app with no HTTP frontend of its own — it is run headless on this
   same host under Xvfb, with x11vnc exposing its display as plain RFB on a TCP
-  port. This document is its own RFB (VNC) client — no noVNC, no websockify.
-  The gateway (server.js) is a dumb WS<->TCP byte pipe at
-  `/api/munder-difflin/rfb`; everything protocol-aware (handshake, framebuffer
-  decode, keyboard/mouse encoding) happens right here. The gateway origin is
-  read from the `?gateway=` query param this page is loaded with (set by
+  port. Rather than needing a `websockify` process in front of that port
+  (unauthenticated, and unreachable through the loclx tunnel — only the single
+  proxied origin is tunneled), this document nests an iframe at the GATEWAY's
+  `/api/munder-difflin/vnc.html`: the gateway serves noVNC's static client
+  straight off disk AND terminates the WebSocket itself, relaying raw bytes to
+  x11vnc over a plain TCP socket (see server.js — `serveMunderDifflinStatic` +
+  the `munderDifflinWss` connection handler). The gateway origin is read from
+  the `?gateway=` query param this page is loaded with (set by
   munder-difflin-dialog.tsx from the same NEXT_PUBLIC_GATEWAY_URL the terminal
   connection itself uses) — never hardcode a host here.
 
-  Protocol notes (RFC 6143), and where this client deliberately narrows scope
-  versus a general-purpose VNC client:
-  - Only the RFB 3.8-style security handshake is implemented (server offers a
-    LIST of security types); the older 3.3 "server dictates one type" framing
-    is not. Security type "None" (1) is the only one implemented — matches
-    x11vnc's current `-nopw` setup here. VNC Authentication (DES
-    challenge/response) is NOT implemented; if the server ever requires it,
-    this client reports an error rather than silently failing.
-  - Immediately after the handshake this client sends SetPixelFormat forcing
-    32bpp/depth-24 true-colour, little-endian, shifts R=0 G=8 B=16 — chosen so
-    each pixel's first 3 wire bytes land directly as R,G,B in a Canvas
-    ImageData buffer (byte 4 is unused padding on the wire; we overwrite it
-    with 255 for opacity). This sidesteps ever having to handle the server's
-    native depth/endianness.
-  - SetEncodings declares support for exactly Raw (0) and CopyRect (1) — the
-    two simplest encodings — so the server never sends anything else. No
-    Hextile/Tight/ZRLE/compression. Bandwidth cost is the tradeoff for a
-    client this small; fine over localhost/LAN for one modestly-sized view.
-  - Keyboard: printable characters map straight to their Latin-1/Unicode code
-    point (X11 keysyms mirror Unicode above 0xFF via the 0x01000000+codepoint
-    convention); a fixed table covers the common non-printable keys (Enter,
-    Backspace, Tab, Escape, arrows, Delete, Home/End, F1-F12, modifiers).
-    Anything not in the table is silently dropped rather than guessed at.
-  - No clipboard integration, no resize/rescale negotiation with the server,
-    no reconnect backoff beyond the manual "Reload" button.
-
   x11vnc is a manually-started, ad-hoc process (tmux session `md`), not a
-  managed service — if it isn't running, this client will simply fail to
-  connect and show an error status.
+  managed service — if it isn't running, the inner frame will simply fail to
+  connect. There's no reachability check here; "reload" just reloads the
+  inner frame.
 
   Palette/type mirror DESIGN.md, matching the Kanban/PM artifacts.
 -->
@@ -60,7 +38,6 @@
     --accent: #6fb3a8;
     --accent-soft: #33413e;
     --live: #7cc48f;
-    --err: #e07a6a;
     --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -100,9 +77,8 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--mute);
+    background: var(--live);
     flex: none;
-    transition: background 150ms ease;
   }
 
   #target {
@@ -144,24 +120,13 @@
     flex: 1 1 auto;
     min-height: 0;
     background: #000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    position: relative;
   }
 
-  #fb {
-    max-width: 100%;
-    max-height: 100%;
-    image-rendering: pixelated;
-    cursor: default;
-    outline: none;
-  }
-
-  #fb:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
+  iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
   }
 </style>
 
@@ -171,453 +136,32 @@
   <button id="reload" type="button">Reload</button>
 </div>
 <main>
-  <canvas id="fb" tabindex="0" aria-label="Munder Difflin — live desktop view"></canvas>
+  <iframe id="vnc" title="Munder Difflin — live desktop view"></iframe>
 </main>
 
 <script>
   (function () {
-    "use strict";
-
     var params = new URLSearchParams(location.search);
     var gateway = params.get("gateway") || "http://localhost:3007";
-    var wsProto = gateway.indexOf("https") === 0 ? "wss" : "ws";
-    var wsHost = gateway.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-    var wsUrl = wsProto + "://" + wsHost + "/api/munder-difflin/rfb";
+    // noVNC's own client (app/ui.js) defaults host/port to wherever vnc.html
+    // itself was loaded from, and reads the WS `path` setting from this same
+    // query string — so pointing it at our gateway mount is just this one
+    // param, no extra JS needed on the noVNC side.
+    var src =
+      gateway.replace(/\/+$/, "") +
+      "/api/munder-difflin/vnc.html?autoconnect=true&resize=scale&path=api%2Fmunder-difflin%2Frfb";
 
-    var canvas = document.getElementById("fb");
-    var ctx = canvas.getContext("2d", { alpha: false });
-    var dotEl = document.getElementById("dot");
-    var targetEl = document.getElementById("target");
-    var reloadBtn = document.getElementById("reload");
+    var frame = document.getElementById("vnc");
+    var target = document.getElementById("target");
+    target.textContent =
+      gateway.replace(/^https?:\/\//, "") +
+      "/api/munder-difflin (→ x11vnc → Xvfb → munder-difflin)";
 
-    targetEl.textContent =
-      wsHost + "/api/munder-difflin/rfb (→ x11vnc → Xvfb → munder-difflin)";
-
-    function setStatus(text, mode) {
-      // mode: "live" | "connecting" | "error"
-      dotEl.style.background =
-        mode === "live" ? "var(--live)" : mode === "error" ? "var(--err)" : "var(--mute)";
+    function load() {
+      frame.src = src;
     }
 
-    // ---- Byte-chunk queue: accumulate incoming WS binary frames and let the
-    // parser consume exact byte counts without knowing how they were framed
-    // on the wire (RFB is a pure byte stream over TCP; our WS bridge just
-    // forwards whatever chunks arrived from the TCP socket, so message
-    // boundaries never line up with WS frame boundaries). ----
-    var chunks = [];
-    var totalLen = 0;
-
-    function pushChunk(u8) {
-      chunks.push({ data: u8, off: 0 });
-      totalLen += u8.length;
-    }
-
-    function need(n) {
-      return totalLen >= n;
-    }
-
-    function consume(n) {
-      var out = new Uint8Array(n);
-      var filled = 0;
-      while (filled < n) {
-        var c = chunks[0];
-        var take = Math.min(c.data.length - c.off, n - filled);
-        out.set(c.data.subarray(c.off, c.off + take), filled);
-        filled += take;
-        c.off += take;
-        if (c.off >= c.data.length) chunks.shift();
-      }
-      totalLen -= n;
-      return out;
-    }
-
-    function resetBuffer() {
-      chunks = [];
-      totalLen = 0;
-    }
-
-    // ---- X11 keysym table for non-printable keys (DOM KeyboardEvent.key ->
-    // keysym). Printable single characters are handled separately below via
-    // their Unicode code point. ----
-    var KEYSYM = {
-      Backspace: 0xff08,
-      Tab: 0xff09,
-      Enter: 0xff0d,
-      Escape: 0xff1b,
-      Delete: 0xffff,
-      Insert: 0xff63,
-      Home: 0xff50,
-      End: 0xff57,
-      PageUp: 0xff55,
-      PageDown: 0xff56,
-      ArrowLeft: 0xff51,
-      ArrowUp: 0xff52,
-      ArrowRight: 0xff53,
-      ArrowDown: 0xff54,
-      Shift: 0xffe1,
-      Control: 0xffe3,
-      Alt: 0xffe9,
-      Meta: 0xffeb,
-      CapsLock: 0xffe5,
-      " ": 0x0020,
-      F1: 0xffbe,
-      F2: 0xffbf,
-      F3: 0xffc0,
-      F4: 0xffc1,
-      F5: 0xffc2,
-      F6: 0xffc3,
-      F7: 0xffc4,
-      F8: 0xffc5,
-      F9: 0xffc6,
-      F10: 0xffc7,
-      F11: 0xffc8,
-      F12: 0xffc9,
-    };
-
-    function keysymFor(key) {
-      if (Object.prototype.hasOwnProperty.call(KEYSYM, key)) return KEYSYM[key];
-      // Single-codepoint keys (Array.from splits by codepoint, so a
-      // surrogate-pair character still counts as length 1) cover Latin-1
-      // directly; anything above 0xFF uses X11's Unicode-keysym convention,
-      // 0x01000000 + code point. Anything else (unmapped named keys) is dropped.
-      var chars = Array.from(key);
-      if (chars.length === 1) {
-        var cp = chars[0].codePointAt(0);
-        return cp <= 0xff ? cp : 0x01000000 + cp;
-      }
-      return null;
-    }
-
-    // ---- RFB session ----
-    var ws = null;
-    var state = "closed"; // closed -> version -> security-types -> security-result -> server-init -> server-init-name -> normal
-    var nameLen = 0;
-    var fbWidth = 0;
-    var fbHeight = 0;
-    var fbuRectsLeft = 0;
-    var fbuStage = null; // "rect-header" | "rect-payload"
-    var curRect = null;
-    var buttonMask = 0;
-
-    function u16be(view, off) {
-      return view.getUint16(off, false);
-    }
-
-    function send(bytes) {
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(bytes);
-    }
-
-    function sendClientInit() {
-      send(new Uint8Array([1])); // shared-flag = 1
-    }
-
-    function sendSetPixelFormat() {
-      // type(1)=0, padding(3), then 16-byte PIXEL_FORMAT:
-      // bpp=32 depth=24 big-endian=0 true-colour=1 rmax=255 gmax=255 bmax=255
-      // rshift=0 gshift=8 bshift=16 padding(3)
-      var b = new Uint8Array(20);
-      var dv = new DataView(b.buffer);
-      b[0] = 0; // message type: SetPixelFormat
-      dv.setUint8(4, 32);
-      dv.setUint8(5, 24);
-      dv.setUint8(6, 0);
-      dv.setUint8(7, 1);
-      dv.setUint16(8, 255, false);
-      dv.setUint16(10, 255, false);
-      dv.setUint16(12, 255, false);
-      dv.setUint8(14, 0);
-      dv.setUint8(15, 8);
-      dv.setUint8(16, 16);
-      send(b);
-    }
-
-    function sendSetEncodings() {
-      // type(1)=2, padding(1), count(2)=2, then S32 encodings: Raw(0), CopyRect(1)
-      var b = new Uint8Array(4 + 8);
-      var dv = new DataView(b.buffer);
-      b[0] = 2;
-      dv.setUint16(2, 2, false);
-      dv.setInt32(4, 0, false);
-      dv.setInt32(8, 1, false);
-      send(b);
-    }
-
-    function sendFramebufferUpdateRequest(incremental) {
-      var b = new Uint8Array(10);
-      var dv = new DataView(b.buffer);
-      b[0] = 3;
-      b[1] = incremental ? 1 : 0;
-      dv.setUint16(2, 0, false);
-      dv.setUint16(4, 0, false);
-      dv.setUint16(6, fbWidth, false);
-      dv.setUint16(8, fbHeight, false);
-      send(b);
-    }
-
-    function sendPointerEvent(x, y) {
-      var b = new Uint8Array(6);
-      var dv = new DataView(b.buffer);
-      b[0] = 5;
-      b[1] = buttonMask;
-      dv.setUint16(2, Math.max(0, Math.min(fbWidth - 1, x | 0)), false);
-      dv.setUint16(4, Math.max(0, Math.min(fbHeight - 1, y | 0)), false);
-      send(b);
-    }
-
-    function sendKeyEvent(down, keysym) {
-      var b = new Uint8Array(8);
-      var dv = new DataView(b.buffer);
-      b[0] = 4;
-      b[1] = down ? 1 : 0;
-      dv.setUint16(2, 0, false);
-      dv.setUint32(4, keysym >>> 0, false);
-      send(b);
-    }
-
-    function onServerInitDone() {
-      canvas.width = fbWidth;
-      canvas.height = fbHeight;
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, fbWidth, fbHeight);
-      sendSetPixelFormat();
-      sendSetEncodings();
-      sendFramebufferUpdateRequest(false);
-      setStatus("connected", "live");
-    }
-
-    function drawRaw(x, y, w, h, payload) {
-      var img = ctx.createImageData(w, h);
-      img.data.set(payload.subarray(0, w * h * 4));
-      for (var i = 3; i < img.data.length; i += 4) img.data[i] = 255;
-      ctx.putImageData(img, x, y);
-    }
-
-    function drawCopyRect(x, y, w, h, srcX, srcY) {
-      ctx.drawImage(canvas, srcX, srcY, w, h, x, y, w, h);
-    }
-
-    // ---- Streaming parser: drains `chunks` as far as it can each call, then
-    // returns as soon as data runs out (re-entered on the next WS message). ----
-    function pump() {
-      for (;;) {
-        if (state === "version") {
-          if (!need(12)) return;
-          consume(12); // "RFB 00X.00Y\n" — we always answer with 3.8 regardless of server minor version
-          send(new TextEncoder().encode("RFB 003.008\n"));
-          state = "security-types";
-        } else if (state === "security-types") {
-          if (!need(1)) return;
-          var n = consume(1)[0];
-          if (n === 0) {
-            if (!need(4)) return;
-            var len = new DataView(consume(4).buffer).getUint32(0, false);
-            if (!need(len)) return;
-            var reason = new TextDecoder().decode(consume(len));
-            setStatus("handshake failed: " + reason, "error");
-            return;
-          }
-          if (!need(n)) return;
-          var types = Array.from(consume(n));
-          if (types.indexOf(1) === -1) {
-            setStatus("server requires an auth method this client doesn't support", "error");
-            return;
-          }
-          send(new Uint8Array([1])); // security type 1 = None
-          state = "security-result";
-        } else if (state === "security-result") {
-          if (!need(4)) return;
-          var result = new DataView(consume(4).buffer).getUint32(0, false);
-          if (result !== 0) {
-            setStatus("security rejected", "error");
-            return;
-          }
-          sendClientInit();
-          state = "server-init";
-        } else if (state === "server-init") {
-          if (!need(24)) return;
-          var head = consume(24);
-          var dv = new DataView(head.buffer);
-          fbWidth = dv.getUint16(0, false);
-          fbHeight = dv.getUint16(2, false);
-          nameLen = dv.getUint32(20, false);
-          state = "server-init-name";
-        } else if (state === "server-init-name") {
-          if (!need(nameLen)) return;
-          consume(nameLen);
-          state = "normal";
-          onServerInitDone();
-        } else if (state === "normal") {
-          if (fbuStage === null) {
-            if (!need(1)) return;
-            var msgType = consume(1)[0];
-            if (msgType === 0) {
-              if (!need(3)) return;
-              var fh = consume(3);
-              fbuRectsLeft = new DataView(fh.buffer).getUint16(1, false);
-              fbuStage = "rect-header";
-            } else if (msgType === 2) {
-              // Bell — no payload, nothing to render
-            } else if (msgType === 1) {
-              // SetColourMapEntries — shouldn't occur (we're always true-colour),
-              // but parse and discard defensively so the stream stays in sync.
-              if (!need(5)) return;
-              var cmHead = consume(5);
-              var count = new DataView(cmHead.buffer).getUint16(3, false);
-              if (!need(count * 6)) return;
-              consume(count * 6);
-            } else if (msgType === 3) {
-              // ServerCutText (clipboard) — parsed and discarded; no clipboard integration.
-              if (!need(7)) return;
-              var ctHead = consume(7);
-              var textLen = new DataView(ctHead.buffer).getUint32(3, false);
-              if (!need(textLen)) return;
-              consume(textLen);
-            } else {
-              setStatus("unknown server message type " + msgType, "error");
-              return;
-            }
-          } else if (fbuStage === "rect-header") {
-            if (fbuRectsLeft === 0) {
-              fbuStage = null;
-              sendFramebufferUpdateRequest(true);
-              continue;
-            }
-            if (!need(12)) return;
-            var rh = consume(12);
-            var rdv = new DataView(rh.buffer);
-            curRect = {
-              x: rdv.getUint16(0, false),
-              y: rdv.getUint16(2, false),
-              w: rdv.getUint16(4, false),
-              h: rdv.getUint16(6, false),
-              encoding: rdv.getInt32(8, false),
-            };
-            fbuStage = "rect-payload";
-          } else if (fbuStage === "rect-payload") {
-            if (curRect.encoding === 0) {
-              var payloadLen = curRect.w * curRect.h * 4;
-              if (!need(payloadLen)) return;
-              drawRaw(curRect.x, curRect.y, curRect.w, curRect.h, consume(payloadLen));
-            } else if (curRect.encoding === 1) {
-              if (!need(4)) return;
-              var crdv = new DataView(consume(4).buffer);
-              drawCopyRect(
-                curRect.x,
-                curRect.y,
-                curRect.w,
-                curRect.h,
-                crdv.getUint16(0, false),
-                crdv.getUint16(2, false),
-              );
-            } else {
-              setStatus("unsupported encoding " + curRect.encoding, "error");
-              return;
-            }
-            fbuRectsLeft -= 1;
-            fbuStage = "rect-header";
-          }
-        } else {
-          return;
-        }
-      }
-    }
-
-    // ---- Pointer input ----
-    function canvasScale() {
-      var rect = canvas.getBoundingClientRect();
-      return {
-        x: fbWidth / rect.width,
-        y: fbHeight / rect.height,
-        left: rect.left,
-        top: rect.top,
-      };
-    }
-
-    canvas.addEventListener("mousedown", function (e) {
-      canvas.focus();
-      buttonMask |= 1 << e.button;
-      var s = canvasScale();
-      sendPointerEvent((e.clientX - s.left) * s.x, (e.clientY - s.top) * s.y);
-      e.preventDefault();
-    });
-    canvas.addEventListener("mouseup", function (e) {
-      buttonMask &= ~(1 << e.button);
-      var s = canvasScale();
-      sendPointerEvent((e.clientX - s.left) * s.x, (e.clientY - s.top) * s.y);
-      e.preventDefault();
-    });
-    canvas.addEventListener("mousemove", function (e) {
-      var s = canvasScale();
-      sendPointerEvent((e.clientX - s.left) * s.x, (e.clientY - s.top) * s.y);
-    });
-    canvas.addEventListener("contextmenu", function (e) {
-      e.preventDefault();
-    });
-    canvas.addEventListener(
-      "wheel",
-      function (e) {
-        var s = canvasScale();
-        var x = (e.clientX - s.left) * s.x;
-        var y = (e.clientY - s.top) * s.y;
-        var bit = e.deltaY < 0 ? 1 << 3 : 1 << 4;
-        buttonMask |= bit;
-        sendPointerEvent(x, y);
-        buttonMask &= ~bit;
-        sendPointerEvent(x, y);
-        e.preventDefault();
-      },
-      { passive: false },
-    );
-
-    // ---- Keyboard input ----
-    canvas.addEventListener("keydown", function (e) {
-      var keysym = keysymFor(e.key);
-      if (keysym !== null) {
-        sendKeyEvent(true, keysym);
-        e.preventDefault();
-      }
-    });
-    canvas.addEventListener("keyup", function (e) {
-      var keysym = keysymFor(e.key);
-      if (keysym !== null) {
-        sendKeyEvent(false, keysym);
-        e.preventDefault();
-      }
-    });
-
-    // ---- Connection lifecycle ----
-    function connect() {
-      if (ws) {
-        try {
-          ws.close();
-        } catch (err) {
-          /* already closing */
-        }
-      }
-      resetBuffer();
-      state = "version";
-      fbuStage = null;
-      buttonMask = 0;
-      setStatus("connecting", "connecting");
-      ws = new WebSocket(wsUrl);
-      ws.binaryType = "arraybuffer";
-      ws.onmessage = function (ev) {
-        pushChunk(new Uint8Array(ev.data));
-        try {
-          pump();
-        } catch (err) {
-          setStatus("client error: " + err.message, "error");
-        }
-      };
-      ws.onclose = function () {
-        setStatus("disconnected", "error");
-      };
-      ws.onerror = function () {
-        setStatus("connection error", "error");
-      };
-    }
-
-    reloadBtn.addEventListener("click", connect);
-    connect();
+    document.getElementById("reload").addEventListener("click", load);
+    load();
   })();
 </script>
