@@ -67,20 +67,16 @@ const GATEWAY_API_TOKEN =
 // must not also grant Kanban/PM/Agentic access. See
 // docs/HOOK-NOTIFICATIONS-SETUP.md.
 const HOOK_NOTIFY_TOKEN = process.env.HOOK_NOTIFY_TOKEN || "";
-// Munder Difflin viewer: the gateway speaks RFB (the VNC protocol) directly
-// to x11vnc's raw TCP port — no `websockify` process in between. `websockify`
-// was doing two unrelated jobs: (1) serving noVNC's static JS/HTML client,
-// which we now read straight off disk, and (2) translating WebSocket binary
-// frames <-> a raw TCP byte stream, which is generic (nothing VNC-specific)
-// and easy to do ourselves with the `ws` + `net` already in this file (see
-// the munderDifflinWss connection handler near the WS upgrade endpoint).
-// noVNC's CLIENT (core/rfb.js — the actual RFB protocol implementation,
-// framebuffer decode, keyboard/mouse translation) is kept; reimplementing
-// RFB itself is out of scope, and there's no reason to.
+// Munder Difflin viewer: the gateway is a pure WS<->TCP byte pipe to
+// x11vnc's raw RFB port — it has no idea it's carrying VNC traffic. The RFB
+// protocol itself (handshake, framebuffer decode, keyboard/mouse encoding) is
+// implemented client-side in apps/terminal/public/munder-difflin/app.html —
+// no noVNC, no websockify, nothing VNC-aware in this file. See that file's
+// header comment for the protocol notes (security type, pixel format, and
+// the encodings it declares support for).
 // Deliberately loopback by default — x11vnc carries no auth of its own, so
-// the gateway's existing cookie auth is the only door in. Both are
-// configurable since this is still an ad-hoc process today, not a managed
-// service.
+// the gateway's existing cookie auth is the only door in. Configurable since
+// this is still an ad-hoc process today, not a managed service.
 const MUNDER_DIFFLIN_RFB_TARGET = (() => {
   const raw = process.env.MUNDER_DIFFLIN_RFB_TARGET || "127.0.0.1:5900";
   const idx = raw.lastIndexOf(":");
@@ -89,12 +85,6 @@ const MUNDER_DIFFLIN_RFB_TARGET = (() => {
     port: idx === -1 ? 5900 : Number(raw.slice(idx + 1)) || 5900,
   };
 })();
-// Where noVNC's static client assets live on disk (Ubuntu's `novnc` package
-// installs them here). Served directly, read-only, no upstream HTTP hop.
-const MUNDER_DIFFLIN_NOVNC_DIR = path.resolve(
-  process.env.MUNDER_DIFFLIN_NOVNC_DIR || "/usr/share/novnc",
-);
-const MUNDER_DIFFLIN_PREFIX = "/api/munder-difflin";
 const MUNDER_DIFFLIN_WS_PATH = "/api/munder-difflin/rfb";
 const AGENT_MCP_SCOPED_TOKENS = !["0", "false"].includes(
   String(process.env.AGENT_MCP_SCOPED_TOKENS || "")
@@ -1326,48 +1316,13 @@ async function readJsonObject(req) {
   }
 }
 
-// ---- Munder Difflin viewer (/api/munder-difflin/*) ----
-// Serves noVNC's static client (vnc.html, app/*, core/*, vendor/*) straight
-// off disk — no upstream HTTP hop, no `websockify` web server. Auth is the
-// standard cookie/open-mode check already applied to every /api/* route in
-// handleApi before this is reached. The actual VNC stream rides the separate
-// WS-to-RFB bridge below, not this HTTP path. Mirrors serveStatic's
-// path-traversal guard, rooted at MUNDER_DIFFLIN_NOVNC_DIR instead of
-// PUBLIC_DIR.
-function serveMunderDifflinStatic(req, res, url) {
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    sendJson(res, 405, { error: "method not allowed" });
-    return true;
-  }
-  const rel = url.pathname.slice(MUNDER_DIFFLIN_PREFIX.length) || "/vnc.html";
-  const filePath = path.join(MUNDER_DIFFLIN_NOVNC_DIR, decodeURIComponent(rel));
-  if (!filePath.startsWith(MUNDER_DIFFLIN_NOVNC_DIR)) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return true;
-  }
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("Not found");
-      return;
-    }
-    const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, {
-      "content-type": MIME[ext] || "application/octet-stream",
-    });
-    res.end(data);
-  });
-  return true;
-}
-
-// WS-to-RFB bridge: terminates the browser's WebSocket here and relays raw
-// bytes to/from a plain TCP socket connected straight to x11vnc. This is the
-// one job `websockify` did that's actually generic (nothing VNC-specific —
-// RFB is a byte stream, so frame boundaries on the WS side don't matter); the
-// `ws` library we already depend on for /attach does it in a few lines.
-// noVNC's client (core/rfb.js) still speaks the actual RFB protocol on top of
-// this — only the transport underneath it changed.
+// ---- Munder Difflin viewer: WS-to-RFB bridge (/api/munder-difflin/rfb) ----
+// Terminates the browser's WebSocket here and relays raw bytes to/from a
+// plain TCP socket connected straight to x11vnc. RFB is a byte stream, so
+// frame boundaries on the WS side don't matter — this is a dumb pipe with
+// zero VNC-protocol awareness. The actual RFB client (handshake, framebuffer
+// decode, keyboard/mouse encoding) lives entirely in
+// apps/terminal/public/munder-difflin/app.html.
 const munderDifflinWss = new WebSocketServer({ noServer: true });
 munderDifflinWss.on("connection", (ws) => {
   const tcp = net.connect(
@@ -5480,11 +5435,6 @@ async function handleApi(req, res, url) {
     !(isHookNotifyRoute && isHookNotifyAuthorized(req))
   ) {
     return sendJson(res, 401, { error: "unauthorized" });
-  }
-
-  // ---- Munder Difflin viewer: /api/munder-difflin/* ----
-  if (parts[1] === "munder-difflin") {
-    return serveMunderDifflinStatic(req, res, url);
   }
 
   // ---- Kanban: /api/kanban/* ----
