@@ -880,7 +880,7 @@ export function FileExplorerDialog({
                     )}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Upload file (max 8 MB)</TooltipContent>
+                <TooltipContent>Upload file (max 1 GB)</TooltipContent>
               </Tooltip>
 
               <Tooltip>
@@ -905,6 +905,27 @@ export function FileExplorerDialog({
               </Tooltip>
             </div>
           </div>
+
+          {upload.isPending && (
+            <div className="mt-1 flex items-center gap-2">
+              <div
+                role="progressbar"
+                aria-label="Upload progress"
+                aria-valuenow={upload.progress ?? 0}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                className="bg-accent h-1 flex-1 overflow-hidden rounded-full"
+              >
+                <div
+                  className="bg-primary h-full rounded-full transition-[width]"
+                  style={{ width: `${upload.progress ?? 0}%` }}
+                />
+              </div>
+              <span className="text-muted-foreground w-9 shrink-0 text-right text-xs tabular-nums">
+                {upload.progress ?? 0}%
+              </span>
+            </div>
+          )}
 
           {opError && (
             <p className="text-destructive mt-1 text-xs">{opError}</p>

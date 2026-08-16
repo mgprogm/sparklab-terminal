@@ -32,6 +32,9 @@ const AUTH_USER = "fsuser";
 const AUTH_PASS = "fspass-secret";
 const ALLOWED_ORIGIN = "http://localhost:3000";
 const FS_READ_CAP = 256 * 1024;
+// The gateway defaults FS_UPLOAD_CAP to 1 GB; override it small here via
+// FS_UPLOAD_CAP_BYTES so the oversized-upload check doesn't buffer a
+// gigabyte just to prove the cap is enforced.
 const FS_UPLOAD_CAP = 8 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -70,6 +73,7 @@ function startServer() {
         GATEWAY_AUTH_USER: AUTH_USER,
         GATEWAY_AUTH_PASSWORD: AUTH_PASS,
         ALLOWED_ORIGINS: ALLOWED_ORIGIN,
+        FS_UPLOAD_CAP_BYTES: String(FS_UPLOAD_CAP),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -697,7 +701,7 @@ async function main() {
       `  ok: upload wrote ${payload.length} exact bytes to a spaced name`,
     );
 
-    // >8MB -> 413
+    // > test cap -> 413
     const tooBig = Buffer.alloc(FS_UPLOAD_CAP + 1024, 0x62);
     const resBig = await req(
       "POST",
@@ -712,7 +716,7 @@ async function main() {
       !fs.existsSync(P("toobig.bin")),
       "oversized upload should not have written a file",
     );
-    console.log("  ok: upload > 8MB rejected with 413 (no file written)");
+    console.log("  ok: upload > cap rejected with 413 (no file written)");
   }
 
   // =====================================================================

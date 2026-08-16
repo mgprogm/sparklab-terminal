@@ -4883,7 +4883,10 @@ const FS_READ_CAP = 256 * 1024;
 const FS_LIST_CAP = 5000;
 // Route-local upload cap (bytes). This is SEPARATE from the 64 KB BODY_LIMIT —
 // only the fs/upload route bypasses BODY_LIMIT, and only up to this cap.
-const FS_UPLOAD_CAP = 8 * 1024 * 1024;
+// Overridable via FS_UPLOAD_CAP_BYTES (tests use a small cap to keep the
+// oversized-upload check fast; production defaults to 1 GB).
+const FS_UPLOAD_CAP =
+  Number(process.env.FS_UPLOAD_CAP_BYTES) || 1024 * 1024 * 1024;
 // Hard stop for a hung download stream.
 const FS_DOWNLOAD_TIMEOUT_MS = 120_000;
 
@@ -7159,6 +7162,12 @@ function serveStatic(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  // A disconnected client (e.g. mid-upload) turns a later res.write/end into
+  // an EPIPE/ECONNRESET. http.Server does not attach a default 'error'
+  // listener for that, so it's an unhandled 'error' event — Node's default
+  // behavior is to throw, crashing the entire gateway (every session's WS,
+  // not just this request). No-op it instead.
+  res.on("error", () => {});
   const url = new URL(req.url, `http://${req.headers.host}`);
   // Route /api/* before static.
   if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
@@ -7174,6 +7183,17 @@ const server = http.createServer((req, res) => {
 // A4: Slow-loris / timeout guards.
 server.headersTimeout = 30_000;
 server.requestTimeout = 60_000;
+
+// A client that vanishes mid-request/mid-upload (closed tab, dead network)
+// can EPIPE/ECONNRESET the raw TCP socket underneath req/res. That error is
+// emitted on the Socket instance itself, not on req/res — res.on("error")
+// above does not catch it, and an unhandled 'error' event on any
+// EventEmitter is a throw by default, crashing the entire gateway (every
+// session's WS, not just this one connection). No-op it here, once per
+// connection, for every socket the server ever accepts.
+server.on("connection", (socket) => {
+  socket.on("error", () => {});
+});
 
 // ---- WebSocket attach endpoint ----
 const wss = new WebSocketServer({ noServer: true });
@@ -7334,8 +7354,12 @@ wss.on("connection", async (ws, req) => {
 
   ws.on("message", (data, isBinary) => {
     if (isBinary) {
-      // Keystrokes: pipe straight into the pty.
-      pty.write(data);
+      // Keystrokes: pipe straight into the pty. A message racing teardown
+      // (pty already killed/exited) throws EPIPE — swallow it the same way
+      // pty.resize()/pty.kill() below do, so it never crashes the process.
+      try {
+        pty.write(data);
+      } catch {}
       return;
     }
     // Text frame: JSON control message.

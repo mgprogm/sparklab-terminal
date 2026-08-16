@@ -11,6 +11,14 @@ const nextConfig: NextConfig = {
 
   transpilePackages: ["@sparklab/ui", "@sparklab/shared-types"],
 
+  experimental: {
+    // The /api/:path* rewrite below proxies through Next's middleware layer,
+    // which caps request bodies at 10MB by default — well under the
+    // gateway's FS_UPLOAD_CAP (1GB). Without this, file-explorer uploads
+    // over 10MB reset the connection before reaching the gateway.
+    middlewareClientMaxBodySize: "1gb",
+  },
+
   async rewrites() {
     return [
       {

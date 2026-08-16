@@ -144,26 +144,24 @@ const editorTheme = EditorView.theme({
     backgroundColor: "var(--accent)",
   },
   ".cm-changeGutter": { borderRight: "0" },
-  "&light.cm-merge-b .cm-changedLineGutter, &dark.cm-merge-b .cm-changedLineGutter":
-    { background: "var(--chart-1)" },
-  "&light .cm-deletedLineGutter, &dark .cm-deletedLineGutter": {
+  ".cm-merge-b .cm-changedLineGutter": { background: "var(--chart-1)" },
+  ".cm-deletedLineGutter": {
     background: "var(--destructive)",
   },
   ".cm-inlineChangedLineGutter": { backgroundColor: "var(--chart-2)" },
   "&.cm-merge-b .cm-changedLine, .cm-inlineChangedLine": {
     backgroundColor: "color-mix(in srgb, var(--chart-1) 10%, transparent)",
   },
-  "&light.cm-merge-b .cm-changedText, &dark.cm-merge-b .cm-changedText": {
+  ".cm-merge-b .cm-changedText": {
     background: "color-mix(in srgb, var(--chart-1) 18%, transparent)",
   },
   ".cm-deletedChunk": {
     color: "var(--muted-foreground)",
     backgroundColor: "color-mix(in srgb, var(--destructive) 10%, transparent)",
   },
-  "&.cm-merge-b .cm-deletedText, &light .cm-deletedChunk .cm-deletedText, &dark .cm-deletedChunk .cm-deletedText":
-    {
-      background: "color-mix(in srgb, var(--destructive) 18%, transparent)",
-    },
+  "&.cm-merge-b .cm-deletedText, .cm-deletedChunk .cm-deletedText": {
+    background: "color-mix(in srgb, var(--destructive) 18%, transparent)",
+  },
   ".cm-tooltip": {
     color: "var(--foreground)",
     backgroundColor: "var(--popover)",

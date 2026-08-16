@@ -39,6 +39,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useState } from "react";
 
 import { UnauthorizedError } from "@/features/auth/api";
 
@@ -83,7 +84,7 @@ export function fsErrorMessage(error: unknown): string {
       case 409:
         return "Already exists";
       case 413:
-        return "File is too large (max 8 MB)";
+        return "File is too large (max 1 GB)";
       case 502:
       case 503:
       case 504:
@@ -220,20 +221,47 @@ async function deleteApi(
   return FsDeleteResponseSchema.parse(data);
 }
 
-async function uploadApi(
+// XHR, not fetch: fetch has no cross-browser way to observe request-body
+// upload progress, only XMLHttpRequest.upload.onprogress does.
+function uploadApi(
   sessionId: string,
   destPath: string,
   file: File,
+  onProgress?: (pct: number) => void,
 ): Promise<FsUploadResponse> {
   const params = new URLSearchParams({ path: destPath });
-  const res = await fetch(fsPath(sessionId, `upload?${params.toString()}`), {
-    method: "POST",
-    body: file,
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", fsPath(sessionId, `upload?${params.toString()}`));
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable)
+        onProgress?.(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        reject(new UnauthorizedError());
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        let err: { error?: string } = {};
+        try {
+          err = JSON.parse(xhr.responseText) as { error?: string };
+        } catch {
+          // non-JSON error body (e.g. a proxy 502 page) — fall through below
+        }
+        reject(new FsError(xhr.status, err.error ?? String(xhr.status)));
+        return;
+      }
+      try {
+        const data: unknown = JSON.parse(xhr.responseText);
+        resolve(FsUploadResponseSchema.parse(data));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.send(file);
   });
-  if (res.status === 401) throw new UnauthorizedError();
-  if (!res.ok) await throwForResponse(res);
-  const data: unknown = await res.json();
-  return FsUploadResponseSchema.parse(data);
 }
 
 async function writeApi(
@@ -351,12 +379,19 @@ export function useFsDelete(sessionId: string) {
 
 export function useFsUpload(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation({
+  // Upload progress lives outside react-query's mutation state (it has no
+  // channel for a fetch/XHR's in-flight byte count) — tracked here instead
+  // and reset on every new attempt / on settle.
+  const [progress, setProgress] = useState<number | null>(null);
+  const mutation = useMutation({
     mutationFn: (vars: { destPath: string; file: File }) =>
-      uploadApi(sessionId, vars.destPath, vars.file),
+      uploadApi(sessionId, vars.destPath, vars.file, setProgress),
+    onMutate: () => setProgress(0),
+    onSettled: () => setProgress(null),
     onSuccess: () =>
       void qc.invalidateQueries({ queryKey: fsKeys.lists(sessionId) }),
   });
+  return { ...mutation, progress };
 }
 
 export function useFsWrite(sessionId: string) {
