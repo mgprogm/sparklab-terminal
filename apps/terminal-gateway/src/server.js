@@ -8,6 +8,7 @@
 // user-confirmed job kill. Every tmux operation (list/attach/create/delete) is filtered to the
 // `web-` name prefix so the gateway can never see or touch unrelated sessions.
 import http from "node:http";
+import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -66,6 +67,23 @@ const GATEWAY_API_TOKEN =
 // must not also grant Kanban/PM/Agentic access. See
 // docs/HOOK-NOTIFICATIONS-SETUP.md.
 const HOOK_NOTIFY_TOKEN = process.env.HOOK_NOTIFY_TOKEN || "";
+// Munder Difflin viewer: the gateway reverse-proxies (HTTP + WS) to the
+// noVNC/websockify bridge fronting that separate app's headless Xvfb display
+// (see components/munder-difflin-dialog.tsx). This is deliberately loopback
+// by default — the bridge itself carries no auth of its own, so the gateway's
+// existing cookie auth is the only door in, and the bridge no longer needs to
+// be bound to 0.0.0.0 for LAN/tunnel access. Configurable since it's an
+// ad-hoc process today, not a managed service.
+const MUNDER_DIFFLIN_VNC_TARGET = (() => {
+  const raw = process.env.MUNDER_DIFFLIN_VNC_TARGET || "127.0.0.1:6080";
+  const idx = raw.lastIndexOf(":");
+  return {
+    host: idx === -1 ? raw : raw.slice(0, idx),
+    port: idx === -1 ? 6080 : Number(raw.slice(idx + 1)) || 6080,
+  };
+})();
+const MUNDER_DIFFLIN_PREFIX = "/api/munder-difflin";
+const MUNDER_DIFFLIN_WS_PATH = "/api/munder-difflin/websockify";
 const AGENT_MCP_SCOPED_TOKENS = !["0", "false"].includes(
   String(process.env.AGENT_MCP_SCOPED_TOKENS || "")
     .trim()
@@ -1293,6 +1311,74 @@ async function readJsonObject(req) {
     }
     return { ok: false, status: 400, error: "malformed JSON body" };
   }
+}
+
+// ---- Munder Difflin viewer (/api/munder-difflin/*) ----
+// A GET-only reverse proxy in front of the noVNC/websockify bridge for the
+// separate munder-difflin Electron app's headless display (see
+// components/munder-difflin-dialog.tsx + docs/TERMINAL-PROTOCOL.md). Auth is
+// the standard cookie/open-mode check already applied to every /api/* route in
+// handleApi before this is reached — the bridge itself has none. Static
+// assets (vnc.html, app/*, vendor/*) are plain byte passthrough; the actual
+// VNC stream rides a separate WS proxy below, not this HTTP path.
+function proxyMunderDifflinHttp(req, res, url) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, 405, { error: "method not allowed" });
+    return true;
+  }
+  const targetPath =
+    (url.pathname.slice(MUNDER_DIFFLIN_PREFIX.length) || "/vnc.html") +
+    url.search;
+  const headers = { ...req.headers };
+  delete headers.host;
+  const proxyReq = http.request(
+    {
+      host: MUNDER_DIFFLIN_VNC_TARGET.host,
+      port: MUNDER_DIFFLIN_VNC_TARGET.port,
+      method: req.method,
+      path: targetPath,
+      headers,
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    },
+  );
+  proxyReq.on("error", (err) => {
+    console.error(`[munder-difflin] proxy error: ${err.message}`);
+    if (!res.headersSent) {
+      sendJson(res, 502, { error: "munder-difflin viewer unreachable" });
+    } else {
+      res.end();
+    }
+  });
+  req.pipe(proxyReq);
+  return true;
+}
+
+// WS upgrade counterpart: raw socket relay to the bridge's own `/websockify`
+// endpoint (its path setting, independent of our `/api/munder-difflin/…`
+// mount point — rewritten here). Mirrors prod-proxy.cjs's upgrade proxying:
+// no `ws` library involved, just piping bytes, consistent with this
+// codebase's "raw bytes end to end" rule for anything carrying a live stream.
+function proxyMunderDifflinUpgrade(req, socket, head) {
+  const upstream = net.connect(
+    MUNDER_DIFFLIN_VNC_TARGET.port,
+    MUNDER_DIFFLIN_VNC_TARGET.host,
+    () => {
+      const lines = [`${req.method} /websockify HTTP/1.1`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      lines.push("", "");
+      upstream.write(lines.join("\r\n"));
+      if (head && head.length) upstream.write(head);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    },
+  );
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
 }
 
 // ---- Kanban (/api/kanban/*) ----
@@ -5380,6 +5466,11 @@ async function handleApi(req, res, url) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
 
+  // ---- Munder Difflin viewer: /api/munder-difflin/* ----
+  if (parts[1] === "munder-difflin") {
+    return proxyMunderDifflinHttp(req, res, url);
+  }
+
   // ---- Kanban: /api/kanban/* ----
   if (parts[1] === "kanban") {
     return handleKanban(req, res, url);
@@ -7200,6 +7291,30 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === MUNDER_DIFFLIN_WS_PATH) {
+    // Same CSWSH guard as /attach, plus a real auth check (this is a raw
+    // socket relay, not a `ws` handshake, so there is no post-handshake
+    // close-4001 path to fall back on — auth must gate the upgrade itself).
+    const origin = req.headers.origin;
+    if (!isOriginAllowed(origin)) {
+      socket.write(
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+      );
+      socket.destroy();
+      return;
+    }
+    if (!isAuthenticated(req)) {
+      socket.write(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+      );
+      socket.destroy();
+      return;
+    }
+    proxyMunderDifflinUpgrade(req, socket, head);
+    return;
+  }
+
   if (url.pathname !== "/attach") {
     socket.destroy();
     return;

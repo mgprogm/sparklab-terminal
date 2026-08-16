@@ -30,6 +30,7 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  AppWindow,
   Bot,
   FolderTree,
   Globe2,
@@ -46,6 +47,7 @@ import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
 import { FileExplorerDialog } from "./file-explorer-dialog";
 import { KanbanDialog } from "./kanban-dialog";
+import { MunderDifflinDialog } from "./munder-difflin-dialog";
 import { PmDialog } from "./pm-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
@@ -112,6 +114,8 @@ export function TerminalShell() {
     setPmOpen,
     agenticOpen,
     setAgenticOpen,
+    munderDifflinOpen,
+    setMunderDifflinOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -166,6 +170,7 @@ export function TerminalShell() {
   useUrlFlagSync("kanban", kanbanOpen, setKanbanOpen);
   useUrlFlagSync("pm", pmOpen, setPmOpen);
   useUrlFlagSync("agentic", agenticOpen, setAgenticOpen);
+  useUrlFlagSync("munder-difflin", munderDifflinOpen, setMunderDifflinOpen);
 
   // ---- "Active session vanished → fall back" ----
   // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
@@ -512,6 +517,21 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Agentic AI Creator</TooltipContent>
           </Tooltip>
+          {/* Munder Difflin is gateway-global too — always enabled. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Munder Difflin"
+                onClick={() => setMunderDifflinOpen(true)}
+              >
+                <AppWindow className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Munder Difflin</TooltipContent>
+          </Tooltip>
           {browserView && !browserVisible && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -645,6 +665,14 @@ export function TerminalShell() {
           Mounted once; open state lives in the store (deep-linked via
           `?agentic`). */}
       <AgenticDialog open={agenticOpen} onOpenChange={setAgenticOpen} />
+
+      {/* Munder Difflin viewer modal — gateway-global, not session-scoped.
+          Mounted once; open state lives in the store (deep-linked via
+          `?munder-difflin`). */}
+      <MunderDifflinDialog
+        open={munderDifflinOpen}
+        onOpenChange={setMunderDifflinOpen}
+      />
     </div>
   );
 }

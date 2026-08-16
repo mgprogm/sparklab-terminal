@@ -1,0 +1,165 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Munder Difflin viewer</title>
+<!--
+  Pluggable Munder Difflin viewer artifact, structured like the Kanban/PM
+  artifacts (see kanban/app.html): a SINGLE self-contained document loaded
+  into a same-origin sandboxed <iframe> by components/munder-difflin-dialog.tsx.
+
+  Munder Difflin (~/workspaces/sparklab/munder-difflin) is a separate Electron
+  desktop app with no HTTP frontend of its own — it is run headless on this
+  same host under Xvfb, and its screen is bridged out over x11vnc + websockify
+  (noVNC) on port 6080 (see the run-desktop skill in that repo). Rather than
+  pointing straight at that port (unauthenticated, and unreachable through the
+  loclx tunnel — only the single proxied origin is tunneled), this document
+  nests an iframe at the GATEWAY's `/api/munder-difflin/vnc.html`, a reverse
+  proxy in front of the bridge (see server.js). The gateway origin is read
+  from the `?gateway=` query param this page is loaded with (set by
+  munder-difflin-dialog.tsx from the same NEXT_PUBLIC_GATEWAY_URL the terminal
+  connection itself uses) — never hardcode a host here.
+
+  That noVNC bridge is a manually-started, ad-hoc process (tmux session `md` +
+  x11vnc + websockify), not a managed service — if the bridge isn't running,
+  the inner frame will simply fail to connect. There's no reachability check
+  here; "reload" just reloads the inner frame.
+
+  Palette/type mirror DESIGN.md, matching the Kanban/PM artifacts.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --mute: #aea69c;
+    --accent: #6fb3a8;
+    --accent-soft: #33413e;
+    --live: #7cc48f;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--canvas-soft);
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  #dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--live);
+    flex: none;
+  }
+
+  #target {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--mute);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  #reload {
+    flex: none;
+    font: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--ink);
+    background: var(--accent-soft);
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+  }
+
+  #reload:hover {
+    background: var(--accent);
+    color: var(--canvas);
+  }
+
+  #reload:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  main {
+    flex: 1 1 auto;
+    min-height: 0;
+    background: #000;
+  }
+
+  iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+</style>
+
+<div id="bar">
+  <span id="dot" aria-hidden="true"></span>
+  <span id="target"></span>
+  <button id="reload" type="button">Reload</button>
+</div>
+<main>
+  <iframe id="vnc" title="Munder Difflin — live desktop view"></iframe>
+</main>
+
+<script>
+  (function () {
+    var params = new URLSearchParams(location.search);
+    var gateway = params.get("gateway") || "http://localhost:3007";
+    // noVNC's own client (app/ui.js) defaults host/port to wherever vnc.html
+    // itself was loaded from, and reads the WS `path` setting from this same
+    // query string — so pointing it at our gateway mount is just this one
+    // param, no extra JS needed on the noVNC side.
+    var src =
+      gateway.replace(/\/+$/, "") +
+      "/api/munder-difflin/vnc.html?autoconnect=true&resize=scale&path=api%2Fmunder-difflin%2Fwebsockify";
+
+    var frame = document.getElementById("vnc");
+    var target = document.getElementById("target");
+    target.textContent =
+      gateway.replace(/^https?:\/\//, "") +
+      "/api/munder-difflin (→ noVNC → Xvfb → munder-difflin)";
+
+    function load() {
+      frame.src = src;
+    }
+
+    document.getElementById("reload").addEventListener("click", load);
+    load();
+  })();
+</script>

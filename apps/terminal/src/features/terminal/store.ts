@@ -80,6 +80,12 @@ interface TerminalState {
   agenticOpen: boolean;
   setAgenticOpen: (open: boolean) => void;
 
+  /** Whether the Munder Difflin viewer dialog is open. NOT persisted — like
+   * the Kanban/PM/Agentic/file-explorer/settings modals, a persisted-open
+   * dialog would flash on reload. */
+  munderDifflinOpen: boolean;
+  setMunderDifflinOpen: (open: boolean) => void;
+
   /** Set of collapsed group keys ("org" or "org/project"). Keys present =
    *  collapsed. Default (absent) = expanded. Persisted. */
   collapsedGroups: Record<string, boolean>;
@@ -131,6 +137,9 @@ export const useTerminalStore = create<TerminalState>()(
 
       agenticOpen: false,
       setAgenticOpen: (open) => set({ agenticOpen: open }),
+
+      munderDifflinOpen: false,
+      setMunderDifflinOpen: (open) => set({ munderDifflinOpen: open }),
 
       collapsedGroups: {},
       toggleGroupCollapsed: (key) =>
