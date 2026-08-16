@@ -4,20 +4,18 @@
  * MunderDifflinDialog — a thin host seam, structured exactly like
  * KanbanDialog: the body is a single same-origin `<iframe>` pointed at
  * `/munder-difflin/app.html`. That document nests a further iframe at the
- * GATEWAY's own `/api/munder-difflin/vnc.html` for the headless munder-difflin
- * Electron app (Xvfb + x11vnc; see the run-desktop skill in
- * ~/workspaces/sparklab/munder-difflin). The gateway serves noVNC's static
- * client straight off disk and terminates the VNC WebSocket itself, relaying
- * raw bytes to x11vnc's RFB TCP port directly — no `websockify` process
- * involved (see server.js's `serveMunderDifflinStatic` + `munderDifflinWss`).
- * Swap the file behind the iframe and you swap the artifact, same as
- * Kanban/PM.
+ * GATEWAY's own `/api/munder-difflin/vnc.html` — a reverse proxy in front of
+ * the noVNC/websockify bridge for the headless munder-difflin Electron app
+ * (Xvfb + x11vnc + websockify; see the run-desktop skill in
+ * ~/workspaces/sparklab/munder-difflin), rather than hitting that bridge's
+ * own port directly. Swap the file behind the iframe and you swap the
+ * artifact, same as Kanban/PM.
  *
- * Why go through the gateway instead of x11vnc's raw port: x11vnc has no auth
- * of its own (anyone who could reach it could view AND control the app), and
- * a hardcoded `host:6080` never worked over the loclx tunnel (only the single
- * proxied origin is tunneled). Routing through the gateway reuses its
- * existing cookie auth/origin allowlist and rides the same origin as
+ * Why go through the gateway instead of the bridge's raw port: the bridge has
+ * no auth of its own (anyone who could reach it could view AND control the
+ * app), and a hardcoded `host:6080` never works over the loclx tunnel (only
+ * the single proxied origin is tunneled). Routing through the gateway reuses
+ * its existing cookie auth/origin allowlist and rides the same origin as
  * everything else in prod. The gateway URL is passed to app.html via a query
  * param (same env var + same reasoning as connection.ts's WS URL: in dev,
  * Next's rewrites can't proxy a WS upgrade, so the client must dial the
@@ -29,7 +27,7 @@
  * security boundary — same-origin first-party content either way). Because
  * sandboxing flags apply recursively to nested browsing contexts, the same
  * flag set also governs the inner noVNC frame: `allow-scripts` lets noVNC's
- * own JS (RFB protocol, canvas rendering, WebSocket) run.
+ * own JS (canvas rendering, WebSocket) run.
  *
  * Munder Difflin is gateway-global like Kanban/PM/Agentic (not session- or
  * server-scoped) — the dialog needs no session or server props.

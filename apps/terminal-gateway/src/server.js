@@ -67,35 +67,23 @@ const GATEWAY_API_TOKEN =
 // must not also grant Kanban/PM/Agentic access. See
 // docs/HOOK-NOTIFICATIONS-SETUP.md.
 const HOOK_NOTIFY_TOKEN = process.env.HOOK_NOTIFY_TOKEN || "";
-// Munder Difflin viewer: the gateway speaks RFB (the VNC protocol) directly
-// to x11vnc's raw TCP port — no `websockify` process in between. `websockify`
-// was doing two unrelated jobs: (1) serving noVNC's static JS/HTML client,
-// which we now read straight off disk, and (2) translating WebSocket binary
-// frames <-> a raw TCP byte stream, which is generic (nothing VNC-specific)
-// and easy to do ourselves with the `ws` + `net` already in this file (see
-// the munderDifflinWss connection handler near the WS upgrade endpoint).
-// noVNC's CLIENT (core/rfb.js — the actual RFB protocol implementation,
-// framebuffer decode, keyboard/mouse translation) is kept; reimplementing
-// RFB itself is out of scope, and there's no reason to.
-// Deliberately loopback by default — x11vnc carries no auth of its own, so
-// the gateway's existing cookie auth is the only door in. Both are
-// configurable since this is still an ad-hoc process today, not a managed
-// service.
-const MUNDER_DIFFLIN_RFB_TARGET = (() => {
-  const raw = process.env.MUNDER_DIFFLIN_RFB_TARGET || "127.0.0.1:5900";
+// Munder Difflin viewer: the gateway reverse-proxies (HTTP + WS) to the
+// noVNC/websockify bridge fronting that separate app's headless Xvfb display
+// (see components/munder-difflin-dialog.tsx). This is deliberately loopback
+// by default — the bridge itself carries no auth of its own, so the gateway's
+// existing cookie auth is the only door in, and the bridge no longer needs to
+// be bound to 0.0.0.0 for LAN/tunnel access. Configurable since it's an
+// ad-hoc process today, not a managed service.
+const MUNDER_DIFFLIN_VNC_TARGET = (() => {
+  const raw = process.env.MUNDER_DIFFLIN_VNC_TARGET || "127.0.0.1:6080";
   const idx = raw.lastIndexOf(":");
   return {
     host: idx === -1 ? raw : raw.slice(0, idx),
-    port: idx === -1 ? 5900 : Number(raw.slice(idx + 1)) || 5900,
+    port: idx === -1 ? 6080 : Number(raw.slice(idx + 1)) || 6080,
   };
 })();
-// Where noVNC's static client assets live on disk (Ubuntu's `novnc` package
-// installs them here). Served directly, read-only, no upstream HTTP hop.
-const MUNDER_DIFFLIN_NOVNC_DIR = path.resolve(
-  process.env.MUNDER_DIFFLIN_NOVNC_DIR || "/usr/share/novnc",
-);
 const MUNDER_DIFFLIN_PREFIX = "/api/munder-difflin";
-const MUNDER_DIFFLIN_WS_PATH = "/api/munder-difflin/rfb";
+const MUNDER_DIFFLIN_WS_PATH = "/api/munder-difflin/websockify";
 const AGENT_MCP_SCOPED_TOKENS = !["0", "false"].includes(
   String(process.env.AGENT_MCP_SCOPED_TOKENS || "")
     .trim()
@@ -455,7 +443,6 @@ const MIME = {
   ".svg": "image/svg+xml; charset=utf-8",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
-  ".png": "image/png",
 };
 
 // ---------------------------------------------------------------------------
@@ -1327,75 +1314,72 @@ async function readJsonObject(req) {
 }
 
 // ---- Munder Difflin viewer (/api/munder-difflin/*) ----
-// Serves noVNC's static client (vnc.html, app/*, core/*, vendor/*) straight
-// off disk — no upstream HTTP hop, no `websockify` web server. Auth is the
-// standard cookie/open-mode check already applied to every /api/* route in
-// handleApi before this is reached. The actual VNC stream rides the separate
-// WS-to-RFB bridge below, not this HTTP path. Mirrors serveStatic's
-// path-traversal guard, rooted at MUNDER_DIFFLIN_NOVNC_DIR instead of
-// PUBLIC_DIR.
-function serveMunderDifflinStatic(req, res, url) {
+// A GET-only reverse proxy in front of the noVNC/websockify bridge for the
+// separate munder-difflin Electron app's headless display (see
+// components/munder-difflin-dialog.tsx + docs/TERMINAL-PROTOCOL.md). Auth is
+// the standard cookie/open-mode check already applied to every /api/* route in
+// handleApi before this is reached — the bridge itself has none. Static
+// assets (vnc.html, app/*, vendor/*) are plain byte passthrough; the actual
+// VNC stream rides a separate WS proxy below, not this HTTP path.
+function proxyMunderDifflinHttp(req, res, url) {
   if (req.method !== "GET" && req.method !== "HEAD") {
     sendJson(res, 405, { error: "method not allowed" });
     return true;
   }
-  const rel = url.pathname.slice(MUNDER_DIFFLIN_PREFIX.length) || "/vnc.html";
-  const filePath = path.join(MUNDER_DIFFLIN_NOVNC_DIR, decodeURIComponent(rel));
-  if (!filePath.startsWith(MUNDER_DIFFLIN_NOVNC_DIR)) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return true;
-  }
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("Not found");
-      return;
+  const targetPath =
+    (url.pathname.slice(MUNDER_DIFFLIN_PREFIX.length) || "/vnc.html") +
+    url.search;
+  const headers = { ...req.headers };
+  delete headers.host;
+  const proxyReq = http.request(
+    {
+      host: MUNDER_DIFFLIN_VNC_TARGET.host,
+      port: MUNDER_DIFFLIN_VNC_TARGET.port,
+      method: req.method,
+      path: targetPath,
+      headers,
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    },
+  );
+  proxyReq.on("error", (err) => {
+    console.error(`[munder-difflin] proxy error: ${err.message}`);
+    if (!res.headersSent) {
+      sendJson(res, 502, { error: "munder-difflin viewer unreachable" });
+    } else {
+      res.end();
     }
-    const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, {
-      "content-type": MIME[ext] || "application/octet-stream",
-    });
-    res.end(data);
   });
+  req.pipe(proxyReq);
   return true;
 }
 
-// WS-to-RFB bridge: terminates the browser's WebSocket here and relays raw
-// bytes to/from a plain TCP socket connected straight to x11vnc. This is the
-// one job `websockify` did that's actually generic (nothing VNC-specific —
-// RFB is a byte stream, so frame boundaries on the WS side don't matter); the
-// `ws` library we already depend on for /attach does it in a few lines.
-// noVNC's client (core/rfb.js) still speaks the actual RFB protocol on top of
-// this — only the transport underneath it changed.
-const munderDifflinWss = new WebSocketServer({ noServer: true });
-munderDifflinWss.on("connection", (ws) => {
-  const tcp = net.connect(
-    MUNDER_DIFFLIN_RFB_TARGET.port,
-    MUNDER_DIFFLIN_RFB_TARGET.host,
+// WS upgrade counterpart: raw socket relay to the bridge's own `/websockify`
+// endpoint (its path setting, independent of our `/api/munder-difflin/…`
+// mount point — rewritten here). Mirrors prod-proxy.cjs's upgrade proxying:
+// no `ws` library involved, just piping bytes, consistent with this
+// codebase's "raw bytes end to end" rule for anything carrying a live stream.
+function proxyMunderDifflinUpgrade(req, socket, head) {
+  const upstream = net.connect(
+    MUNDER_DIFFLIN_VNC_TARGET.port,
+    MUNDER_DIFFLIN_VNC_TARGET.host,
+    () => {
+      const lines = [`${req.method} /websockify HTTP/1.1`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      lines.push("", "");
+      upstream.write(lines.join("\r\n"));
+      if (head && head.length) upstream.write(head);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    },
   );
-  let closed = false;
-  const closeAll = () => {
-    if (closed) return;
-    closed = true;
-    tcp.destroy();
-    if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) {
-      ws.close();
-    }
-  };
-  tcp.on("data", (chunk) => {
-    if (ws.readyState === ws.OPEN) ws.send(chunk, { binary: true });
-  });
-  tcp.on("error", closeAll);
-  tcp.on("close", closeAll);
-  ws.on("message", (data) => {
-    if (!tcp.destroyed) {
-      tcp.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
-    }
-  });
-  ws.on("close", closeAll);
-  ws.on("error", closeAll);
-});
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
+}
 
 // ---- Kanban (/api/kanban/*) ----
 // A gateway-owned, multi-board task tracker (docs/KANBAN-PLAN.md). Store lives in
@@ -5484,7 +5468,7 @@ async function handleApi(req, res, url) {
 
   // ---- Munder Difflin viewer: /api/munder-difflin/* ----
   if (parts[1] === "munder-difflin") {
-    return serveMunderDifflinStatic(req, res, url);
+    return proxyMunderDifflinHttp(req, res, url);
   }
 
   // ---- Kanban: /api/kanban/* ----
@@ -7309,11 +7293,9 @@ server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (url.pathname === MUNDER_DIFFLIN_WS_PATH) {
-    // Same CSWSH guard as /attach, plus a real auth check gating the upgrade
-    // itself: unlike /attach's post-handshake close-4001 convention (a JSON
-    // control message the client understands), this socket carries raw RFB
-    // bytes end to end once connected — there's no app-level framing to hang
-    // an error message on, so auth must reject before the handshake completes.
+    // Same CSWSH guard as /attach, plus a real auth check (this is a raw
+    // socket relay, not a `ws` handshake, so there is no post-handshake
+    // close-4001 path to fall back on — auth must gate the upgrade itself).
     const origin = req.headers.origin;
     if (!isOriginAllowed(origin)) {
       socket.write(
@@ -7329,9 +7311,7 @@ server.on("upgrade", (req, socket, head) => {
       socket.destroy();
       return;
     }
-    munderDifflinWss.handleUpgrade(req, socket, head, (ws) => {
-      munderDifflinWss.emit("connection", ws, req);
-    });
+    proxyMunderDifflinUpgrade(req, socket, head);
     return;
   }
 
