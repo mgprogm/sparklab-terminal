@@ -9,20 +9,22 @@
 
   Munder Difflin (~/workspaces/sparklab/munder-difflin) is a separate Electron
   desktop app with no HTTP frontend of its own — it is run headless on this
-  same host under Xvfb, and its screen is bridged out over x11vnc + websockify
-  (noVNC) on port 6080 (see the run-desktop skill in that repo). Rather than
-  pointing straight at that port (unauthenticated, and unreachable through the
-  loclx tunnel — only the single proxied origin is tunneled), this document
-  nests an iframe at the GATEWAY's `/api/munder-difflin/vnc.html`, a reverse
-  proxy in front of the bridge (see server.js). The gateway origin is read
-  from the `?gateway=` query param this page is loaded with (set by
+  same host under Xvfb, with x11vnc exposing its display as plain RFB on a TCP
+  port. Rather than needing a `websockify` process in front of that port
+  (unauthenticated, and unreachable through the loclx tunnel — only the single
+  proxied origin is tunneled), this document nests an iframe at the GATEWAY's
+  `/api/munder-difflin/vnc.html`: the gateway serves noVNC's static client
+  straight off disk AND terminates the WebSocket itself, relaying raw bytes to
+  x11vnc over a plain TCP socket (see server.js — `serveMunderDifflinStatic` +
+  the `munderDifflinWss` connection handler). The gateway origin is read from
+  the `?gateway=` query param this page is loaded with (set by
   munder-difflin-dialog.tsx from the same NEXT_PUBLIC_GATEWAY_URL the terminal
   connection itself uses) — never hardcode a host here.
 
-  That noVNC bridge is a manually-started, ad-hoc process (tmux session `md` +
-  x11vnc + websockify), not a managed service — if the bridge isn't running,
-  the inner frame will simply fail to connect. There's no reachability check
-  here; "reload" just reloads the inner frame.
+  x11vnc is a manually-started, ad-hoc process (tmux session `md`), not a
+  managed service — if it isn't running, the inner frame will simply fail to
+  connect. There's no reachability check here; "reload" just reloads the
+  inner frame.
 
   Palette/type mirror DESIGN.md, matching the Kanban/PM artifacts.
 -->
@@ -147,13 +149,13 @@
     // param, no extra JS needed on the noVNC side.
     var src =
       gateway.replace(/\/+$/, "") +
-      "/api/munder-difflin/vnc.html?autoconnect=true&resize=scale&path=api%2Fmunder-difflin%2Fwebsockify";
+      "/api/munder-difflin/vnc.html?autoconnect=true&resize=scale&path=api%2Fmunder-difflin%2Frfb";
 
     var frame = document.getElementById("vnc");
     var target = document.getElementById("target");
     target.textContent =
       gateway.replace(/^https?:\/\//, "") +
-      "/api/munder-difflin (→ noVNC → Xvfb → munder-difflin)";
+      "/api/munder-difflin (→ x11vnc → Xvfb → munder-difflin)";
 
     function load() {
       frame.src = src;
