@@ -26,6 +26,17 @@ test("browser arguments omit typed secrets and URL tokens from history", () => {
   assert.doesNotMatch(JSON.stringify(navigate), /CANARY/);
 });
 
+test("scheduled terminal input omits its durable text payload", () => {
+  const sanitized = sanitizePersistedToolArgs("schedule_terminal_input", {
+    session_id: "web-one",
+    text: "CANARY_DELAYED_COMMAND",
+    keys: ["Enter"],
+    execute_at: "2026-08-22T22:30:00+07:00",
+  });
+  assert.equal(sanitized.text, "[scheduled input omitted]");
+  assert.doesNotMatch(JSON.stringify(sanitized), /CANARY/);
+});
+
 test("browser page state and screenshots never become durable tool results", () => {
   const content = JSON.stringify({
     title: "CANARY_PAGE_SECRET",

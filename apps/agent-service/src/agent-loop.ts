@@ -545,6 +545,9 @@ export function sanitizePersistedToolArgs(
   tool: string,
   args: ToolArgs,
 ): ToolArgs {
+  if (tool === "schedule_terminal_input") {
+    return { ...args, text: "[scheduled input omitted]" };
+  }
   const redacted = redactToolArgs(tool, args);
   if (
     tool !== "browser_act" ||

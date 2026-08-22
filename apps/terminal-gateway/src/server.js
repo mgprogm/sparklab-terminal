@@ -434,6 +434,7 @@ const AGENT_NAMED_KEYS = new Set([
 // longer or multiline goes through load-buffer/paste-buffer (bracketed paste).
 const SEND_KEYS_LITERAL_MAX = 200;
 const SEND_TEXT_MAX = 10_000;
+const SCHEDULED_INPUT_TEXT_MAX = 4_096;
 const TERMINAL_ACTION_POLL_INTERVAL_MS = 1_000;
 const TERMINAL_ACTION_MAX_DELAY_MS = 366 * 24 * 60 * 60_000;
 let terminalActionPollTimer = null;
@@ -5230,6 +5231,29 @@ async function fsResolveSession(res, rawRef) {
   return { server, tmuxName };
 }
 
+async function sendLiteralText(server, tmuxName, text) {
+  const singleLine = !text.includes("\n") && !text.includes("\r");
+  if (singleLine && text.length <= SEND_KEYS_LITERAL_MAX) {
+    // -l: literal (no key-name lookup); -- guards a leading "-" in text.
+    await serverExec(server, ["send-keys", "-t", tmuxName, "-l", "--", text]);
+    return;
+  }
+  // Long/multiline text: bracketed paste prevents embedded newlines from
+  // becoming terminal commands. Scheduled input itself is single-line, but the
+  // shared immediate-input helper preserves the existing endpoint behavior.
+  const buf = `gw-agent-${crypto.randomUUID()}`;
+  await serverExecStdin(server, ["load-buffer", "-b", buf, "-"], text);
+  await serverExec(server, [
+    "paste-buffer",
+    "-d",
+    "-p",
+    "-b",
+    buf,
+    "-t",
+    tmuxName,
+  ]);
+}
+
 async function terminalActionPollTick() {
   if (terminalActionTicking) return;
   terminalActionTicking = true;
@@ -5242,6 +5266,10 @@ async function terminalActionPollTick() {
         const server = registry.get(serverId);
         if (!server || !(await sessionExists(server, tmuxName))) {
           throw new Error("target session no longer exists");
+        }
+        if (action.kind === "input") {
+          const text = scheduledTerminalActions.decryptInput(action.input);
+          await sendLiteralText(server, tmuxName, text);
         }
         await serverExec(server, ["send-keys", "-t", tmuxName, ...action.keys]);
         scheduledTerminalActions.finish(action.id);
@@ -5528,8 +5556,8 @@ async function handleApi(req, res, url) {
   }
 
   // ---- One-shot scheduled terminal actions ----
-  // These are intentionally keys-only: scheduled literal text or shell commands
-  // would turn an approval for a timer into a broad delayed execution primitive.
+  // Scheduled input is a deliberately separate, one-time-approved capability.
+  // Literal text is encrypted in the persistent store and never returned by GET.
   if (parts[1] === "terminal-actions") {
     if (req.method === "GET" && parts.length === 2) {
       return sendJson(res, 200, { actions: scheduledTerminalActions.list() });
@@ -5543,6 +5571,9 @@ async function handleApi(req, res, url) {
       }
       if (!body || typeof body !== "object" || Array.isArray(body))
         return sendJson(res, 400, { error: "body must be a JSON object" });
+      const kind = body.kind == null ? "keys" : body.kind;
+      if (kind !== "keys" && kind !== "input")
+        return sendJson(res, 400, { error: 'kind must be "keys" or "input"' });
       const hasTimezone =
         typeof body.executeAt === "string" &&
         /T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(body.executeAt);
@@ -5572,6 +5603,24 @@ async function handleApi(req, res, url) {
       }
       if (typeof body.sessionId !== "string")
         return sendJson(res, 400, { error: "sessionId is required" });
+      if (kind === "input") {
+        if (typeof body.text !== "string")
+          return sendJson(res, 400, {
+            error: "text is required for an input action",
+          });
+        if (
+          body.text.length < 1 ||
+          body.text.length > SCHEDULED_INPUT_TEXT_MAX ||
+          body.text.includes("\n") ||
+          body.text.includes("\r")
+        ) {
+          return sendJson(res, 400, {
+            error: `text must be a single line of 1..${SCHEDULED_INPUT_TEXT_MAX} characters`,
+          });
+        }
+      } else if (body.text !== undefined) {
+        return sendJson(res, 400, { error: "text requires kind input" });
+      }
       const { serverId, tmuxName } = parseSessionRef(body.sessionId);
       const server = registry.get(serverId);
       if (
@@ -5580,11 +5629,30 @@ async function handleApi(req, res, url) {
         !(await sessionExists(server, tmuxName))
       )
         return sendJson(res, 404, { error: "session not found" });
-      const action = scheduledTerminalActions.create({
-        sessionId: body.sessionId,
-        keys: body.keys,
-        executeAt,
-      });
+      let action;
+      try {
+        action =
+          kind === "input"
+            ? scheduledTerminalActions.createInput({
+                sessionId: body.sessionId,
+                text: body.text,
+                keys: body.keys,
+                executeAt,
+              })
+            : scheduledTerminalActions.create({
+                sessionId: body.sessionId,
+                keys: body.keys,
+                executeAt,
+              });
+      } catch (error) {
+        if (error?.code === "SCHEDULED_INPUT_KEY_UNAVAILABLE") {
+          return sendJson(res, 503, { error: error.message });
+        }
+        console.error(`[scheduled-action] create failed: ${error.message}`);
+        return sendJson(res, 500, {
+          error: "failed to persist terminal action",
+        });
+      }
       startTerminalActionLoop();
       return sendJson(res, 201, action);
     }
@@ -7106,35 +7174,8 @@ async function handleApi(req, res, url) {
         });
       }
       const text = body.text;
-      const singleLine = !text.includes("\n") && !text.includes("\r");
       try {
-        if (singleLine && text.length <= SEND_KEYS_LITERAL_MAX) {
-          // -l: literal (no key-name lookup); -- guards a leading "-" in text.
-          await serverExec(server, [
-            "send-keys",
-            "-t",
-            tmuxName,
-            "-l",
-            "--",
-            text,
-          ]);
-        } else {
-          // Long/multiline text: stage in a tmux buffer and bracketed-paste it
-          // (-p), so a shell/editor receives it as a paste, not as typed
-          // commands — newlines inside the paste never execute.
-          const buf = `gw-agent-${crypto.randomUUID()}`;
-          await serverExecStdin(server, ["load-buffer", "-b", buf, "-"], text);
-          // -d deletes the buffer after pasting.
-          await serverExec(server, [
-            "paste-buffer",
-            "-d",
-            "-p",
-            "-b",
-            buf,
-            "-t",
-            tmuxName,
-          ]);
-        }
+        await sendLiteralText(server, tmuxName, text);
       } catch (err) {
         console.error(`[api] keys(text) failed: ${err.message}`);
         return sendJson(res, 500, { error: "failed to send text" });

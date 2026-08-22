@@ -22,6 +22,7 @@ export const WRITE_TOOLS = new Set([
   "type_text",
   "press_keys",
   "schedule_terminal_action",
+  "schedule_terminal_input",
   "cancel_scheduled_terminal_action",
   "run_command",
   "create_session",
@@ -65,9 +66,10 @@ export const WRITE_TOOLS = new Set([
  * so may be allowed-always.
  */
 export const ONE_TIME_TOOLS = new Set([
-  // A delayed key press is autonomous terminal input: every schedule must be
+  // A delayed terminal input is autonomous: every schedule must be
   // explicitly approved, never inherited from an earlier allow-always choice.
   "schedule_terminal_action",
+  "schedule_terminal_input",
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
@@ -327,6 +329,37 @@ export const TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["session_id", "keys", "execute_at"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "schedule_terminal_input",
+      description:
+        "Schedule one exact line of literal text followed by named keys in a terminal. This is delayed command/input execution: use only for an explicit user request, require an unambiguous ISO-8601 date-time including timezone, and state the exact text and keys before approval. It is one-time approved; the gateway encrypts text and timer listings do not reveal it.",
+      parameters: {
+        type: "object",
+        properties: {
+          session_id: { type: "string" },
+          text: {
+            type: "string",
+            description:
+              "Exact single-line literal text to type at the scheduled time.",
+          },
+          keys: {
+            type: "array",
+            minItems: 1,
+            maxItems: 32,
+            items: { type: "string", enum: NAMED_KEYS },
+          },
+          execute_at: {
+            type: "string",
+            description: "ISO-8601 date-time with timezone offset.",
+          },
+        },
+        required: ["session_id", "text", "keys", "execute_at"],
         additionalProperties: false,
       },
     },
@@ -1127,6 +1160,8 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `press: ${(args.keys ?? []).join(" ")}`;
     case "schedule_terminal_action":
       return `schedule ${(args.keys ?? []).join(" ")} at ${args.execute_at ?? ""}`.trimEnd();
+    case "schedule_terminal_input":
+      return `schedule type ${truncate(String(args.text ?? ""))} then ${(args.keys ?? []).join(" ")} at ${args.execute_at ?? ""}`.trimEnd();
     case "list_scheduled_terminal_actions":
       return "list scheduled terminal actions";
     case "cancel_scheduled_terminal_action":
@@ -1340,6 +1375,28 @@ export async function executeTool(
           return "error: no valid keys";
         const action = await gateway.scheduleTerminalAction(
           args.session_id,
+          keys,
+          args.execute_at,
+        );
+        return JSON.stringify({ scheduled: true, ...action });
+      }
+      case "schedule_terminal_input": {
+        if (
+          !args.session_id ||
+          typeof args.text !== "string" ||
+          !Array.isArray(args.keys) ||
+          typeof args.execute_at !== "string"
+        ) {
+          return "error: session_id, text, keys, and execute_at are required";
+        }
+        const keys = args.keys.filter((key) =>
+          (NAMED_KEYS as readonly string[]).includes(key),
+        );
+        if (keys.length !== args.keys.length || keys.length === 0)
+          return "error: no valid keys";
+        const action = await gateway.scheduleTerminalInput(
+          args.session_id,
+          args.text,
           keys,
           args.execute_at,
         );

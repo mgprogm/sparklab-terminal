@@ -28,6 +28,7 @@ const actionStoreDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "gw-terminal-actions-"),
 );
 const actionStoreFile = path.join(actionStoreDir, "actions.json");
+const actionStoreKey = Buffer.alloc(32, 7).toString("base64");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -63,6 +64,7 @@ function startServer() {
         GATEWAY_AUTH_PASSWORD: "",
         GATEWAY_AUTH_PASSWORD_HASH: "",
         SCHEDULED_TERMINAL_ACTIONS_FILE: actionStoreFile,
+        SCHEDULED_TERMINAL_ACTIONS_KEY: actionStoreKey,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -241,6 +243,42 @@ async function main() {
   }
   if (!timerFired) fail("scheduled Enter did not execute at its due time");
   console.log("scheduled terminal action persists, cancels, and fires once");
+
+  // --- 3c. Scheduled text is encrypted, hidden from list, then sent before keys ---
+  const delayedText = "echo timer-input-fired";
+  const resInput = await rest("POST", "/api/terminal-actions", {
+    kind: "input",
+    sessionId: id,
+    text: delayedText,
+    keys: ["Enter"],
+    executeAt: new Date(Date.now() + 1_100).toISOString(),
+  });
+  if (resInput.status !== 201)
+    fail(`scheduled input returned ${resInput.status}, expected 201`);
+  const scheduledInput = await resInput.json();
+  if (scheduledInput.text !== undefined || scheduledInput.hasText !== true)
+    fail("scheduled input response exposed its text payload");
+  const listedInput = await (await rest("GET", "/api/terminal-actions")).json();
+  const listedAction = listedInput.actions.find(
+    (action) => action.id === scheduledInput.id,
+  );
+  if (!listedAction || listedAction.text !== undefined || !listedAction.hasText)
+    fail("scheduled input listing exposed text or omitted hasText");
+  if (fs.readFileSync(actionStoreFile, "utf8").includes(delayedText))
+    fail("scheduled input was persisted as plaintext");
+  let inputFired = false;
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    scr = await getScreen(id);
+    if (
+      scr.screen.split("\n").some((line) => line.trim() === "timer-input-fired")
+    ) {
+      inputFired = true;
+      break;
+    }
+  }
+  if (!inputFired) fail("scheduled input did not type text then press Enter");
+  console.log("scheduled encrypted input fires once without exposing text");
 
   // --- 4. Validation: whitelist + malformed bodies ---
   const resBadKey = await rest("POST", `/api/sessions/${eid}/keys`, {

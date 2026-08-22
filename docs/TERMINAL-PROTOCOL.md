@@ -122,12 +122,17 @@ and mutating calls receive the standard Origin/CSRF check. The store is
 `SCHEDULED_TERMINAL_ACTIONS_FILE`) and is atomically rewritten on every state
 transition.
 
-- `POST /api/terminal-actions` accepts
-  `{ "sessionId", "keys", "executeAt" }`. `keys` is the same 1–32 item
-  named-key whitelist as `POST /keys`; literal text and shell commands are not
-  accepted. `executeAt` must be a timezone-qualified ISO-8601 instant between
-  one second and one year in the future. The target session must exist when the
-  action is created. Returns `201` with the persisted action.
+- `POST /api/terminal-actions` accepts a `keys` action
+  `{ "sessionId", "keys", "executeAt" }`, or an `input` action
+  `{ "kind":"input", "sessionId", "text", "keys", "executeAt" }`.
+  Both use the same 1–32 item named-key whitelist as `POST /keys`. Input text
+  is a 1–4096 character single literal line, is typed before the keys, and is
+  rejected unless `SCHEDULED_TERMINAL_ACTIONS_KEY` is configured as a base64
+  32-byte key. The gateway AES-256-GCM encrypts it at rest and never returns it
+  from the create or list response. `executeAt` must be a timezone-qualified
+  ISO-8601 instant between one second and one year in the future. The target
+  session must exist when the action is created. Returns `201` with the
+  persisted action.
 - `GET /api/terminal-actions` returns `{ "actions": [...] }`, including each
   action's `scheduled` / `executing` / `executed` / `failed` / `cancelled`
   status and any error.
@@ -135,8 +140,8 @@ transition.
   an action that is executing or finished returns `404`.
 
 The gateway checks due actions once per second, claims and persists each action
-as `executing` before it invokes `tmux send-keys`, then records `executed` or
-`failed`. A missing session at fire time fails the action. If the gateway
+as `executing` before it injects its text (if any) and invokes `tmux send-keys`,
+then records `executed` or `failed`. A missing session at fire time fails the action. If the gateway
 crashes after claiming but before sending, the action is deliberately not
 replayed: a lost delayed input is safer than a duplicate consequential key
 press.

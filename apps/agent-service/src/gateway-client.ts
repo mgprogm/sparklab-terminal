@@ -186,11 +186,34 @@ class GatewayClient {
     );
   }
 
+  async scheduleTerminalInput(
+    sessionId: string,
+    text: string,
+    keys: string[],
+    executeAt: string,
+  ): Promise<{ id: string; executeAt: number; status: string }> {
+    return this.json(
+      await this.call("/api/terminal-actions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "input",
+          sessionId,
+          text,
+          keys,
+          executeAt,
+        }),
+      }),
+    );
+  }
+
   async listScheduledTerminalActions(): Promise<{
     actions: Array<{
       id: string;
       sessionId: string;
+      kind: "keys" | "input";
       keys: string[];
+      hasText?: boolean;
       executeAt: number;
       status: string;
       error: string | null;

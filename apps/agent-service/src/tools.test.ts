@@ -49,6 +49,30 @@ test("scheduled terminal actions are approval-gated and require an exact time", 
   );
 });
 
+test("scheduled terminal input is one-time approved and requires exact text", () => {
+  const input = TOOLS.find(
+    (tool) => tool.function.name === "schedule_terminal_input",
+  );
+  assert.ok(input, "schedule_terminal_input missing from TOOLS");
+  assert.equal(WRITE_TOOLS.has("schedule_terminal_input"), true);
+  assert.equal(ONE_TIME_TOOLS.has("schedule_terminal_input"), true);
+  assert.deepEqual(input.function.parameters?.required, [
+    "session_id",
+    "text",
+    "keys",
+    "execute_at",
+  ]);
+  assert.equal(
+    describeCall("schedule_terminal_input", {
+      session_id: "web-x",
+      text: "continue",
+      keys: ["Enter"],
+      execute_at: "2026-08-22T22:30:00+07:00",
+    }),
+    "schedule type continue then Enter at 2026-08-22T22:30:00+07:00",
+  );
+});
+
 test("scheduled terminal actions can be listed and a pending action cancelled", () => {
   const list = TOOLS.find(
     (tool) => tool.function.name === "list_scheduled_terminal_actions",

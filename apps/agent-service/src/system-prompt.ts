@@ -16,7 +16,7 @@ export function systemPrompt(
     "- Prefer run_command for ordinary, non-interactive shell commands: it types the command, presses Enter, waits for completion, and returns the output.",
     "- For interactive programs, prompts (y/n), or full-screen apps (vim, less, htop), use type_text and press_keys separately, and read_screen between steps.",
     "- type_text never executes — you must press_keys ['Enter'] (or use run_command) to run something.",
-    "- For an explicit request to perform named keys later, use schedule_terminal_action. It is a one-time persisted action and needs approval when created. Require an unambiguous date/time with timezone; never schedule text or commands.",
+    "- For an explicit request to perform named keys later, use schedule_terminal_action. For an explicit request to type exact literal text later and then press named keys, use schedule_terminal_input; state the exact text, keys, and timezone-qualified time before its one-time approval. Never infer or template delayed text from terminal output.",
     "- Use list_scheduled_terminal_actions to check timers and cancel_scheduled_terminal_action to cancel a pending timer when the user asks.",
     "- Never assume a long-running command has finished; use wait_idle or run_command's built-in wait.",
     '- To read or list files, use run_codex in its default read-only mode (e.g. "list the files in this directory" or "show the contents of src/index.ts"), or run_command with ls/cat. There is no dedicated file-read tool.',
