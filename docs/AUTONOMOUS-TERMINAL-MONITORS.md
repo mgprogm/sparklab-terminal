@@ -31,3 +31,48 @@ one exact approved action: literal text, named keys, or a literal command
 `POST /api/terminal-monitors` accepts a session, encrypted trigger/action
 payload, interval, expiry, and execution budget. `GET` lists safe metadata;
 `DELETE /api/terminal-monitors/:id` stops an active monitor.
+
+## Agent Chat test prompts
+
+Use a known session ID in place of `2b2-01`. Start with a screen-reading
+prompt so the operator can confirm that the intended session and trigger text
+are present:
+
+```text
+Read the screen and the latest 50 history lines of terminal session 2b2-01.
+```
+
+Create a single-use text action with a literal screen trigger:
+
+```text
+Monitor terminal session 2b2-01 every 60 seconds. If the exact text
+"Build complete" appears, type "continue" and press Enter once. Expire this
+monitor in 30 minutes.
+```
+
+The following prompts cover the supported action types and lifecycle:
+
+```text
+Monitor terminal session 2b2-01 every 2 minutes. If the exact text
+"migration required" appears, run the literal command "pnpm db:migrate" once.
+Expire this monitor in one hour.
+```
+
+```text
+Monitor terminal session 2b2-01 every 1 minute. If the exact text
+"Press Enter to continue" appears, press Enter at most 3 times. Expire this
+monitor in 20 minutes.
+```
+
+```text
+List the autonomous terminal monitors currently configured.
+```
+
+```text
+Stop autonomous terminal monitor <monitor_id>.
+```
+
+Each creation must request approval. Confirm that the approval describes the
+same session, literal trigger, literal action, interval, expiry, and execution
+limit as the prompt. The agent must not create an action whose command or text
+is derived from terminal output.
