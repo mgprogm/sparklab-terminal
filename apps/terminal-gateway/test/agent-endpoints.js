@@ -28,6 +28,7 @@ const actionStoreDir = fs.mkdtempSync(
   path.join(os.tmpdir(), "gw-terminal-actions-"),
 );
 const actionStoreFile = path.join(actionStoreDir, "actions.json");
+const monitorStoreFile = path.join(actionStoreDir, "monitors.json");
 const actionStoreKey = Buffer.alloc(32, 7).toString("base64");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -65,6 +66,7 @@ function startServer() {
         GATEWAY_AUTH_PASSWORD_HASH: "",
         SCHEDULED_TERMINAL_ACTIONS_FILE: actionStoreFile,
         SCHEDULED_TERMINAL_ACTIONS_KEY: actionStoreKey,
+        TERMINAL_MONITORS_FILE: monitorStoreFile,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -279,6 +281,56 @@ async function main() {
   }
   if (!inputFired) fail("scheduled input did not type text then press Enter");
   console.log("scheduled encrypted input fires once without exposing text");
+
+  // --- 3d. Autonomous monitor matches an encrypted trigger and runs one command ---
+  await rest("POST", `/api/sessions/${eid}/keys`, {
+    text: "echo monitor-trigger",
+  });
+  await rest("POST", `/api/sessions/${eid}/keys`, { keys: ["Enter"] });
+  const monitorTrigger = "monitor-trigger";
+  const monitorCommand = "echo monitor-fired";
+  const resMonitor = await rest("POST", "/api/terminal-monitors", {
+    sessionId: id,
+    triggerText: monitorTrigger,
+    actionType: "command",
+    actionText: monitorCommand,
+    keys: [],
+    intervalMs: 60_000,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    maxExecutions: 1,
+  });
+  if (resMonitor.status !== 201)
+    fail(`terminal monitor returned ${resMonitor.status}, expected 201`);
+  const monitor = await resMonitor.json();
+  if (
+    JSON.stringify(monitor).includes(monitorTrigger) ||
+    JSON.stringify(monitor).includes(monitorCommand)
+  )
+    fail("terminal monitor create response exposed encrypted text");
+  const listedMonitors = await (
+    await rest("GET", "/api/terminal-monitors")
+  ).json();
+  if (
+    JSON.stringify(listedMonitors).includes(monitorTrigger) ||
+    JSON.stringify(listedMonitors).includes(monitorCommand)
+  )
+    fail("terminal monitor list exposed encrypted text");
+  let monitorFired = false;
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    scr = await getScreen(id);
+    if (
+      scr.screen.split("\n").some((line) => line.trim() === "monitor-fired")
+    ) {
+      monitorFired = true;
+      break;
+    }
+  }
+  if (!monitorFired)
+    fail("terminal monitor did not execute its approved command");
+  console.log(
+    "autonomous terminal monitor matched once and ran its approved command",
+  );
 
   // --- 4. Validation: whitelist + malformed bodies ---
   const resBadKey = await rest("POST", `/api/sessions/${eid}/keys`, {

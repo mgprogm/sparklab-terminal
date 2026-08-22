@@ -230,6 +230,28 @@ class GatewayClient {
     );
   }
 
+  async startTerminalMonitor(body: Record<string, unknown>) {
+    return this.json(
+      await this.call("/api/terminal-monitors", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  async listTerminalMonitors() {
+    return this.json(await this.call("/api/terminal-monitors"));
+  }
+
+  async stopTerminalMonitor(id: string) {
+    return this.json(
+      await this.call(`/api/terminal-monitors/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
+    );
+  }
+
   /**
    * Run the Codex CLI non-interactively in a session's working directory.
    * The gateway clamps `mode` to read-only|workspace-write and roots Codex at

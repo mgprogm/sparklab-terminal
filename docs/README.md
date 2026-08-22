@@ -7,6 +7,7 @@
 | [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)                             | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
 | [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                                   | Agent Chat: `/agent`, auth, terminal/browser tools, approved screenshot export, history, and safety model               |
 | [SCHEDULED-TERMINAL-INPUT-DESIGN.md](SCHEDULED-TERMINAL-INPUT-DESIGN.md) | Delayed text + key actions: security boundary, encrypted persistence, approval, recovery, and tests                     |
+| [AUTONOMOUS-TERMINAL-MONITORS.md](AUTONOMOUS-TERMINAL-MONITORS.md)       | Deterministic persisted terminal monitoring and bounded autonomous actions                                              |
 | [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md)                                 | Virtual-browser setup, capture/save workflow, code map, security invariants, and troubleshooting                        |
 | [PM-MCP-REMOTE-SETUP.md](PM-MCP-REMOTE-SETUP.md)                         | Secure remote PM MCP installation for Claude Code and Codex over the public HTTPS gateway                               |
 | [BROWSER-HANDOFF-DESIGN.md](BROWSER-HANDOFF-DESIGN.md)                   | Implemented shared interactive-browser architecture, protocol, security model, and lifecycle                            |

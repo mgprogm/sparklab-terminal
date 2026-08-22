@@ -23,6 +23,8 @@ export const WRITE_TOOLS = new Set([
   "press_keys",
   "schedule_terminal_action",
   "schedule_terminal_input",
+  "start_autonomous_terminal_monitor",
+  "stop_autonomous_terminal_monitor",
   "cancel_scheduled_terminal_action",
   "run_command",
   "create_session",
@@ -70,6 +72,7 @@ export const ONE_TIME_TOOLS = new Set([
   // explicitly approved, never inherited from an earlier allow-always choice.
   "schedule_terminal_action",
   "schedule_terminal_input",
+  "start_autonomous_terminal_monitor",
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
@@ -85,6 +88,66 @@ export const ONE_TIME_TOOLS = new Set([
 const NAMED_KEYS = AgentNamedKeySchema.options;
 
 export const TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "start_autonomous_terminal_monitor",
+      description:
+        "Start a deterministic autonomous terminal monitor. It checks the screen at an interval; when exact trigger_text appears, it performs only the exact approved action. action_type command types action_text then Enter; text types action_text then optional keys; keys sends only keys. Requires explicit user request and one-time approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          session_id: { type: "string" },
+          trigger_text: { type: "string" },
+          action_type: { type: "string", enum: ["text", "keys", "command"] },
+          action_text: { type: "string" },
+          keys: { type: "array", items: { type: "string", enum: NAMED_KEYS } },
+          interval_seconds: { type: "integer", minimum: 60, maximum: 3600 },
+          expires_at: {
+            type: "string",
+            description: "ISO-8601 date-time with timezone.",
+          },
+          max_executions: { type: "integer", minimum: 1, maximum: 100 },
+        },
+        required: [
+          "session_id",
+          "trigger_text",
+          "action_type",
+          "interval_seconds",
+          "expires_at",
+          "max_executions",
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_autonomous_terminal_monitors",
+      description:
+        "List autonomous terminal monitors without exposing their trigger or action text.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "stop_autonomous_terminal_monitor",
+      description:
+        "Stop an active autonomous terminal monitor. Requires approval.",
+      parameters: {
+        type: "object",
+        properties: { monitor_id: { type: "string" } },
+        required: ["monitor_id"],
+        additionalProperties: false,
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -1136,6 +1199,13 @@ export interface ToolArgs {
   limit?: number;
   before?: number;
   path?: string;
+  monitor_id?: string;
+  trigger_text?: string;
+  action_type?: string;
+  action_text?: string;
+  interval_seconds?: number;
+  expires_at?: string;
+  max_executions?: number;
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -1162,6 +1232,12 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `schedule ${(args.keys ?? []).join(" ")} at ${args.execute_at ?? ""}`.trimEnd();
     case "schedule_terminal_input":
       return `schedule type ${truncate(String(args.text ?? ""))} then ${(args.keys ?? []).join(" ")} at ${args.execute_at ?? ""}`.trimEnd();
+    case "start_autonomous_terminal_monitor":
+      return `monitor for ${truncate(String(args.trigger_text ?? ""))} then ${args.action_type ?? "action"}`;
+    case "list_autonomous_terminal_monitors":
+      return "list autonomous terminal monitors";
+    case "stop_autonomous_terminal_monitor":
+      return `stop terminal monitor ${args.monitor_id ?? ""}`.trimEnd();
     case "list_scheduled_terminal_actions":
       return "list scheduled terminal actions";
     case "cancel_scheduled_terminal_action":
@@ -1402,6 +1478,36 @@ export async function executeTool(
         );
         return JSON.stringify({ scheduled: true, ...action });
       }
+      case "start_autonomous_terminal_monitor": {
+        if (
+          !args.session_id ||
+          typeof args.trigger_text !== "string" ||
+          typeof args.action_type !== "string" ||
+          typeof args.interval_seconds !== "number" ||
+          typeof args.expires_at !== "string" ||
+          typeof args.max_executions !== "number"
+        )
+          return "error: monitor configuration is incomplete";
+        return JSON.stringify(
+          await gateway.startTerminalMonitor({
+            sessionId: args.session_id,
+            triggerText: args.trigger_text,
+            actionType: args.action_type,
+            actionText: args.action_text,
+            keys: args.keys ?? [],
+            intervalMs: args.interval_seconds * 1000,
+            expiresAt: args.expires_at,
+            maxExecutions: args.max_executions,
+          }),
+        );
+      }
+      case "list_autonomous_terminal_monitors":
+        return JSON.stringify(await gateway.listTerminalMonitors());
+      case "stop_autonomous_terminal_monitor":
+        if (!args.monitor_id) return "error: monitor_id is required";
+        return JSON.stringify(
+          await gateway.stopTerminalMonitor(args.monitor_id),
+        );
       case "list_scheduled_terminal_actions":
         return JSON.stringify(await gateway.listScheduledTerminalActions());
       case "cancel_scheduled_terminal_action": {

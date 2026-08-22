@@ -27,6 +27,7 @@ import pmCollab from "./pm-collab.js";
 import agentic from "./agentic.js";
 import schedules from "./agentic-schedules.js";
 import scheduledTerminalActions from "./scheduled-terminal-actions.js";
+import terminalMonitors from "./terminal-monitors.js";
 import agentRuntime from "./agent-runtime.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
@@ -439,6 +440,8 @@ const TERMINAL_ACTION_POLL_INTERVAL_MS = 1_000;
 const TERMINAL_ACTION_MAX_DELAY_MS = 366 * 24 * 60 * 60_000;
 let terminalActionPollTimer = null;
 let terminalActionTicking = false;
+let terminalMonitorPollTimer = null;
+let terminalMonitorTicking = false;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -5285,6 +5288,66 @@ async function terminalActionPollTick() {
   }
 }
 
+async function terminalMonitorPollTick() {
+  if (terminalMonitorTicking) return;
+  terminalMonitorTicking = true;
+  try {
+    for (const due of terminalMonitors.due()) {
+      try {
+        const { serverId, tmuxName } = parseSessionRef(due.sessionId);
+        const server = registry.get(serverId);
+        if (!server || !(await sessionExists(server, tmuxName)))
+          throw new Error("target session no longer exists");
+        const capture = await serverExec(server, [
+          "capture-pane",
+          "-p",
+          "-J",
+          "-t",
+          tmuxName,
+        ]);
+        const matched = capture.stdout.includes(
+          terminalMonitors.decrypt(due.trigger),
+        );
+        terminalMonitors.finishCheck(due.id, { matched });
+        if (!matched) continue;
+        const monitor = terminalMonitors.claimExecution(due.id);
+        if (!monitor) continue;
+        if (monitor.actionType === "keys")
+          await serverExec(server, [
+            "send-keys",
+            "-t",
+            tmuxName,
+            ...monitor.keys,
+          ]);
+        else {
+          await sendLiteralText(
+            server,
+            tmuxName,
+            terminalMonitors.decrypt(monitor.actionText),
+          );
+          if (monitor.actionType === "command")
+            await serverExec(server, ["send-keys", "-t", tmuxName, "Enter"]);
+          else if (monitor.keys.length)
+            await serverExec(server, [
+              "send-keys",
+              "-t",
+              tmuxName,
+              ...monitor.keys,
+            ]);
+        }
+      } catch (error) {
+        console.error(`[terminal-monitor] ${due.id} failed: ${error.message}`);
+        terminalMonitors.finishCheck(due.id, {
+          matched: false,
+          error: error.message,
+        });
+      }
+    }
+  } finally {
+    terminalMonitorTicking = false;
+  }
+}
+
 function startTerminalActionLoop() {
   if (terminalActionPollTimer) return;
   terminalActionPollTimer = setInterval(
@@ -5292,6 +5355,15 @@ function startTerminalActionLoop() {
     TERMINAL_ACTION_POLL_INTERVAL_MS,
   );
   terminalActionPollTimer.unref?.();
+}
+
+function startTerminalMonitorLoop() {
+  if (terminalMonitorPollTimer) return;
+  terminalMonitorPollTimer = setInterval(
+    () => void terminalMonitorPollTick(),
+    TERMINAL_ACTION_POLL_INTERVAL_MS,
+  );
+  terminalMonitorPollTimer.unref?.();
 }
 
 // ---- A2: Auth route handlers ----
@@ -5553,6 +5625,104 @@ async function handleApi(req, res, url) {
   // ---- Agentic AI Creator: /api/agentic/* ----
   if (parts[1] === "agentic") {
     return handleAgentic(req, res, url);
+  }
+
+  // ---- Autonomous deterministic terminal monitors ----
+  if (parts[1] === "terminal-monitors") {
+    if (req.method === "GET" && parts.length === 2)
+      return sendJson(res, 200, { monitors: terminalMonitors.list() });
+    if (req.method === "POST" && parts.length === 2) {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        return sendJson(res, 400, { error: "malformed JSON body" });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body))
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      const expiresAt = Date.parse(body.expiresAt);
+      const intervalMs = Number(body.intervalMs);
+      const maxExecutions = Number(body.maxExecutions);
+      if (
+        typeof body.sessionId !== "string" ||
+        typeof body.triggerText !== "string" ||
+        body.triggerText.length < 1 ||
+        body.triggerText.length > 1024 ||
+        !Number.isInteger(intervalMs) ||
+        intervalMs < 60_000 ||
+        intervalMs > 3_600_000 ||
+        !Number.isFinite(expiresAt) ||
+        expiresAt <= Date.now() ||
+        expiresAt > Date.now() + TERMINAL_ACTION_MAX_DELAY_MS ||
+        !Number.isInteger(maxExecutions) ||
+        maxExecutions < 1 ||
+        maxExecutions > 100
+      )
+        return sendJson(res, 400, { error: "invalid monitor configuration" });
+      if (!["text", "keys", "command"].includes(body.actionType))
+        return sendJson(res, 400, {
+          error: "actionType must be text, keys, or command",
+        });
+      const textAction = body.actionType !== "keys";
+      if (
+        textAction &&
+        (typeof body.actionText !== "string" ||
+          body.actionText.length < 1 ||
+          body.actionText.length > SCHEDULED_INPUT_TEXT_MAX ||
+          body.actionText.includes("\n") ||
+          body.actionText.includes("\r"))
+      )
+        return sendJson(res, 400, {
+          error: "actionText must be a single line of 1..4096 characters",
+        });
+      const keys = body.keys ?? [];
+      if (
+        !Array.isArray(keys) ||
+        keys.length > 32 ||
+        keys.some(
+          (key) => typeof key !== "string" || !AGENT_NAMED_KEYS.has(key),
+        ) ||
+        (body.actionType === "keys" && keys.length < 1)
+      )
+        return sendJson(res, 400, {
+          error: "keys must be supported named keys",
+        });
+      const { serverId, tmuxName } = parseSessionRef(body.sessionId);
+      const server = registry.get(serverId);
+      if (
+        !ID_RE.test(tmuxName) ||
+        !server ||
+        !(await sessionExists(server, tmuxName))
+      )
+        return sendJson(res, 404, { error: "session not found" });
+      try {
+        const monitor = terminalMonitors.create({
+          sessionId: body.sessionId,
+          triggerText: body.triggerText,
+          actionType: body.actionType,
+          actionText: body.actionText,
+          keys,
+          intervalMs,
+          expiresAt,
+          maxExecutions,
+        });
+        startTerminalMonitorLoop();
+        return sendJson(res, 201, monitor);
+      } catch (error) {
+        return sendJson(
+          res,
+          error?.code === "MONITOR_KEY_UNAVAILABLE" ? 503 : 500,
+          { error: error.message || "failed to create monitor" },
+        );
+      }
+    }
+    if (req.method === "DELETE" && parts.length === 3) {
+      const monitor = terminalMonitors.cancel(decodeURIComponent(parts[2]));
+      return monitor
+        ? sendJson(res, 200, monitor)
+        : sendJson(res, 404, { error: "monitor not found or already stopped" });
+    }
+    return sendJson(res, 404, { error: "not found" });
   }
 
   // ---- One-shot scheduled terminal actions ----
@@ -7670,8 +7840,11 @@ server.listen(PORT, HOST, () => {
   console.log(`web-terminal gateway listening on http://${HOST}:${PORT}`);
   schedules.load();
   scheduledTerminalActions.load();
+  terminalMonitors.load();
   startTerminalActionLoop();
+  startTerminalMonitorLoop();
   void terminalActionPollTick();
+  void terminalMonitorPollTick();
   // If subscriptions persisted across a restart AND VAPID is configured, boot
   // the poll loop now (its first tick re-baselines and notifies nothing).
   if (push.isConfigured() && push.count() > 0) {

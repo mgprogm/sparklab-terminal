@@ -90,32 +90,33 @@ is reserved for the terminal's `/attach`). Schemas live in
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                               | Kind      | Backing                                                                           |
-| ---------------------------------- | --------- | --------------------------------------------------------------------------------- |
-| `list_sessions`                    | read      | `GET /api/sessions`                                                               |
-| `read_screen`                      | read      | `GET /api/sessions/:id/screen`                                                    |
-| `wait_idle`                        | read      | polls `/screen` until a shell prompt / quiescence                                 |
-| `type_text`                        | **write** | `POST /api/sessions/:id/keys {text}` — never executes                             |
-| `press_keys`                       | **write** | `POST …/keys {keys}` (whitelist)                                                  |
-| `schedule_terminal_action`         | **write** | `POST /api/terminal-actions` — one-time persisted named-key action                |
-| `schedule_terminal_input`          | **write** | `POST /api/terminal-actions` — one-time encrypted literal text + named-key action |
-| `list_scheduled_terminal_actions`  | read      | `GET /api/terminal-actions`                                                       |
-| `cancel_scheduled_terminal_action` | **write** | `DELETE /api/terminal-actions/:id`                                                |
-| `run_command`                      | **write** | type + Enter + `wait_idle` (one approval)                                         |
-| `create_session`                   | **write** | `POST /api/sessions`                                                              |
-| `run_codex`                        | **write** | `POST …/codex` — `codex exec` in the session cwd                                  |
-| `browser_observe`                  | read      | Browser Use MCP page state + bounded snapshot                                     |
-| `browser_list_tabs`                | read      | Browser Use MCP tab list                                                          |
-| `browser_act`                      | **write** | one structured navigate/click/type/scroll/tab action                              |
-| `browser_capture`                  | **write** | capture viewport + save through session-scoped gateway `fs/upload`                |
-| `browser_request_handoff`          | **write** | offer the live isolated browser for private human authentication                  |
-| `kanban_list`                      | read      | `GET /api/kanban/boards`                                                          |
-| `kanban_get`                       | read      | `GET /api/kanban/boards/:id`                                                      |
-| `kanban_create`                    | **write** | `POST /api/kanban/boards`                                                         |
-| `kanban_add_card`                  | **write** | `POST /api/kanban/boards/:id/cards`                                               |
-| `kanban_update_card`               | **write** | `PATCH /api/kanban/cards/:id`                                                     |
-| `kanban_move`                      | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409)               |
-| `kanban_delete`                    | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)                |
+| Tool                                | Kind      | Backing                                                                           |
+| ----------------------------------- | --------- | --------------------------------------------------------------------------------- |
+| `list_sessions`                     | read      | `GET /api/sessions`                                                               |
+| `read_screen`                       | read      | `GET /api/sessions/:id/screen`                                                    |
+| `wait_idle`                         | read      | polls `/screen` until a shell prompt / quiescence                                 |
+| `type_text`                         | **write** | `POST /api/sessions/:id/keys {text}` — never executes                             |
+| `press_keys`                        | **write** | `POST …/keys {keys}` (whitelist)                                                  |
+| `schedule_terminal_action`          | **write** | `POST /api/terminal-actions` — one-time persisted named-key action                |
+| `schedule_terminal_input`           | **write** | `POST /api/terminal-actions` — one-time encrypted literal text + named-key action |
+| `start_autonomous_terminal_monitor` | **write** | persisted deterministic screen-triggered text/key/command automation              |
+| `list_scheduled_terminal_actions`   | read      | `GET /api/terminal-actions`                                                       |
+| `cancel_scheduled_terminal_action`  | **write** | `DELETE /api/terminal-actions/:id`                                                |
+| `run_command`                       | **write** | type + Enter + `wait_idle` (one approval)                                         |
+| `create_session`                    | **write** | `POST /api/sessions`                                                              |
+| `run_codex`                         | **write** | `POST …/codex` — `codex exec` in the session cwd                                  |
+| `browser_observe`                   | read      | Browser Use MCP page state + bounded snapshot                                     |
+| `browser_list_tabs`                 | read      | Browser Use MCP tab list                                                          |
+| `browser_act`                       | **write** | one structured navigate/click/type/scroll/tab action                              |
+| `browser_capture`                   | **write** | capture viewport + save through session-scoped gateway `fs/upload`                |
+| `browser_request_handoff`           | **write** | offer the live isolated browser for private human authentication                  |
+| `kanban_list`                       | read      | `GET /api/kanban/boards`                                                          |
+| `kanban_get`                        | read      | `GET /api/kanban/boards/:id`                                                      |
+| `kanban_create`                     | **write** | `POST /api/kanban/boards`                                                         |
+| `kanban_add_card`                   | **write** | `POST /api/kanban/boards/:id/cards`                                               |
+| `kanban_update_card`                | **write** | `PATCH /api/kanban/cards/:id`                                                     |
+| `kanban_move`                       | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409)               |
+| `kanban_delete`                     | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)                |
 
 Kanban tools drive the gateway's `/api/kanban/*` board API (design:
 [`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). Approval tiers (D9): reads run
