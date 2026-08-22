@@ -172,6 +172,41 @@ class GatewayClient {
     }
   }
 
+  async scheduleTerminalAction(
+    sessionId: string,
+    keys: string[],
+    executeAt: string,
+  ): Promise<{ id: string; executeAt: number; status: string }> {
+    return this.json(
+      await this.call("/api/terminal-actions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, keys, executeAt }),
+      }),
+    );
+  }
+
+  async listScheduledTerminalActions(): Promise<{
+    actions: Array<{
+      id: string;
+      sessionId: string;
+      keys: string[];
+      executeAt: number;
+      status: string;
+      error: string | null;
+    }>;
+  }> {
+    return this.json(await this.call("/api/terminal-actions"));
+  }
+
+  async cancelScheduledTerminalAction(id: string): Promise<{ id: string }> {
+    return this.json(
+      await this.call(`/api/terminal-actions/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
+    );
+  }
+
   /**
    * Run the Codex CLI non-interactively in a session's working directory.
    * The gateway clamps `mode` to read-only|workspace-write and roots Codex at

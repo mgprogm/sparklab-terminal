@@ -23,12 +23,15 @@ interface Input {
   url?: string;
   index?: number;
   path?: string;
+  execute_at?: string;
 }
 
 function keystrokeParts(tool: string, input: Input): string[] {
   if (tool === "type_text" && input.text) return [input.text];
   if (tool === "run_command" && input.command) return [input.command, "Enter"];
   if (tool === "press_keys" && Array.isArray(input.keys)) return input.keys;
+  if (tool === "schedule_terminal_action" && Array.isArray(input.keys))
+    return input.keys;
   if (tool === "create_session")
     return [`new session${input.name ? ` "${input.name}"` : ""}`];
   return [];
@@ -70,6 +73,8 @@ export function ApprovalCard({
     "browser_request_handoff",
   ].includes(entry.tool);
   const browserCapture = entry.tool === "browser_capture";
+  const oneTimeAction =
+    browserAction || entry.tool === "schedule_terminal_action";
 
   const parts = keystrokeParts(entry.tool, input);
   const hints = riskHints(entry.tool, input);
@@ -93,7 +98,7 @@ export function ApprovalCard({
   // enforces this, but omitting allow_always here makes the safety boundary
   // visible and prevents an invalid choice from being sent.
   const approve = () =>
-    onRespond(browserAction ? "allow" : always ? "allow_always" : "allow");
+    onRespond(oneTimeAction ? "allow" : always ? "allow_always" : "allow");
   const deny = () => onRespond("deny");
 
   return (
@@ -127,9 +132,11 @@ export function ApprovalCard({
           ? browserCapture
             ? "Save the current browser screen"
             : `Allow this browser action${input.action ? `: ${input.action}` : ""}`
-          : entry.tool === "create_session"
-            ? "create"
-            : "type into"}
+          : entry.tool === "schedule_terminal_action"
+            ? "schedule in"
+            : entry.tool === "create_session"
+              ? "create"
+              : "type into"}
         {(!browserAction || browserCapture) && sessionName && (
           <span className="bg-secondary text-foreground rounded-xs flex items-center gap-1 px-1.5 py-0.5">
             <span className="bg-chart-1 size-[5px] rounded-full" />
@@ -183,6 +190,12 @@ export function ApprovalCard({
         </div>
       )}
 
+      {entry.tool === "schedule_terminal_action" && input.execute_at && (
+        <div className="text-muted-foreground text-[11px]">
+          At {input.execute_at}
+        </div>
+      )}
+
       {hints.length > 0 && (
         <div className="flex flex-col gap-1">
           {hints.map((h, i) => (
@@ -217,11 +230,13 @@ export function ApprovalCard({
         </Button>
       </div>
 
-      {browserAction ? (
+      {oneTimeAction ? (
         <p className="text-muted-foreground text-[11px]">
-          {browserCapture
-            ? "This writes or overwrites the file once. The captured image is not saved in chat history."
-            : "Browser actions are approved one at a time. The page is read-only here."}
+          {entry.tool === "schedule_terminal_action"
+            ? "Scheduled terminal actions are approved one at a time."
+            : browserCapture
+              ? "This writes or overwrites the file once. The captured image is not saved in chat history."
+              : "Browser actions are approved one at a time. The page is read-only here."}
         </p>
       ) : (
         <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">

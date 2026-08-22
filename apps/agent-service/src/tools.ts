@@ -21,6 +21,8 @@ import { gateway, GatewayError } from "./gateway-client.js";
 export const WRITE_TOOLS = new Set([
   "type_text",
   "press_keys",
+  "schedule_terminal_action",
+  "cancel_scheduled_terminal_action",
   "run_command",
   "create_session",
   "run_codex",
@@ -63,6 +65,9 @@ export const WRITE_TOOLS = new Set([
  * so may be allowed-always.
  */
 export const ONE_TIME_TOOLS = new Set([
+  // A delayed key press is autonomous terminal input: every schedule must be
+  // explicitly approved, never inherited from an earlier allow-always choice.
+  "schedule_terminal_action",
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
@@ -99,6 +104,33 @@ export const TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["session_id", "path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_scheduled_terminal_actions",
+      description:
+        "List persisted one-time terminal actions and their status. Read-only.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_scheduled_terminal_action",
+      description:
+        "Cancel a pending one-time terminal action by id. Requires user approval. It cannot cancel an action already executing or completed.",
+      parameters: {
+        type: "object",
+        properties: { action_id: { type: "string", minLength: 1 } },
+        required: ["action_id"],
         additionalProperties: false,
       },
     },
@@ -269,6 +301,32 @@ export const TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["session_id", "keys"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "schedule_terminal_action",
+      description:
+        "Schedule a one-time named-key action in a terminal. The action persists if chat disconnects, and requires approval now. Use only for an explicit user request. execute_at must be an unambiguous ISO-8601 date-time including timezone, for example 2026-08-22T22:30:00+07:00. Only named keys can be scheduled; text and commands cannot.",
+      parameters: {
+        type: "object",
+        properties: {
+          session_id: { type: "string" },
+          keys: {
+            type: "array",
+            minItems: 1,
+            maxItems: 32,
+            items: { type: "string", enum: NAMED_KEYS },
+          },
+          execute_at: {
+            type: "string",
+            description: "ISO-8601 date-time with timezone offset.",
+          },
+        },
+        required: ["session_id", "keys", "execute_at"],
         additionalProperties: false,
       },
     },
@@ -997,6 +1055,8 @@ export interface ToolArgs {
   session_id?: string;
   text?: string;
   keys?: string[];
+  execute_at?: string;
+  action_id?: string;
   command?: string;
   name?: string;
   cwd?: string;
@@ -1065,6 +1125,12 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `type: ${truncate(String(args.text ?? ""))}`;
     case "press_keys":
       return `press: ${(args.keys ?? []).join(" ")}`;
+    case "schedule_terminal_action":
+      return `schedule ${(args.keys ?? []).join(" ")} at ${args.execute_at ?? ""}`.trimEnd();
+    case "list_scheduled_terminal_actions":
+      return "list scheduled terminal actions";
+    case "cancel_scheduled_terminal_action":
+      return `cancel scheduled terminal action ${args.action_id ?? ""}`.trimEnd();
     case "run_command":
       return `run: ${truncate(String(args.command ?? ""))}`;
     case "create_session":
@@ -1258,6 +1324,35 @@ export async function executeTool(
           keys: keys as never,
         });
         return `ok: pressed ${keys.join(" ")}`;
+      }
+      case "schedule_terminal_action": {
+        if (
+          !args.session_id ||
+          !Array.isArray(args.keys) ||
+          typeof args.execute_at !== "string"
+        ) {
+          return "error: session_id, keys, and execute_at are required";
+        }
+        const keys = args.keys.filter((key) =>
+          (NAMED_KEYS as readonly string[]).includes(key),
+        );
+        if (keys.length !== args.keys.length || keys.length === 0)
+          return "error: no valid keys";
+        const action = await gateway.scheduleTerminalAction(
+          args.session_id,
+          keys,
+          args.execute_at,
+        );
+        return JSON.stringify({ scheduled: true, ...action });
+      }
+      case "list_scheduled_terminal_actions":
+        return JSON.stringify(await gateway.listScheduledTerminalActions());
+      case "cancel_scheduled_terminal_action": {
+        if (!args.action_id) return "error: action_id is required";
+        const action = await gateway.cancelScheduledTerminalAction(
+          args.action_id,
+        );
+        return JSON.stringify({ cancelled: true, ...action });
       }
       case "run_command": {
         if (!args.session_id || !args.command)

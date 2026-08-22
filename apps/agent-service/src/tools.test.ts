@@ -27,6 +27,46 @@ test("run_codex is exposed as a tool", () => {
   assert.ok(toolNames().includes("run_codex"), "run_codex missing from TOOLS");
 });
 
+test("scheduled terminal actions are approval-gated and require an exact time", () => {
+  const action = TOOLS.find(
+    (tool) => tool.function.name === "schedule_terminal_action",
+  );
+  assert.ok(action, "schedule_terminal_action missing from TOOLS");
+  assert.equal(WRITE_TOOLS.has("schedule_terminal_action"), true);
+  assert.equal(ONE_TIME_TOOLS.has("schedule_terminal_action"), true);
+  assert.deepEqual(action.function.parameters?.required, [
+    "session_id",
+    "keys",
+    "execute_at",
+  ]);
+  assert.equal(
+    describeCall("schedule_terminal_action", {
+      session_id: "web-x",
+      keys: ["Enter"],
+      execute_at: "2026-08-22T22:30:00+07:00",
+    }),
+    "schedule Enter at 2026-08-22T22:30:00+07:00",
+  );
+});
+
+test("scheduled terminal actions can be listed and a pending action cancelled", () => {
+  const list = TOOLS.find(
+    (tool) => tool.function.name === "list_scheduled_terminal_actions",
+  );
+  const cancel = TOOLS.find(
+    (tool) => tool.function.name === "cancel_scheduled_terminal_action",
+  );
+  assert.ok(list, "list_scheduled_terminal_actions missing from TOOLS");
+  assert.ok(cancel, "cancel_scheduled_terminal_action missing from TOOLS");
+  assert.equal(WRITE_TOOLS.has("list_scheduled_terminal_actions"), false);
+  assert.equal(WRITE_TOOLS.has("cancel_scheduled_terminal_action"), true);
+  assert.deepEqual(cancel.function.parameters?.required, ["action_id"]);
+  assert.equal(
+    describeCall("cancel_scheduled_terminal_action", { action_id: "timer-1" }),
+    "cancel scheduled terminal action timer-1",
+  );
+});
+
 test("browser handoff is an explicit one-time approved tool", () => {
   assert.ok(toolNames().includes("browser_request_handoff"));
   assert.equal(WRITE_TOOLS.has("browser_request_handoff"), true);

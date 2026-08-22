@@ -15,6 +15,8 @@
 //      /screen (history=0) lost it and /screen?history=500 still has it.
 //   7. DELETE the session. Confirm no orphan web- sessions remain.
 import { spawn, execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +24,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 const PORT = 3996;
 const BASE = `http://localhost:${PORT}`;
+const actionStoreDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "gw-terminal-actions-"),
+);
+const actionStoreFile = path.join(actionStoreDir, "actions.json");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,7 +56,14 @@ function startServer() {
   return new Promise((resolve, reject) => {
     server = spawn("node", ["src/server.js"], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(PORT) },
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        GATEWAY_AUTH_USER: "",
+        GATEWAY_AUTH_PASSWORD: "",
+        GATEWAY_AUTH_PASSWORD_HASH: "",
+        SCHEDULED_TERMINAL_ACTIONS_FILE: actionStoreFile,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
@@ -72,6 +85,7 @@ function cleanup() {
     } catch {}
   }
   if (server && !server.killed) server.kill("SIGTERM");
+  fs.rmSync(actionStoreDir, { recursive: true, force: true });
 }
 
 function fail(msg) {
@@ -177,6 +191,56 @@ async function main() {
   if (!executed)
     fail('after Enter, "hello-agent" output never appeared on screen');
   console.log("Enter executed the pending command; output visible via /screen");
+
+  // --- 3b. Scheduled one-shot actions persist, can cancel, then fire once ---
+  const future = new Date(Date.now() + 5_000).toISOString();
+  const resSchedule = await rest("POST", "/api/terminal-actions", {
+    sessionId: id,
+    keys: ["Enter"],
+    executeAt: future,
+  });
+  if (resSchedule.status !== 201)
+    fail(
+      `POST /api/terminal-actions returned ${resSchedule.status}, expected 201`,
+    );
+  const scheduled = await resSchedule.json();
+  const resList = await rest("GET", "/api/terminal-actions");
+  const listed = await resList.json();
+  if (
+    !listed.actions.some(
+      (action) => action.id === scheduled.id && action.status === "scheduled",
+    )
+  )
+    fail("scheduled terminal action was not persisted/listed");
+  const resCancel = await rest(
+    "DELETE",
+    `/api/terminal-actions/${scheduled.id}`,
+  );
+  if (
+    resCancel.status !== 200 ||
+    (await resCancel.json()).status !== "cancelled"
+  )
+    fail("DELETE /api/terminal-actions/:id did not cancel the pending action");
+
+  await rest("POST", `/api/sessions/${eid}/keys`, { text: "echo timer-fired" });
+  const resFire = await rest("POST", "/api/terminal-actions", {
+    sessionId: id,
+    keys: ["Enter"],
+    executeAt: new Date(Date.now() + 1_100).toISOString(),
+  });
+  if (resFire.status !== 201)
+    fail(`scheduled firing action returned ${resFire.status}, expected 201`);
+  let timerFired = false;
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    scr = await getScreen(id);
+    if (scr.screen.split("\n").some((line) => line.trim() === "timer-fired")) {
+      timerFired = true;
+      break;
+    }
+  }
+  if (!timerFired) fail("scheduled Enter did not execute at its due time");
+  console.log("scheduled terminal action persists, cancels, and fires once");
 
   // --- 4. Validation: whitelist + malformed bodies ---
   const resBadKey = await rest("POST", `/api/sessions/${eid}/keys`, {

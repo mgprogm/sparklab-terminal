@@ -90,28 +90,31 @@ is reserved for the terminal's `/attach`). Schemas live in
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                      | Kind      | Backing                                                             |
-| ------------------------- | --------- | ------------------------------------------------------------------- |
-| `list_sessions`           | read      | `GET /api/sessions`                                                 |
-| `read_screen`             | read      | `GET /api/sessions/:id/screen`                                      |
-| `wait_idle`               | read      | polls `/screen` until a shell prompt / quiescence                   |
-| `type_text`               | **write** | `POST /api/sessions/:id/keys {text}` — never executes               |
-| `press_keys`              | **write** | `POST …/keys {keys}` (whitelist)                                    |
-| `run_command`             | **write** | type + Enter + `wait_idle` (one approval)                           |
-| `create_session`          | **write** | `POST /api/sessions`                                                |
-| `run_codex`               | **write** | `POST …/codex` — `codex exec` in the session cwd                    |
-| `browser_observe`         | read      | Browser Use MCP page state + bounded snapshot                       |
-| `browser_list_tabs`       | read      | Browser Use MCP tab list                                            |
-| `browser_act`             | **write** | one structured navigate/click/type/scroll/tab action                |
-| `browser_capture`         | **write** | capture viewport + save through session-scoped gateway `fs/upload`  |
-| `browser_request_handoff` | **write** | offer the live isolated browser for private human authentication    |
-| `kanban_list`             | read      | `GET /api/kanban/boards`                                            |
-| `kanban_get`              | read      | `GET /api/kanban/boards/:id`                                        |
-| `kanban_create`           | **write** | `POST /api/kanban/boards`                                           |
-| `kanban_add_card`         | **write** | `POST /api/kanban/boards/:id/cards`                                 |
-| `kanban_update_card`      | **write** | `PATCH /api/kanban/cards/:id`                                       |
-| `kanban_move`             | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409) |
-| `kanban_delete`           | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)  |
+| Tool                               | Kind      | Backing                                                             |
+| ---------------------------------- | --------- | ------------------------------------------------------------------- |
+| `list_sessions`                    | read      | `GET /api/sessions`                                                 |
+| `read_screen`                      | read      | `GET /api/sessions/:id/screen`                                      |
+| `wait_idle`                        | read      | polls `/screen` until a shell prompt / quiescence                   |
+| `type_text`                        | **write** | `POST /api/sessions/:id/keys {text}` — never executes               |
+| `press_keys`                       | **write** | `POST …/keys {keys}` (whitelist)                                    |
+| `schedule_terminal_action`         | **write** | `POST /api/terminal-actions` — one-time persisted named-key action  |
+| `list_scheduled_terminal_actions`  | read      | `GET /api/terminal-actions`                                         |
+| `cancel_scheduled_terminal_action` | **write** | `DELETE /api/terminal-actions/:id`                                  |
+| `run_command`                      | **write** | type + Enter + `wait_idle` (one approval)                           |
+| `create_session`                   | **write** | `POST /api/sessions`                                                |
+| `run_codex`                        | **write** | `POST …/codex` — `codex exec` in the session cwd                    |
+| `browser_observe`                  | read      | Browser Use MCP page state + bounded snapshot                       |
+| `browser_list_tabs`                | read      | Browser Use MCP tab list                                            |
+| `browser_act`                      | **write** | one structured navigate/click/type/scroll/tab action                |
+| `browser_capture`                  | **write** | capture viewport + save through session-scoped gateway `fs/upload`  |
+| `browser_request_handoff`          | **write** | offer the live isolated browser for private human authentication    |
+| `kanban_list`                      | read      | `GET /api/kanban/boards`                                            |
+| `kanban_get`                       | read      | `GET /api/kanban/boards/:id`                                        |
+| `kanban_create`                    | **write** | `POST /api/kanban/boards`                                           |
+| `kanban_add_card`                  | **write** | `POST /api/kanban/boards/:id/cards`                                 |
+| `kanban_update_card`               | **write** | `PATCH /api/kanban/cards/:id`                                       |
+| `kanban_move`                      | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409) |
+| `kanban_delete`                    | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)  |
 
 Kanban tools drive the gateway's `/api/kanban/*` board API (design:
 [`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). Approval tiers (D9): reads run
@@ -206,7 +209,16 @@ the UI (the gateway's single `DELETE` call site).
   120s no-answer timeout resolves to `deny`. `allow_always` scopes to
   tool+session for the current chat only (not persisted). Browser actions are
   always one-time approvals; the server coerces a forged `allow_always` reply
-  to a single `allow`.
+  to a single `allow`. `schedule_terminal_action` is also always one-time: a
+  delayed terminal key press must be explicitly approved at creation and can
+  never inherit an earlier allow-always choice.
+- **Scheduled terminal actions:** the agent may schedule only whitelisted named
+  keys, never literal text or a shell command. `execute_at` must be a future,
+  timezone-qualified ISO-8601 timestamp. The gateway persists the approved
+  one-shot action, so it survives chat disconnects and agent-service restarts;
+  the user can list or cancel pending actions from chat. The gateway claims an
+  action before sending it, preferring a lost action after a crash over a
+  replayed key press.
 - **Bounded turns:** max 24 model calls and 10 write executions per user
   message; `interrupt` aborts the in-flight Azure request via `AbortController`.
 - **Persistence:** one JSONL file plus a small terminal-link metadata file per

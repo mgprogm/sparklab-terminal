@@ -5,12 +5,14 @@ import { defineConfig, devices } from "@playwright/test";
 // Ports for test isolation (avoid clashing with dev).
 const GATEWAY_PORT = 3907;
 const NEXT_PORT = 3902;
+const AGENT_PORT = 3009;
 
 // Resolve paths relative to this config file.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const GATEWAY_DIR = path.resolve(REPO_ROOT, "apps/terminal-gateway");
 const TERMINAL_DIR = path.resolve(REPO_ROOT, "apps/terminal");
+const AGENT_SERVICE_DIR = path.resolve(REPO_ROOT, "apps/agent-service");
 
 export default defineConfig({
   testDir: "./specs",
@@ -32,7 +34,14 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: `PORT=${GATEWAY_PORT} node src/server.js`,
+      command: `PORT=${AGENT_PORT} GATEWAY_URL=http://localhost:${GATEWAY_PORT} node test/e2e-scheduled-action-mock.js`,
+      port: AGENT_PORT,
+      reuseExistingServer: false,
+      timeout: 15_000,
+      cwd: AGENT_SERVICE_DIR,
+    },
+    {
+      command: `rm -f /tmp/sparklab-e2e-terminal-actions.json && GATEWAY_AUTH_USER= GATEWAY_AUTH_PASSWORD= GATEWAY_AUTH_PASSWORD_HASH= SCHEDULED_TERMINAL_ACTIONS_FILE=/tmp/sparklab-e2e-terminal-actions.json PORT=${GATEWAY_PORT} node src/server.js`,
       port: GATEWAY_PORT,
       reuseExistingServer: false,
       timeout: 15_000,

@@ -26,6 +26,7 @@ import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
 import agentic from "./agentic.js";
 import schedules from "./agentic-schedules.js";
+import scheduledTerminalActions from "./scheduled-terminal-actions.js";
 import agentRuntime from "./agent-runtime.js";
 import { hashPassword, isValidHashString, verifyPassword } from "./password.js";
 
@@ -433,6 +434,10 @@ const AGENT_NAMED_KEYS = new Set([
 // longer or multiline goes through load-buffer/paste-buffer (bracketed paste).
 const SEND_KEYS_LITERAL_MAX = 200;
 const SEND_TEXT_MAX = 10_000;
+const TERMINAL_ACTION_POLL_INTERVAL_MS = 1_000;
+const TERMINAL_ACTION_MAX_DELAY_MS = 366 * 24 * 60 * 60_000;
+let terminalActionPollTimer = null;
+let terminalActionTicking = false;
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -5225,6 +5230,42 @@ async function fsResolveSession(res, rawRef) {
   return { server, tmuxName };
 }
 
+async function terminalActionPollTick() {
+  if (terminalActionTicking) return;
+  terminalActionTicking = true;
+  try {
+    for (const dueAction of scheduledTerminalActions.due()) {
+      const action = scheduledTerminalActions.claim(dueAction.id);
+      if (!action) continue;
+      try {
+        const { serverId, tmuxName } = parseSessionRef(action.sessionId);
+        const server = registry.get(serverId);
+        if (!server || !(await sessionExists(server, tmuxName))) {
+          throw new Error("target session no longer exists");
+        }
+        await serverExec(server, ["send-keys", "-t", tmuxName, ...action.keys]);
+        scheduledTerminalActions.finish(action.id);
+      } catch (error) {
+        console.error(
+          `[scheduled-action] ${action.id} failed: ${error.message}`,
+        );
+        scheduledTerminalActions.finish(action.id, error.message);
+      }
+    }
+  } finally {
+    terminalActionTicking = false;
+  }
+}
+
+function startTerminalActionLoop() {
+  if (terminalActionPollTimer) return;
+  terminalActionPollTimer = setInterval(
+    () => void terminalActionPollTick(),
+    TERMINAL_ACTION_POLL_INTERVAL_MS,
+  );
+  terminalActionPollTimer.unref?.();
+}
+
 // ---- A2: Auth route handlers ----
 async function handleLogin(req, res) {
   const ip = getClientIp(req);
@@ -5484,6 +5525,80 @@ async function handleApi(req, res, url) {
   // ---- Agentic AI Creator: /api/agentic/* ----
   if (parts[1] === "agentic") {
     return handleAgentic(req, res, url);
+  }
+
+  // ---- One-shot scheduled terminal actions ----
+  // These are intentionally keys-only: scheduled literal text or shell commands
+  // would turn an approval for a timer into a broad delayed execution primitive.
+  if (parts[1] === "terminal-actions") {
+    if (req.method === "GET" && parts.length === 2) {
+      return sendJson(res, 200, { actions: scheduledTerminalActions.list() });
+    }
+    if (req.method === "POST" && parts.length === 2) {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        return sendJson(res, 400, { error: "malformed JSON body" });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body))
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      const hasTimezone =
+        typeof body.executeAt === "string" &&
+        /T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(body.executeAt);
+      const executeAt = Date.parse(body.executeAt);
+      if (!hasTimezone || !Number.isFinite(executeAt))
+        return sendJson(res, 400, {
+          error: "executeAt must be an ISO-8601 date-time",
+        });
+      const delay = executeAt - Date.now();
+      if (delay < 1_000 || delay > TERMINAL_ACTION_MAX_DELAY_MS) {
+        return sendJson(res, 400, {
+          error:
+            "executeAt must be between one second and one year in the future",
+        });
+      }
+      if (
+        !Array.isArray(body.keys) ||
+        body.keys.length < 1 ||
+        body.keys.length > 32 ||
+        body.keys.some(
+          (key) => typeof key !== "string" || !AGENT_NAMED_KEYS.has(key),
+        )
+      ) {
+        return sendJson(res, 400, {
+          error: "keys must be 1..32 supported named keys",
+        });
+      }
+      if (typeof body.sessionId !== "string")
+        return sendJson(res, 400, { error: "sessionId is required" });
+      const { serverId, tmuxName } = parseSessionRef(body.sessionId);
+      const server = registry.get(serverId);
+      if (
+        !ID_RE.test(tmuxName) ||
+        !server ||
+        !(await sessionExists(server, tmuxName))
+      )
+        return sendJson(res, 404, { error: "session not found" });
+      const action = scheduledTerminalActions.create({
+        sessionId: body.sessionId,
+        keys: body.keys,
+        executeAt,
+      });
+      startTerminalActionLoop();
+      return sendJson(res, 201, action);
+    }
+    if (req.method === "DELETE" && parts.length === 3) {
+      const action = scheduledTerminalActions.cancel(
+        decodeURIComponent(parts[2]),
+      );
+      if (!action)
+        return sendJson(res, 404, {
+          error: "scheduled action not found or already processed",
+        });
+      return sendJson(res, 200, action);
+    }
+    return sendJson(res, 404, { error: "not found" });
   }
 
   // ---- Web Push: /api/push/* ----
@@ -7513,6 +7628,9 @@ wss.on("connection", async (ws, req) => {
 server.listen(PORT, HOST, () => {
   console.log(`web-terminal gateway listening on http://${HOST}:${PORT}`);
   schedules.load();
+  scheduledTerminalActions.load();
+  startTerminalActionLoop();
+  void terminalActionPollTick();
   // If subscriptions persisted across a restart AND VAPID is configured, boot
   // the poll loop now (its first tick re-baselines and notifies nothing).
   if (push.isConfigured() && push.count() > 0) {
