@@ -39,6 +39,7 @@ export class ApprovalManager {
     sessionId: string | undefined,
     send: (requestId: string) => void,
     allowAlways = true,
+    onResolved?: (requestId: string, behavior: AgentApprovalBehavior) => void,
   ): Promise<AgentApprovalBehavior> {
     const requestId = randomUUID();
     return new Promise<AgentApprovalBehavior>((resolve) => {
@@ -52,7 +53,10 @@ export class ApprovalManager {
       if (behavior === "allow_always" && allowAlways) {
         this.allowAlways.add(this.key(tool, sessionId));
       }
-      return behavior === "allow_always" && !allowAlways ? "allow" : behavior;
+      const resolved =
+        behavior === "allow_always" && !allowAlways ? "allow" : behavior;
+      onResolved?.(requestId, resolved);
+      return resolved;
     });
   }
 

@@ -35,6 +35,8 @@ export class AgentConnection {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private noReconnect = false;
+  private snapshotSeq = 0;
+  private deliveredSeq = 0;
   private readonly agentUrl: string;
 
   constructor(
@@ -85,6 +87,25 @@ export class AgentConnection {
       const result = AgentWsServerMessageSchema.safeParse(parsed);
       if (!result.success) return;
       const frame = result.data;
+      if (frame.type === "agent_snapshot") {
+        this.snapshotSeq = frame.seq;
+        this.deliveredSeq = Math.max(this.deliveredSeq, frame.seq);
+        return;
+      }
+      if (frame.type === "agent_event") {
+        if (frame.seq <= this.snapshotSeq || frame.seq <= this.deliveredSeq)
+          return;
+        const event = AgentWsServerMessageSchema.safeParse(frame.frame);
+        if (
+          !event.success ||
+          event.data.type === "agent_event" ||
+          event.data.type === "agent_snapshot"
+        )
+          return;
+        this.deliveredSeq = frame.seq;
+        this.callbacks.onFrame(event.data);
+        return;
+      }
       if (frame.type === "chat_started") this.resumeChatId = frame.chatId;
       if (frame.type === "error" && frame.message === "unauthorized") {
         this.noReconnect = true;
@@ -162,6 +183,10 @@ export class AgentConnection {
 
   interrupt(): void {
     this.sendRaw({ type: "interrupt" });
+  }
+
+  acknowledgeRecovery(behavior: "verified" | "cancelled"): void {
+    this.sendRaw({ type: "recovery_ack", behavior });
   }
 
   listChats(): void {

@@ -120,6 +120,17 @@ export const AgentInterruptSchema = z.object({
 });
 export type AgentInterrupt = z.infer<typeof AgentInterruptSchema>;
 
+/** How the user disposed of a run left in recovery_required state. */
+export const AgentRecoveryBehaviorSchema = z.enum(["verified", "cancelled"]);
+export type AgentRecoveryBehavior = z.infer<typeof AgentRecoveryBehaviorSchema>;
+
+/** User confirms they verified, or discarded, a recovery-required run. */
+export const AgentRecoveryAckSchema = z.object({
+  type: z.literal("recovery_ack"),
+  behavior: AgentRecoveryBehaviorSchema,
+});
+export type AgentRecoveryAck = z.infer<typeof AgentRecoveryAckSchema>;
+
 /** Client heartbeat ping. */
 export const AgentPingSchema = z.object({
   type: z.literal("ping"),
@@ -173,6 +184,7 @@ export const AgentWsClientMessageSchema = z.discriminatedUnion("type", [
   AgentUserMessageSchema,
   AgentApprovalResponseSchema,
   AgentInterruptSchema,
+  AgentRecoveryAckSchema,
   AgentPingSchema,
   AgentListChatsSchema,
   AgentDeleteChatSchema,
@@ -252,6 +264,43 @@ export const AgentApprovalRequestSchema = z.object({
   input: z.unknown(),
 });
 export type AgentApprovalRequest = z.infer<typeof AgentApprovalRequestSchema>;
+
+/** Approval is no longer actionable once this frame has been broadcast. */
+export const AgentApprovalResolvedSchema = z.object({
+  type: z.literal("approval_resolved"),
+  requestId: z.string(),
+  behavior: AgentApprovalBehaviorSchema,
+});
+export type AgentApprovalResolved = z.infer<typeof AgentApprovalResolvedSchema>;
+
+/** A service restart left a tool outcome unknown; user verification is required. */
+export const AgentRecoveryRequiredSchema = z.object({
+  type: z.literal("recovery_required"),
+  message: z.string(),
+});
+export type AgentRecoveryRequired = z.infer<typeof AgentRecoveryRequiredSchema>;
+
+/** All connected clients learn that the recovery gate was resolved. */
+export const AgentRecoveryResolvedSchema = z.object({
+  type: z.literal("recovery_resolved"),
+  behavior: AgentRecoveryBehaviorSchema,
+});
+export type AgentRecoveryResolved = z.infer<typeof AgentRecoveryResolvedSchema>;
+
+/** Watermark for a chat snapshot; later `agent_event` frames have larger seq. */
+export const AgentSnapshotSchema = z.object({
+  type: z.literal("agent_snapshot"),
+  seq: z.number().int().nonnegative(),
+});
+export type AgentSnapshot = z.infer<typeof AgentSnapshotSchema>;
+
+/** A durable run event, sent after the event has been journaled. */
+export const AgentEventSchema = z.object({
+  type: z.literal("agent_event"),
+  seq: z.number().int().positive(),
+  frame: z.unknown(),
+});
+export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
 /** Coarse agent activity state, for status indicators. */
 export const AgentStatusStateSchema = z.enum([
@@ -421,6 +470,8 @@ export const BrowserHandoffReadySchema = z
     browserId: BrowserIdSchema,
     handoffId: HandoffIdSchema,
     token: z.string().min(43).max(128),
+    /** True when token authenticates the existing active handoff via resume. */
+    resume: z.boolean().optional(),
     expiresAt: z.number().int().positive().safe(),
   })
   .strict();
@@ -666,6 +717,11 @@ export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentToolUseSchema,
   AgentToolResultSchema,
   AgentApprovalRequestSchema,
+  AgentApprovalResolvedSchema,
+  AgentRecoveryRequiredSchema,
+  AgentRecoveryResolvedSchema,
+  AgentSnapshotSchema,
+  AgentEventSchema,
   AgentStatusSchema,
   AgentErrorSchema,
   AgentPongSchema,

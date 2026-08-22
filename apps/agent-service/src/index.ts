@@ -17,7 +17,7 @@ import {
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 import { gateway } from "./gateway-client.js";
-import { AgentLoop } from "./agent-loop.js";
+import { AgentRunManager, type AgentRun } from "./agent-run-manager.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { deleteChat, listChats, openChat } from "./history.js";
 import { browserResources } from "./browser-resource-limiter.js";
@@ -62,7 +62,7 @@ const handoffWss = new WebSocketServer({
   maxPayload: 72 * 1024,
 });
 const handoffs = new BrowserHandoffBroker();
-const loops = new Set<AgentLoop>();
+const runs = new AgentRunManager(handoffs);
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -117,7 +117,9 @@ server.on("upgrade", (req, socket, head) => {
 
 wss.on("connection", (ws: WebSocket, req) => {
   const send = (frame: AgentWsServerMessage) => safeSend(ws, frame);
-  let loop: AgentLoop | null = null;
+  let run: AgentRun | null = null;
+  let detachRun: (() => void) | null = null;
+  let socketClosed = false;
   let connectedTerminalSessionId: string | undefined;
   let ready = false;
   // Messages can arrive before auth + loop.init() finish (the client sends on
@@ -127,7 +129,7 @@ wss.on("connection", (ws: WebSocket, req) => {
   let pendingBytes = 0;
 
   const route = (data: RawData) => {
-    if (!loop) return;
+    if (!run) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(data.toString());
@@ -141,13 +143,16 @@ wss.on("connection", (ws: WebSocket, req) => {
         send({ type: "pong" });
         break;
       case "user_message":
-        void loop.handleUserMessage(msg.data.text, msg.data.activeSessionId);
+        void run.handleUserMessage(msg.data.text, msg.data.activeSessionId);
         break;
       case "approval_response":
-        loop.onApprovalResponse(msg.data.requestId, msg.data.behavior);
+        run.onApprovalResponse(msg.data.requestId, msg.data.behavior);
         break;
       case "interrupt":
-        loop.interrupt();
+        run.interrupt();
+        break;
+      case "recovery_ack":
+        run.acknowledgeRecovery(msg.data.behavior);
         break;
       case "list_chats":
         void listChats(connectedTerminalSessionId).then((chats) =>
@@ -155,6 +160,13 @@ wss.on("connection", (ws: WebSocket, req) => {
         );
         break;
       case "delete_chat":
+        if (runs.hasActiveRun(msg.data.chatId)) {
+          send({
+            type: "error",
+            message: "Stop the active agent run before deleting this chat",
+          });
+          break;
+        }
         void deleteChat(msg.data.chatId, connectedTerminalSessionId)
           .then(() => listChats(connectedTerminalSessionId))
           .then((chats) => send({ type: "chat_list", chats }))
@@ -170,7 +182,7 @@ wss.on("connection", (ws: WebSocket, req) => {
         break;
       case "browser_handoff_request":
         try {
-          loop.requestBrowserHandoff(msg.data.browserId);
+          run.requestBrowserHandoff(msg.data.browserId);
         } catch (error) {
           send({
             type: "error",
@@ -180,14 +192,14 @@ wss.on("connection", (ws: WebSocket, req) => {
         }
         break;
       case "browser_handoff_finish":
-        void loop
+        void run
           .finishBrowserHandoff(msg.data.handoffId)
           .catch(() =>
             send({ type: "error", message: "browser_handoff_failed" }),
           );
         break;
       case "browser_handoff_cancel":
-        void loop
+        void run
           .cancelBrowserHandoff(msg.data.handoffId)
           .catch(() =>
             send({ type: "error", message: "browser_handoff_failed" }),
@@ -215,13 +227,13 @@ wss.on("connection", (ws: WebSocket, req) => {
       pendingBytes += bytes;
     }
   });
-  const disposeLoop = () => {
-    if (!loop) return;
-    void loop.dispose();
-    loops.delete(loop);
+  const detach = () => {
+    socketClosed = true;
+    detachRun?.();
+    detachRun = null;
   };
-  ws.on("close", disposeLoop);
-  ws.on("error", disposeLoop);
+  ws.on("close", detach);
+  ws.on("error", detach);
 
   void (async () => {
     // Auth: proxy the browser's cookie to the gateway. 4001 = no-reconnect.
@@ -261,9 +273,23 @@ wss.on("connection", (ws: WebSocket, req) => {
       ws.close(1008, "unable to open chat");
       return;
     }
-    loop = new AgentLoop(send, chatId, terminalSessionId, handoffs, user);
-    loops.add(loop);
-    await loop.init();
+    try {
+      run = await runs.open(chatId, terminalSessionId, user);
+      detachRun = await run.attach(send);
+      if (socketClosed || ws.readyState !== ws.OPEN) {
+        detachRun();
+        detachRun = null;
+        return;
+      }
+    } catch (error) {
+      send({
+        type: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to start agent run",
+      });
+      ws.close(1011, "unable to start agent run");
+      return;
+    }
 
     ready = true;
     for (const d of pending) route(d);
@@ -362,18 +388,25 @@ function safeSend(ws: WebSocket, frame: AgentWsServerMessage): void {
 
 server.headersTimeout = 30_000;
 server.requestTimeout = 60_000;
-server.listen(config.port, config.host, () => {
-  console.log(
-    `[agent] listening on ${config.host}:${config.port} — gateway ${config.gatewayUrl}, model ${config.azure.deployment}`,
-  );
-});
+void runs
+  .recover()
+  .then(() => {
+    server.listen(config.port, config.host, () => {
+      console.log(
+        `[agent] listening on ${config.host}:${config.port} — gateway ${config.gatewayUrl}, model ${config.azure.deployment}`,
+      );
+    });
+  })
+  .catch((error: unknown) => {
+    console.error("[agent] FATAL: unable to recover durable runs", error);
+    process.exit(1);
+  });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     void (async () => {
-      await Promise.all([...loops].map((loop) => loop.dispose()));
+      await runs.disposeAll();
       await handoffs.disposeAll();
-      loops.clear();
       for (const client of wss.clients)
         client.close(1001, "service shutting down");
       for (const client of handoffWss.clients)

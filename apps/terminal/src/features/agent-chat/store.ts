@@ -41,7 +41,10 @@ function replayToEntry(e: AgentReplayEntry): TranscriptEntry {
         sessionId: e.sessionId,
         summary: e.summary ?? "",
         input: e.input,
-        state: e.ok === false ? "error" : "ok",
+        // A tool call is persisted before it is approved/executed. Preserve
+        // that incomplete state on a reconnect instead of rendering it as a
+        // successful invocation.
+        state: e.ok === false ? "error" : e.ok === undefined ? "running" : "ok",
         resultSummary: e.resultSummary,
       };
   }
@@ -277,6 +280,25 @@ export const useAgentStore = create<AgentState>()(
                   : e,
               );
               const isWrite = WRITE_TOOL_NAMES.has(frame.tool);
+              const existingIndex = entries.findIndex(
+                (e) => e.kind === "tool" && e.id === frame.callId,
+              );
+              if (existingIndex >= 0) {
+                const updated = [...entries];
+                updated[existingIndex] = {
+                  kind: "tool",
+                  id: frame.callId,
+                  tool: frame.tool,
+                  sessionId: frame.sessionId,
+                  summary: frame.summary,
+                  input: frame.input,
+                  state: "running",
+                };
+                return {
+                  entries: updated,
+                  ...(isWrite ? bumpWrite(s, frame.sessionId, +1) : {}),
+                };
+              }
               return {
                 entries: [
                   ...entries,
@@ -340,6 +362,35 @@ export const useAgentStore = create<AgentState>()(
                 },
               ],
               unreadCount: s.panelOpen ? 0 : s.unreadCount + 1,
+            }));
+            break;
+
+          case "approval_resolved":
+            get().resolveApproval(frame.requestId, frame.behavior);
+            break;
+
+          case "recovery_required":
+            set((s) => ({
+              entries: [
+                ...s.entries.filter((e) => e.kind !== "recovery"),
+                {
+                  kind: "recovery",
+                  id: nextId(),
+                  text: frame.message,
+                  state: "pending",
+                },
+              ],
+              unreadCount: s.panelOpen ? 0 : s.unreadCount + 1,
+            }));
+            break;
+
+          case "recovery_resolved":
+            set((s) => ({
+              entries: s.entries.map((e) =>
+                e.kind === "recovery" && e.state === "pending"
+                  ? { ...e, state: frame.behavior }
+                  : e,
+              ),
             }));
             break;
 

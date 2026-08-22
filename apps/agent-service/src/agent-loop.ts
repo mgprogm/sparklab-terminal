@@ -74,7 +74,16 @@ export class AgentLoop {
       (browser, revision) => this.browserDestroyed(browser, revision),
     );
     if (attached) this.browser = attached;
-    this.send({
+    await this.replay(this.send);
+  }
+
+  /**
+   * Send the durable portion of this chat to one newly attached browser.
+   * The run itself deliberately survives when that browser later disconnects.
+   */
+  async replay(send: Send): Promise<void> {
+    await this.ready;
+    send({
       type: "chat_started",
       chatId: this.chatId,
       terminalSessionId: this.terminalSessionId,
@@ -82,12 +91,23 @@ export class AgentLoop {
     // Replay the transcript so a resumed chat (explicit load, page reload, or
     // transient reconnect) renders. The client REPLACES its entries with this.
     if (this.history.length > 0) {
-      this.send({
+      send({
         type: "chat_history",
         chatId: this.chatId,
         entries: reconstructTranscript(this.history),
       });
     }
+  }
+
+  /** Re-publish a live handoff through the run broadcaster after chat reconnect. */
+  refreshBrowserHandoff(): void {
+    const attached = this.handoffs.attachChat(
+      this.chatId,
+      this.user,
+      this.send,
+      (browser, revision) => this.browserDestroyed(browser, revision),
+    );
+    if (attached) this.browser = attached;
   }
 
   onApprovalResponse(requestId: string, behavior: AgentApprovalBehavior): void {
@@ -281,6 +301,12 @@ export class AgentLoop {
               // invocation is approved individually (no persistent
               // allow-always); pass allowAlways: false for them.
               !ONE_TIME_TOOLS.has(tc.name),
+              (requestId, behavior) =>
+                this.send({
+                  type: "approval_resolved",
+                  requestId,
+                  behavior,
+                }),
             );
             if (behavior === "deny") {
               resultContent =

@@ -395,6 +395,52 @@ export class BrowserHandoffBroker {
       if (record.chatId !== chatId || record.user !== user) continue;
       record.sendAgent = sendAgent;
       record.destroyed = destroyed;
+      // A page refresh loses the one-time token in browser memory. For an
+      // unclaimed handoff, rotate it owner-bound and publish the replacement;
+      // the previous bearer token is immediately invalid.
+      if (record.browser.leaseState === "pending" && !record.socket) {
+        const issued = this.tokens.rotate(
+          record.handoffId,
+          {
+            user: record.user,
+            chatId: record.chatId,
+            browserId: record.browser.browserId,
+          },
+          TOKEN_TTL_MS,
+        );
+        if (issued) {
+          clearTimeout(record.tokenTimer);
+          record.expiresAt = issued.expiresAt;
+          record.tokenTimer = setTimeout(
+            () => void this.destroy(record.handoffId, "token_timeout"),
+            TOKEN_TTL_MS,
+          );
+          record.tokenTimer.unref();
+          record.sendAgent({
+            type: "browser_handoff_ready",
+            browserId: record.browser.browserId,
+            handoffId: record.handoffId,
+            token: issued.token,
+            expiresAt: issued.expiresAt,
+          });
+        }
+      } else if (
+        record.browser.leaseState === "human_active" &&
+        !record.socket
+      ) {
+        // The interactive page may have been refreshed after its old socket
+        // disappeared. Rotate this memory-only resume credential and publish it
+        // only to the authenticated owner chat.
+        record.resumeToken = randomBytes(32).toString("base64url");
+        record.sendAgent({
+          type: "browser_handoff_ready",
+          browserId: record.browser.browserId,
+          handoffId: record.handoffId,
+          token: record.resumeToken,
+          resume: true,
+          expiresAt: record.expiresAt,
+        });
+      }
       record.sendAgent({
         type: "browser_handoff_state",
         browserId: record.browser.browserId,

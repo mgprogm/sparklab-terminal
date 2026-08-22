@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AgentApprovalBehavior } from "@sparklab/shared-types";
 
 // approvals.ts reads CAPS from the fail-fast service config. Supply inert test
 // values before importing it; no network client is created in this suite.
@@ -56,4 +57,24 @@ test("denyAll resolves every outstanding approval as denied", async () => {
   approvals.denyAll();
 
   assert.deepEqual(await Promise.all([first, second]), ["deny", "deny"]);
+});
+
+test("reports the normalized approval decision", async () => {
+  const approvals = new ApprovalManager();
+  let requestId = "";
+  let resolved: AgentApprovalBehavior | null = null;
+  const pending = approvals.request(
+    "browser_act",
+    "web-a",
+    (id) => {
+      requestId = id;
+    },
+    false,
+    (_id, behavior) => {
+      resolved = behavior;
+    },
+  );
+  approvals.resolve(requestId, "allow_always");
+  assert.equal(await pending, "allow");
+  assert.equal(resolved, "allow");
 });

@@ -15,6 +15,7 @@ interface BrowserHandoffStore {
   browserId: string | null;
   handoffId: string | null;
   token: string | null;
+  resume: boolean;
   state: HandoffLeaseState;
   connectionState: HandoffConnectionState;
   expiresAt: number | null;
@@ -39,6 +40,7 @@ const initialState = {
   browserId: null,
   handoffId: null,
   token: null,
+  resume: false,
   state: "none" as const,
   connectionState: "disconnected" as const,
   expiresAt: null,
@@ -60,7 +62,8 @@ export const useBrowserHandoffStore = create<BrowserHandoffStore>()((set) => ({
           browserId: frame.browserId,
           handoffId: frame.handoffId,
           token: frame.token,
-          state: "pending",
+          resume: frame.resume === true,
+          state: frame.resume ? "human_active" : "pending",
           connectionState: "connecting",
           expiresAt: frame.expiresAt,
           hardExpiresAt: null,
@@ -87,6 +90,7 @@ export const useBrowserHandoffStore = create<BrowserHandoffStore>()((set) => ({
           ? {
               handoffId: null,
               token: null,
+              resume: false,
               connectionState:
                 frame.state === "closed"
                   ? ("closed" as const)

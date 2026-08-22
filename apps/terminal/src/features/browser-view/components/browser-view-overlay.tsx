@@ -60,6 +60,7 @@ export function BrowserViewOverlay() {
   const handoffState = useBrowserHandoffStore((state) => state.state);
   const handoffId = useBrowserHandoffStore((state) => state.handoffId);
   const handoffToken = useBrowserHandoffStore((state) => state.token);
+  const handoffResume = useBrowserHandoffStore((state) => state.resume);
   const connectionState = useBrowserHandoffStore(
     (state) => state.connectionState,
   );
@@ -94,7 +95,7 @@ export function BrowserViewOverlay() {
     const token = useBrowserHandoffStore.getState().token;
     if (!token) return;
     const next = new BrowserHandoffConnection(
-      { handoffId, token },
+      { handoffId, token, resume: handoffResume },
       {
         onConnectionState: useBrowserHandoffStore.getState().setConnectionState,
         onAuthenticated: useBrowserHandoffStore.getState().consumeToken,
@@ -109,7 +110,7 @@ export function BrowserViewOverlay() {
       setMediaStream(null);
       next.dispose();
     };
-  }, [handoffId]);
+  }, [handoffId, handoffToken, handoffResume]);
 
   useEffect(() => {
     if (handoffState !== "human_active") return;

@@ -134,6 +134,13 @@ export function useAgentChat() {
     conn?.interrupt();
   }, []);
 
+  const acknowledgeRecovery = useCallback(
+    (behavior: "verified" | "cancelled") => {
+      conn?.acknowledgeRecovery(behavior);
+    },
+    [],
+  );
+
   const listChats = useCallback(() => {
     // chat_list clears this flag when the response arrives; until then the
     // history modal shows a loading row instead of "no conversations".
@@ -191,6 +198,7 @@ export function useAgentChat() {
     sendUserMessage,
     sendApproval,
     interrupt,
+    acknowledgeRecovery,
     listChats,
     newChat,
     loadChat,

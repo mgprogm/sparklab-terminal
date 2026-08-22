@@ -71,6 +71,28 @@ export class HandoffTokenManager {
   revoke(handoffId: string): void {
     this.records.delete(handoffId);
   }
+
+  /** Rotate a pending handoff's one-time bearer token without changing its id. */
+  rotate(
+    handoffId: string,
+    owner: HandoffOwner,
+    ttlMs: number,
+    now = Date.now(),
+  ): { token: string; expiresAt: number } | null {
+    const record = this.records.get(handoffId);
+    if (
+      !record ||
+      record.user !== owner.user ||
+      record.chatId !== owner.chatId ||
+      record.browserId !== owner.browserId
+    )
+      return null;
+    const token = randomBytes(32).toString("base64url");
+    record.digest = digest(token);
+    record.expiresAt = now + ttlMs;
+    record.used = false;
+    return { token, expiresAt: record.expiresAt };
+  }
 }
 
 function digest(token: string): Buffer {

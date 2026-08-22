@@ -319,7 +319,10 @@ export function reconstructTranscript(
         const args = parseArgs(tc.function.arguments);
         const entry: AgentReplayEntry = {
           kind: "tool",
-          id: nextId(),
+          // Keep the provider call id: a reconnect can then merge a queued
+          // live tool_result with this replay row instead of creating a second
+          // synthetic tool entry.
+          id: tc.id,
           tool: tc.function.name,
           sessionId: targetSession(args),
           summary: describeCall(tc.function.name, args),

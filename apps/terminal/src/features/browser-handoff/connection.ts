@@ -13,6 +13,7 @@ const MAX_FRAME_BYTES = 5 * 1024 * 1024;
 interface HandoffCredentials {
   handoffId: string;
   token: string;
+  resume?: boolean;
 }
 
 interface HandoffCallbacks {
@@ -87,6 +88,7 @@ export class BrowserHandoffConnection {
     private readonly credentials: HandoffCredentials,
     private readonly callbacks: HandoffCallbacks,
   ) {
+    this.resumeToken = credentials.resume ? credentials.token : null;
     const base = process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:3009";
     const proto = base.startsWith("https") ? "wss" : "ws";
     this.url = `${proto}://${base.replace(/^https?:\/\//, "")}/browser-handoff`;
@@ -219,7 +221,7 @@ export class BrowserHandoffConnection {
       typeof frame.resumeToken === "string" &&
       frame.resumeToken.length >= 43
     ) {
-      const firstAuthentication = this.resumeToken === null;
+      const firstAuthentication = !this.credentials.resume;
       this.resumeToken = frame.resumeToken;
       this.reconnectUntil = 0;
       if (firstAuthentication) {

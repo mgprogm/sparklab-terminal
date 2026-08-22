@@ -131,6 +131,28 @@ describe("terminal-linked chat frames", () => {
         terminalSessionId: "local/web-a",
       }),
     ).toMatchObject({ terminalSessionId: "local/web-a" });
+    expect(
+      AgentWsServerMessageSchema.parse({ type: "agent_snapshot", seq: 12 }),
+    ).toEqual({ type: "agent_snapshot", seq: 12 });
+    expect(
+      AgentWsServerMessageSchema.parse({
+        type: "agent_event",
+        seq: 13,
+        frame: { type: "status", state: "thinking" },
+      }),
+    ).toMatchObject({ seq: 13 });
+    expect(
+      AgentWsClientMessageSchema.parse({
+        type: "recovery_ack",
+        behavior: "verified",
+      }),
+    ).toMatchObject({ behavior: "verified" });
+    expect(
+      AgentWsServerMessageSchema.parse({
+        type: "recovery_required",
+        message: "Verify state",
+      }),
+    ).toMatchObject({ type: "recovery_required" });
   });
 });
 

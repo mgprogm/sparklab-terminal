@@ -51,5 +51,17 @@ export interface NoticeEntry {
   tone: "error" | "info";
 }
 
+export interface RecoveryEntry {
+  kind: "recovery";
+  id: string;
+  text: string;
+  state: "pending" | "verified" | "cancelled";
+}
+
 export type TranscriptEntry =
-  UserEntry | AssistantEntry | ToolEventEntry | ApprovalEntry | NoticeEntry;
+  | UserEntry
+  | AssistantEntry
+  | ToolEventEntry
+  | ApprovalEntry
+  | NoticeEntry
+  | RecoveryEntry;

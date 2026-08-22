@@ -42,6 +42,7 @@ import { ApprovalCard } from "./approval-card";
 import { ChatHistoryDialog } from "./chat-history-dialog";
 import { AssistantMessage, UserMessage } from "./chat-message";
 import { Composer } from "./composer";
+import { RecoveryCard } from "./recovery-card";
 import { ToolEventRow } from "./tool-event-row";
 
 import type { TranscriptEntry } from "../types";
@@ -76,6 +77,9 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   const resolveApproval = useAgentStore((s) => s.resolveApproval);
   const setAutoApprove = useAgentStore((s) => s.setAutoApprove);
   const addUserMessage = useAgentStore((s) => s.addUserMessage);
+  const recoveryPending = entries.some(
+    (entry) => entry.kind === "recovery" && entry.state === "pending",
+  );
 
   const activeSessionId = useTerminalStore((s) => s.activeSessionId);
   const { data: sessions = [] } = useSessions();
@@ -83,6 +87,7 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     sendUserMessage,
     sendApproval,
     interrupt,
+    acknowledgeRecovery,
     listChats,
     newChat,
     loadChat,
@@ -145,6 +150,11 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
       setAutoApprove(sessionId, true);
   };
 
+  const handleRecovery = (behavior: "verified" | "cancelled") => {
+    acknowledgeRecovery(behavior);
+    if (behavior === "cancelled") newChat();
+  };
+
   const body = (
     <div className="flex min-h-0 flex-1 flex-col">
       <Header
@@ -163,6 +173,7 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
         hasTerminal={activeSessionId !== null}
         sessionName={sessionName}
         onRespond={handleRespond}
+        onResolveRecovery={handleRecovery}
         onSuggest={handleSend}
       />
       <Composer
@@ -172,7 +183,8 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
         disabled={
           activeSessionId === null ||
           terminalSessionId !== activeSessionId ||
-          !connected
+          !connected ||
+          recoveryPending
         }
         onSend={handleSend}
         onStop={interrupt}
@@ -341,6 +353,7 @@ function MessageStream({
   hasTerminal,
   sessionName,
   onRespond,
+  onResolveRecovery,
   onSuggest,
 }: {
   entries: TranscriptEntry[];
@@ -354,6 +367,7 @@ function MessageStream({
     behavior: AgentApprovalBehavior,
   ) => void;
   onSuggest: (text: string) => void;
+  onResolveRecovery: (behavior: "verified" | "cancelled") => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -453,6 +467,14 @@ function MessageStream({
               >
                 {e.text}
               </div>
+            );
+          case "recovery":
+            return (
+              <RecoveryCard
+                key={e.id}
+                entry={e}
+                onResolve={onResolveRecovery}
+              />
             );
         }
       })}

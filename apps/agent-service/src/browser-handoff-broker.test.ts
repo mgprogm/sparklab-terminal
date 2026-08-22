@@ -131,6 +131,61 @@ test("reopen republishes an active handoff without replacing its session", async
   await broker.finish(issued.handoffId, "alice", "chat-1");
 });
 
+test("attachChat republishes a pending handoff to a reconnected chat", async () => {
+  const { broker, browser, issued } = fixture();
+  const frames: unknown[] = [];
+  const attached = broker.attachChat(
+    "chat-1",
+    "alice",
+    (frame) => frames.push(frame),
+    () => undefined,
+  );
+  assert.equal(attached, browser);
+  assert.equal(frames.length, 2);
+  const ready = frames[0] as { type: string; token: string; handoffId: string };
+  assert.equal(ready.type, "browser_handoff_ready");
+  assert.equal(ready.handoffId, issued.handoffId);
+  assert.notEqual(ready.token, issued.token);
+  assert.deepEqual(frames[1], {
+    type: "browser_handoff_state",
+    browserId: "browser-1",
+    handoffId: issued.handoffId,
+    state: "pending",
+    expiresAt: (frames[1] as { expiresAt: number }).expiresAt,
+    hardExpiresAt: undefined,
+  });
+  await assert.rejects(
+    broker.accept(new FakeSocket() as unknown as WebSocket, "alice", {
+      type: "auth",
+      handoffId: issued.handoffId,
+      token: issued.token,
+    }),
+    /handoff_auth_failed/,
+  );
+});
+
+test("attachChat reissues an active handoff resume credential after disconnect", async () => {
+  const { broker, issued } = fixture();
+  const socket = new FakeSocket();
+  await broker.accept(socket as unknown as WebSocket, "alice", {
+    type: "auth",
+    handoffId: issued.handoffId,
+    token: issued.token,
+  });
+  broker.disconnected(issued.handoffId, socket as unknown as WebSocket);
+  const frames: unknown[] = [];
+  broker.attachChat(
+    "chat-1",
+    "alice",
+    (frame) => frames.push(frame),
+    () => undefined,
+  );
+  const ready = frames[0] as { resume?: boolean; token?: string };
+  assert.equal(ready.resume, true);
+  assert.equal(typeof ready.token, "string");
+  await broker.cancel(issued.handoffId, "alice", "chat-1");
+});
+
 test("finish cannot consume a pending handoff and cancel destroys it", async () => {
   const { broker, browser, issued } = fixture();
   await assert.rejects(

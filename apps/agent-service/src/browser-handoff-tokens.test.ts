@@ -42,3 +42,18 @@ test("a wrong token cannot consume the valid token", () => {
   );
   assert.equal(manager.consume(issued.handoffId, issued.token, owner, 1), true);
 });
+
+test("rotating a token invalidates the prior bearer without changing handoff id", () => {
+  const tokens = new HandoffTokenManager();
+  const issued = tokens.issue(owner, 60_000, 1_000);
+  const rotated = tokens.rotate(issued.handoffId, owner, 60_000, 2_000);
+  assert.ok(rotated);
+  assert.equal(
+    tokens.consume(issued.handoffId, issued.token, owner, 2_001),
+    false,
+  );
+  assert.equal(
+    tokens.consume(issued.handoffId, rotated.token, owner, 2_001),
+    true,
+  );
+});

@@ -145,6 +145,91 @@ describe("agent-chat store — history", () => {
     });
   });
 
+  it("keeps an unfinished replayed tool in the running state", () => {
+    const entries: AgentReplayEntry[] = [
+      {
+        kind: "tool",
+        id: "h0",
+        tool: "run_command",
+        summary: "run: ls",
+        input: { command: "ls" },
+      },
+    ];
+    useAgentStore
+      .getState()
+      .ingest({ type: "chat_history", chatId: "c1", entries });
+    expect(useAgentStore.getState().entries[0]).toMatchObject({
+      kind: "tool",
+      state: "running",
+    });
+  });
+
+  it("merges a queued live tool call into its replayed tool row", () => {
+    useAgentStore.getState().ingest({
+      type: "chat_history",
+      chatId: "c1",
+      entries: [
+        {
+          kind: "tool",
+          id: "call-stable",
+          tool: "list_sessions",
+          summary: "list sessions",
+          input: {},
+        },
+      ],
+    });
+    useAgentStore.getState().ingest({
+      type: "tool_use",
+      callId: "call-stable",
+      tool: "list_sessions",
+      summary: "list sessions",
+      input: {},
+    });
+    expect(useAgentStore.getState().entries).toHaveLength(1);
+    expect(useAgentStore.getState().entries[0]).toMatchObject({
+      id: "call-stable",
+      state: "running",
+    });
+  });
+
+  it("resolves a replayed approval when another tab answers it", () => {
+    useAgentStore.getState().ingest({
+      type: "approval_request",
+      requestId: "approval-stable",
+      tool: "run_codex",
+      summary: "run Codex",
+      input: {},
+    });
+    useAgentStore.getState().ingest({
+      type: "approval_resolved",
+      requestId: "approval-stable",
+      behavior: "allow",
+    });
+    expect(useAgentStore.getState().entries[0]).toMatchObject({
+      kind: "approval",
+      state: "allow",
+    });
+  });
+
+  it("requires recovery verification and resolves it for every connected tab", () => {
+    useAgentStore.getState().ingest({
+      type: "recovery_required",
+      message: "Verify the external state before continuing.",
+    });
+    expect(useAgentStore.getState().entries[0]).toMatchObject({
+      kind: "recovery",
+      state: "pending",
+    });
+    useAgentStore.getState().ingest({
+      type: "recovery_resolved",
+      behavior: "verified",
+    });
+    expect(useAgentStore.getState().entries[0]).toMatchObject({
+      kind: "recovery",
+      state: "verified",
+    });
+  });
+
   it("resetForNewChat clears chatId and transcript", () => {
     useAgentStore.setState({
       chatId: "c1",

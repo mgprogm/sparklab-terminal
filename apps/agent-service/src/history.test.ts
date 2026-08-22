@@ -10,8 +10,13 @@ process.env.AZURE_OPENAI_ENDPOINT = "https://example.invalid";
 process.env.AZURE_OPENAI_API_KEY = "test-key";
 process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 
-const { appendMessages, deleteChat, listChats, openChat } =
-  await import("./history.js");
+const {
+  appendMessages,
+  deleteChat,
+  listChats,
+  openChat,
+  reconstructTranscript,
+} = await import("./history.js");
 
 test.after(async () => {
   await rm(historyDir, { recursive: true });
@@ -63,4 +68,24 @@ test("deleting a chat removes both history and its terminal link", async () => {
   await deleteChat(chatId);
   assert.deepEqual(await listChats("local/web-delete"), []);
   assert.notEqual(await openChat("local/web-delete"), chatId);
+});
+
+test("replay preserves a tool call id for queued live results", () => {
+  const entries = reconstructTranscript([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call-stable",
+          type: "function",
+          function: {
+            name: "list_sessions",
+            arguments: "{}",
+          },
+        },
+      ],
+    },
+  ]);
+  assert.equal(entries[0]?.id, "call-stable");
 });
