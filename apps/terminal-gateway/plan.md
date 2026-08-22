@@ -6,7 +6,8 @@
 > **Authoritative context:** `docs/AGENTIC-AI-CREATOR-PLAN.md` (v2 design),
 > `docs/AGENTIC-RICHER-WORKFLOWS-II-PLAN.md` (Arc II), plus the impl-spec docs referenced
 > per slice below.
-> **Date:** 2026-07-29 · **Branch:** `feat/agentic-ai-creator` (NOT merged to main).
+> **Date:** 2026-07-29 · **Historical implementation branch:**
+> `feat/agentic-ai-creator`. The feature is now integrated into `main`.
 
 ---
 
@@ -49,8 +50,7 @@ more surface:
       runs that use pm/kanban MCP connections won't work in prod (fail-closed-safe, not a bug).
       Decide: set it in prod-gateway env, or document runs-with-MCP-connections as unsupported
       until set. (Runs with no MCP connections already work via self-minted scoped tokens.)
-- [ ] Re-run the full gate before merge: `test:agentic` (437), `test:parse` (21), typecheck,
-      lint.
+- [x] Merge readiness gate completed; the feature is integrated into `main`.
 
 ### 2.2 A3 — agent-to-agent chat (HIGH effort, touches decide())
 

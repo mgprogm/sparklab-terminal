@@ -1,7 +1,9 @@
 # Agentic AI Creator — status & remaining work
 
-Consolidated status for the Agentic AI Creator (3rd pluggable artifact). Branch
-`feat/agentic-ai-creator` (NOT merged to main). `test:agentic` at **437**.
+Consolidated status for the Agentic AI Creator (3rd pluggable artifact). The
+feature was integrated into `main`; the historical implementation branch was
+`feat/agentic-ai-creator`. At the time this status was consolidated,
+`test:agentic` was at **437**.
 
 ## Shipped
 
@@ -63,7 +65,6 @@ Design/review trail: `AGENTIC-AI-CREATOR-PLAN.md`, `AGENTIC-RICHER-WORKFLOWS-PLA
 - **Remote-host proxy distribution** (the per-run MCP proxy currently assumes local).
 - **Visual DAG canvas** for the workflow builder (still form-based).
 - **Marketplace / multi-artifact registry** for templates.
-- **Merge `feat/agentic-ai-creator` → main** (whole feature branch not yet merged).
 
 ## Concurrent workstream note (2026-07-29)
 
