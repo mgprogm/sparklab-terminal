@@ -2,11 +2,12 @@
 
 ## Prerequisites
 
-| Tool    | Version           | Notes                                                                                         |
-| ------- | ----------------- | --------------------------------------------------------------------------------------------- |
-| Node.js | 24 (see `.nvmrc`) | `engine-strict` is on; older Node refuses to install                                          |
-| pnpm    | 11.x              | `corepack enable` or `npm i -g pnpm` — the root `packageManager` field pins the exact version |
-| tmux    | 3.x               | Required at runtime by the gateway and by the tests                                           |
+| Tool       | Version           | Notes                                                                                                |
+| ---------- | ----------------- | ---------------------------------------------------------------------------------------------------- |
+| Node.js    | 24 (see `.nvmrc`) | `engine-strict` is on; older Node refuses to install                                                 |
+| pnpm       | 11.x              | `corepack enable` or `npm i -g pnpm` — the root `packageManager` field pins the exact version        |
+| tmux       | 3.x               | Required at runtime by the gateway and by the tests                                                  |
+| bubblewrap | distribution pkg  | Required on Linux/WSL2 hosts where Agent Chat or Agentic Codex runs use `workspace-write`; see below |
 
 ## Install
 
@@ -82,6 +83,46 @@ The agent service reads these from `apps/agent-service/.env` (gitignored). See `
 | `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009`           | `apps/terminal` | Where the browser's chat WebSocket connects. **Inlined at build time** — set it for `next build`. |
 
 The `gpt-5.6-sol` deployment is a reasoning-grade model — expect ~15–20s per model call, so a multi-step agent turn can take 40s–2min. The panel streams tokens and shows tool progress throughout.
+
+### Codex `workspace-write` on Linux / WSL2
+
+Codex's `workspace-write` sandbox needs the distribution `bwrap` executable on
+every machine that can run a local Codex child. This includes the gateway host
+for local terminal sessions; remote terminal servers must install and configure
+it themselves because the gateway does not forward executables or credentials
+over SSH. `read-only` runs do not need this prerequisite for file changes, but
+installing it avoids Codex's fallback-sandbox warning.
+
+Ubuntu/Debian:
+
+```bash
+sudo apt update
+sudo apt install bubblewrap
+bwrap --version
+```
+
+Fedora:
+
+```bash
+sudo dnf install bubblewrap
+bwrap --version
+```
+
+On Ubuntu 24.04, if Codex still reports that it cannot create a user namespace
+or rejects a workspace write after installation, load the packaged AppArmor
+profile:
+
+```bash
+sudo apt install apparmor-profiles apparmor-utils
+sudo install -m 0644 \
+  /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+  /etc/apparmor.d/bwrap-userns-restrict
+sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+```
+
+Restart a long-running gateway after changing its service `PATH`, then verify a
+one-time-approved `run_codex` task that creates, edits, and deletes a disposable
+file in the selected session directory. See the [Codex sandbox prerequisites](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
 
 For virtual-browser support, install `uv`, then run `uv sync` and
 `uvx browser-use install` inside `BROWSER_USE_PROJECT`. The service creates an

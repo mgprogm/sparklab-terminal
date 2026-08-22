@@ -255,7 +255,11 @@ the UI (the gateway's single `DELETE` call site).
   to the Gateway in internal request headers; the Gateway exposes it only in the
   Codex child environment (never the JSON body, approval UI, argv, or logs).
   Remote sessions do not forward secrets through SSH and therefore use the
-  remote host's own `CODEX_HOME`/credential.
+  remote host's own `CODEX_HOME`/credential. On Linux/WSL2, `workspace-write`
+  additionally requires the `bubblewrap` (`bwrap`) distribution package on the
+  host that runs Codex (including each remote server); Ubuntu 24.04 may also
+  need the packaged AppArmor profile. Installation and verification steps are
+  in [GETTING-STARTED.md](GETTING-STARTED.md#codex-workspace-write-on-linux--wsl2).
 
 ## Conversation history
 
