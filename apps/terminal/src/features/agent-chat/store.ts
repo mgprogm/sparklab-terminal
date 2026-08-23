@@ -16,6 +16,8 @@ import type { TranscriptEntry } from "./types";
 import type {
   AgentApprovalBehavior,
   AgentChatSummary,
+  AgentModel,
+  AgentReasoningEffort,
   AgentReplayEntry,
   AgentStatusState,
   AgentWsServerMessage,
@@ -92,6 +94,14 @@ interface AgentState {
   /** Session the composer targets; null = follow the focused terminal ("Auto"). */
   pinnedTargetId: string | null;
   setPinnedTargetId: (id: string | null) => void;
+
+  /** Model settings apply to the next user message and persist locally. */
+  model: AgentModel;
+  setModel: (model: AgentModel) => void;
+  reasoningEffort: AgentReasoningEffort;
+  setReasoningEffort: (effort: AgentReasoningEffort) => void;
+  availableModels: AgentModel[];
+  availableReasoningEfforts: AgentReasoningEffort[];
 
   /** Per-session auto-approve for writes (non-persistent). */
   autoApprove: Record<string, boolean>;
@@ -171,6 +181,20 @@ export const useAgentStore = create<AgentState>()(
       pinnedTargetId: null,
       setPinnedTargetId: (id) => set({ pinnedTargetId: id }),
 
+      model: "gpt-5.6-sol",
+      setModel: (model) => set({ model }),
+      reasoningEffort: "medium",
+      setReasoningEffort: (reasoningEffort) => set({ reasoningEffort }),
+      availableModels: ["gpt-5.6-sol"],
+      availableReasoningEfforts: [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ],
+
       autoApprove: {},
       setAutoApprove: (sessionId, on) =>
         set((s) => ({ autoApprove: { ...s.autoApprove, [sessionId]: on } })),
@@ -185,6 +209,21 @@ export const useAgentStore = create<AgentState>()(
 
       ingest: (frame) => {
         switch (frame.type) {
+          case "agent_capabilities":
+            set((state) => ({
+              availableModels: frame.models,
+              availableReasoningEfforts: frame.reasoningEfforts,
+              model: frame.models.includes(state.model)
+                ? state.model
+                : frame.defaultModel,
+              reasoningEffort: frame.reasoningEfforts.includes(
+                state.reasoningEffort,
+              )
+                ? state.reasoningEffort
+                : frame.defaultReasoningEffort,
+            }));
+            break;
+
           case "chat_started":
             set((state) => ({
               chatId: frame.chatId,
@@ -459,6 +498,8 @@ export const useAgentStore = create<AgentState>()(
         displayMode: s.displayMode,
         chatIdsByTerminal: s.chatIdsByTerminal,
         legacyChatId: s.legacyChatId,
+        model: s.model,
+        reasoningEffort: s.reasoningEffort,
       }),
       version: 1,
       migrate: (persisted, version) => {

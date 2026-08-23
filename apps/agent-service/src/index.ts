@@ -15,6 +15,7 @@ import {
   AgentWsClientMessageSchema,
   type AgentWsServerMessage,
 } from "@sparklab/shared-types";
+import { availableModels, DEFAULT_MODEL } from "./azure.js";
 import { config } from "./config.js";
 import { gateway } from "./gateway-client.js";
 import { AgentRunManager, type AgentRun } from "./agent-run-manager.js";
@@ -143,7 +144,12 @@ wss.on("connection", (ws: WebSocket, req) => {
         send({ type: "pong" });
         break;
       case "user_message":
-        void run.handleUserMessage(msg.data.text, msg.data.activeSessionId);
+        void run.handleUserMessage(
+          msg.data.text,
+          msg.data.activeSessionId,
+          msg.data.model,
+          msg.data.reasoningEffort,
+        );
         break;
       case "approval_response":
         run.onApprovalResponse(msg.data.requestId, msg.data.behavior);
@@ -281,6 +287,13 @@ wss.on("connection", (ws: WebSocket, req) => {
         detachRun = null;
         return;
       }
+      send({
+        type: "agent_capabilities",
+        models: availableModels(),
+        reasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+        defaultModel: DEFAULT_MODEL,
+        defaultReasoningEffort: "medium",
+      });
     } catch (error) {
       send({
         type: "error",
@@ -393,7 +406,7 @@ void runs
   .then(() => {
     server.listen(config.port, config.host, () => {
       console.log(
-        `[agent] listening on ${config.host}:${config.port} — gateway ${config.gatewayUrl}, model ${config.azure.deployment}`,
+        `[agent] listening on ${config.host}:${config.port} — gateway ${config.gatewayUrl}, models ${availableModels().join(", ")}`,
       );
     });
   })

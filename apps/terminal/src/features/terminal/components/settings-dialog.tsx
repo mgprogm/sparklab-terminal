@@ -77,9 +77,6 @@ import type { ComponentType, ReactNode } from "react";
 const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:3007";
 
-// The agent model is fixed server-side (Azure OpenAI); shown read-only here.
-const AGENT_MODEL = "gpt-5.6-sol";
-
 // Font-size choices offered in the UI. "auto" keeps the responsive 13/14
 // default; the numbers straddle it (14 is the wide-screen default).
 const FONT_SIZE_OPTIONS: { label: string; value: TerminalFontSize }[] = [
@@ -522,13 +519,14 @@ export function SettingsDialog({
           {/* Notifications — enable/disable "job finished" push. */}
           {section === "notifications" && <NotificationsSection />}
 
-          {/* Agent chat — informational only. */}
+          {/* Agent chat — model settings live in the composer. */}
           {section === "agent" && (
             <Section>
-              <InfoRow
-                label="Model"
-                value={<span className="font-mono text-xs">{AGENT_MODEL}</span>}
-              />
+              <p className="text-muted-foreground text-xs leading-relaxed">
+                Choose the model and reasoning effort for each new message from
+                the controls beside the chat input. Available models depend on
+                the Azure AI Foundry deployments configured for this service.
+              </p>
               <div className="text-muted-foreground mt-2 flex gap-2 text-xs leading-relaxed">
                 <ShieldCheck className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />
                 <p>

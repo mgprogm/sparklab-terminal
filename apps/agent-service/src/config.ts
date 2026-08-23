@@ -22,6 +22,11 @@ function optional(name: string, fallback: string): string {
   return v && v.trim() ? v.trim() : fallback;
 }
 
+function optionalValue(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value || undefined;
+}
+
 function positiveInt(name: string, fallback: number, max: number): number {
   const raw = optional(name, String(fallback));
   const value = Number(raw);
@@ -67,7 +72,11 @@ export const config = {
     endpoint: required("AZURE_OPENAI_ENDPOINT"),
     apiKey: required("AZURE_OPENAI_API_KEY"),
     apiVersion: optional("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
-    deployment: required("GPT56SOL_DEPLOYMENT"),
+    deployments: {
+      sol: required("GPT56SOL_DEPLOYMENT"),
+      terra: optionalValue("GPT56TERRA_DEPLOYMENT"),
+      luna: optionalValue("GPT56LUNA_DEPLOYMENT"),
+    },
   },
   port: Number(optional("AGENT_PORT", "3009")),
   host: optional("AGENT_HOST", "127.0.0.1"),

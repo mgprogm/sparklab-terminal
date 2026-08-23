@@ -270,7 +270,7 @@ class GatewayClient {
       "x-sparklab-codex-azure-endpoint": config.azure.endpoint,
       "x-sparklab-codex-azure-api-key": config.azure.apiKey,
       "x-sparklab-codex-azure-api-version": config.azure.apiVersion,
-      "x-sparklab-codex-azure-deployment": config.azure.deployment,
+      "x-sparklab-codex-azure-deployment": config.azure.deployments.sol,
     };
     return this.json<CodexRunResponse>(
       await this.call(`/api/sessions/${encodeURIComponent(sessionId)}/codex`, {

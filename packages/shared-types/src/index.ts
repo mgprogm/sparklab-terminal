@@ -246,6 +246,8 @@ export {
   type SendKeysRequest,
   // Agent chat WS: client -> server
   AgentUserMessageSchema,
+  AgentModelSchema,
+  AgentReasoningEffortSchema,
   AgentApprovalBehaviorSchema,
   AgentApprovalResponseSchema,
   AgentInterruptSchema,
@@ -275,6 +277,8 @@ export {
   BrowserHandoffServerControlSchema,
   AgentWsClientMessageSchema,
   type AgentUserMessage,
+  type AgentModel,
+  type AgentReasoningEffort,
   type AgentApprovalBehavior,
   type AgentApprovalResponse,
   type AgentInterrupt,
@@ -296,6 +300,7 @@ export {
   type AgentWsClientMessage,
   // Agent chat WS: server -> client
   AgentChatStartedSchema,
+  AgentCapabilitiesSchema,
   AgentAssistantDeltaSchema,
   AgentAssistantMessageSchema,
   AgentToolUseSchema,
@@ -322,6 +327,7 @@ export {
   BrowserHandoffStateSchema,
   AgentWsServerMessageSchema,
   type AgentChatStarted,
+  type AgentCapabilities,
   type AgentAssistantDelta,
   type AgentAssistantMessage,
   type AgentToolUse,

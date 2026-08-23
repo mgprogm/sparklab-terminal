@@ -60,13 +60,14 @@ describe("SettingsDialog", () => {
     expect(useTerminalStore.getState().terminalFontSize).toBe("auto");
   });
 
-  it("reveals the fixed agent model only on the Agent tab", async () => {
+  it("explains where agent model controls live on the Agent tab", async () => {
     const user = userEvent.setup();
     renderDialog();
 
-    expect(screen.queryByText("gpt-5.6-sol")).not.toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Agent" }));
-    expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
+    expect(
+      screen.getByText(/choose the model and reasoning effort/i),
+    ).toBeInTheDocument();
   });
 
   it("shows connection details on the Connection tab", async () => {

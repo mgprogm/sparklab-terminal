@@ -16,6 +16,8 @@ import { useCallback, useEffect } from "react";
 import { AgentConnection } from "./connection";
 import { useAgentStore } from "./store";
 
+import type { AgentModel, AgentReasoningEffort } from "@sparklab/shared-types";
+
 import { authKeys } from "@/features/auth";
 import { useBrowserHandoffStore } from "@/features/browser-handoff";
 import { useBrowserViewStore } from "@/features/browser-view";
@@ -116,9 +118,17 @@ export function useAgentChat() {
     openConnection(activeSessionId, resumeChatId ?? null);
   }, [activeSessionId, panelOpen, openConnection]);
 
-  const sendUserMessage = useCallback((text: string, sessionId?: string) => {
-    conn?.sendUserMessage(text, sessionId);
-  }, []);
+  const sendUserMessage = useCallback(
+    (
+      text: string,
+      sessionId?: string,
+      model?: AgentModel,
+      reasoningEffort?: AgentReasoningEffort,
+    ) => {
+      conn?.sendUserMessage(text, sessionId, model, reasoningEffort);
+    },
+    [],
+  );
 
   const sendApproval = useCallback(
     (

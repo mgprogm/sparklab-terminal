@@ -48,6 +48,8 @@ import { ToolEventRow } from "./tool-event-row";
 import type { TranscriptEntry } from "../types";
 import type {
   AgentApprovalBehavior,
+  AgentModel,
+  AgentReasoningEffort,
   AgentStatusState,
 } from "@sparklab/shared-types";
 
@@ -134,9 +136,14 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     return () => window.clearTimeout(id);
   }, [panelOpen, displayMode, isMobile]);
 
-  const handleSend = (text: string, target?: string) => {
+  const handleSend = (
+    text: string,
+    target?: string,
+    model?: AgentModel,
+    reasoningEffort?: AgentReasoningEffort,
+  ) => {
     addUserMessage(text);
-    sendUserMessage(text, target);
+    sendUserMessage(text, target, model, reasoningEffort);
   };
 
   const handleRespond = (

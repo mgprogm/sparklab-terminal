@@ -9,6 +9,8 @@ import {
   AgentWsServerMessageSchema,
   WS_CLOSE_UNAUTHORIZED,
   type AgentApprovalBehavior,
+  type AgentModel,
+  type AgentReasoningEffort,
   type AgentWsClientMessage,
   type AgentWsServerMessage,
 } from "@sparklab/shared-types";
@@ -173,8 +175,19 @@ export class AgentConnection {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   }
 
-  sendUserMessage(text: string, activeSessionId?: string): void {
-    this.sendRaw({ type: "user_message", text, activeSessionId });
+  sendUserMessage(
+    text: string,
+    activeSessionId?: string,
+    model?: AgentModel,
+    reasoningEffort?: AgentReasoningEffort,
+  ): void {
+    this.sendRaw({
+      type: "user_message",
+      text,
+      activeSessionId,
+      model,
+      reasoningEffort,
+    });
   }
 
   sendApproval(requestId: string, behavior: AgentApprovalBehavior): void {

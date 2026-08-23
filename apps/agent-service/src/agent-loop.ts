@@ -14,9 +14,11 @@ import type {
 } from "openai/resources/chat/completions";
 import type {
   AgentApprovalBehavior,
+  AgentModel,
+  AgentReasoningEffort,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
-import { azure, MODEL } from "./azure.js";
+import { azure, DEFAULT_MODEL, deploymentFor } from "./azure.js";
 import { CAPS } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
 import { appendMessages, loadChat, reconstructTranscript } from "./history.js";
@@ -183,12 +185,22 @@ export class AgentLoop {
   async handleUserMessage(
     text: string,
     activeSessionId?: string,
+    model: AgentModel = DEFAULT_MODEL,
+    reasoningEffort: AgentReasoningEffort = "medium",
   ): Promise<void> {
     await this.ready;
     if (this.running) {
       this.send({
         type: "error",
         message: "The agent is still working on the previous message.",
+      });
+      return;
+    }
+    const deployment = deploymentFor(model);
+    if (!deployment) {
+      this.send({
+        type: "error",
+        message: "The selected agent model is not configured on this service.",
       });
       return;
     }
@@ -226,6 +238,8 @@ export class AgentLoop {
         const { text: segmentText, toolCalls } = await this.streamOnce(
           [system, ...this.history],
           signal,
+          deployment,
+          reasoningEffort,
         );
 
         // Persist the assistant turn (content + any tool calls together).
@@ -480,12 +494,18 @@ export class AgentLoop {
   private async streamOnce(
     messages: ChatCompletionMessageParam[],
     signal: AbortSignal,
+    deployment: string,
+    reasoningEffort: AgentReasoningEffort,
   ): Promise<{ text: string; toolCalls: AccumulatedToolCall[] }> {
     const stream = await azure.chat.completions.create(
       {
-        model: MODEL,
+        model: deployment,
         messages,
         tools: TOOLS,
+        // openai@4's declaration predates GPT-5.6's `none`, `xhigh`, and
+        // `max` values; the Azure Chat Completions API receives this field
+        // unchanged and validates support for the selected deployment.
+        reasoning_effort: reasoningEffort as "low" | "medium" | "high",
         stream: true,
       },
       { signal },

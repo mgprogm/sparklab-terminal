@@ -1,6 +1,8 @@
 /** Owns agent work independently from browser WebSocket connections. */
 import type {
   AgentApprovalBehavior,
+  AgentModel,
+  AgentReasoningEffort,
   AgentStatusState,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
@@ -107,8 +109,15 @@ export class AgentRun {
   async handleUserMessage(
     text: string,
     activeSessionId?: string,
+    model?: AgentModel,
+    reasoningEffort?: AgentReasoningEffort,
   ): Promise<void> {
-    await this.loop.handleUserMessage(text, activeSessionId);
+    await this.loop.handleUserMessage(
+      text,
+      activeSessionId,
+      model,
+      reasoningEffort,
+    );
     await this.flush();
   }
 

@@ -2,7 +2,8 @@
 
 The **Agent Chat** backend: a Node/TypeScript service that hosts a WebSocket
 (`/agent`, default port 3009) and runs a custom tool-calling loop over an Azure
-OpenAI deployment (`gpt-5.6-sol`). It lets the user chat with an AI agent that
+OpenAI GPT-5.6 deployment. `gpt-5.6-sol` is required; configured Terra and
+Luna deployments are offered in the composer. It lets the user chat with an AI agent that
 can view, drive, and create terminal sessions — always through the gateway,
 never touching tmux directly.
 
@@ -39,7 +40,8 @@ cp .env.example .env      # then fill in the Azure credentials
 Required env (see `.env.example` and the table in
 [../../docs/GETTING-STARTED.md](../../docs/GETTING-STARTED.md)):
 `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION`,
-`GPT56SOL_DEPLOYMENT`, plus `AGENT_PORT`, `GATEWAY_URL`, `ALLOWED_ORIGINS`, and
+`GPT56SOL_DEPLOYMENT`, optional `GPT56TERRA_DEPLOYMENT` / `GPT56LUNA_DEPLOYMENT`,
+plus `AGENT_PORT`, `GATEWAY_URL`, `ALLOWED_ORIGINS`, and
 (in gateway auth mode) `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD`. The service
 **fails fast** at startup if a required Azure var is missing. `.env` is
 gitignored — never commit the key.

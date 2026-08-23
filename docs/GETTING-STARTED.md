@@ -90,6 +90,8 @@ The agent service reads these from `apps/agent-service/.env` (gitignored). See `
 | `AZURE_OPENAI_API_KEY`                        | _(required, secret)_              | agent-service   | Azure key — gitignored `.env` only; also supplied ephemerally to local `run_codex` children       |
 | `AZURE_OPENAI_API_VERSION`                    | `2025-04-01-preview`              | agent-service   | Azure OpenAI REST API version (pin it)                                                            |
 | `GPT56SOL_DEPLOYMENT`                         | _(required)_                      | agent-service   | Deployment name, e.g. `gpt-5.6-sol` — passed as the model id                                      |
+| `GPT56TERRA_DEPLOYMENT`                       | _(unset)_                         | agent-service   | Optional deployment enabling `gpt-5.6-terra` in Agent Chat                                        |
+| `GPT56LUNA_DEPLOYMENT`                        | _(unset)_                         | agent-service   | Optional deployment enabling `gpt-5.6-luna` in Agent Chat                                         |
 | `AGENT_PORT`                                  | `3009`                            | agent-service   | Listen port for the `/agent` WebSocket                                                            |
 | `GATEWAY_URL`                                 | `http://127.0.0.1:3007`           | agent-service   | Gateway base URL (loopback) it drives terminals through                                           |
 | `ALLOWED_ORIGINS`                             | `http://localhost:3000,3002,3003` | agent-service   | Browser origins allowed to open the `/agent` WebSocket                                            |
@@ -99,7 +101,10 @@ The agent service reads these from `apps/agent-service/.env` (gitignored). See `
 | `BROWSER_USE_EXECUTABLE_PATH`                 | _(auto-detect)_                   | agent-service   | Explicit sandboxed Chromium path, e.g. `/snap/bin/chromium`                                       |
 | `NEXT_PUBLIC_AGENT_URL`                       | `http://localhost:3009`           | `apps/terminal` | Where the browser's chat WebSocket connects. **Inlined at build time** — set it for `next build`. |
 
-The `gpt-5.6-sol` deployment is a reasoning-grade model — expect ~15–20s per model call, so a multi-step agent turn can take 40s–2min. The panel streams tokens and shows tool progress throughout.
+The Agent composer selects a configured GPT-5.6 deployment and reasoning effort
+per message. `gpt-5.6-sol` is the default reasoning-grade model — expect
+~15–20s per model call, so a multi-step agent turn can take 40s–2min. The panel
+streams tokens and shows tool progress throughout.
 
 ### Codex `workspace-write` on Linux / WSL2
 

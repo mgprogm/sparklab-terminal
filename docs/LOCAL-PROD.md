@@ -117,7 +117,8 @@ Ports and origins are set by the launcher (PM2 or the script). Everything else �
 gitignored `.env`, which the start commands load via `--env-file-if-exists=.env`:
 
 - `apps/terminal-gateway/.env` — `GATEWAY_AUTH_USER` + password
-- `apps/agent-service/.env` — `AZURE_OPENAI_*`, `GPT56SOL_DEPLOYMENT`, gateway creds
+- `apps/agent-service/.env` — `AZURE_OPENAI_*`, `GPT56SOL_DEPLOYMENT`, optional
+  `GPT56TERRA_DEPLOYMENT` / `GPT56LUNA_DEPLOYMENT`, gateway creds
 
 Node/tsx give **shell env precedence over the `.env` file**, which is exactly
 how the launcher overrides `PORT`/`ALLOWED_ORIGINS`/etc. without touching your

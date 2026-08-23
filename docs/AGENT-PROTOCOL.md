@@ -1,7 +1,7 @@
 # Agent Chat protocol
 
 The **agent service** (`apps/agent-service`, default port 3009) runs a custom
-tool-calling loop over an Azure OpenAI deployment (`gpt-5.6-sol`) and lets the
+tool-calling loop over Azure OpenAI GPT-5.6 deployments and lets the
 user drive their terminals from a chat panel. It is a **fourth independent
 lifetime** alongside browser / gateway / tmux: it can crash or restart without
 touching any attached pty, because it operates terminals **only** through the
@@ -19,6 +19,8 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST─�
 | `AZURE_OPENAI_API_KEY`                        | secret — never committed                                         |
 | `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                             |
 | `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                            |
+| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer     |
+| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer      |
 | `AGENT_PORT`                                  | listen port (default 3009)                                       |
 | `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                              |
 | `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                         |
@@ -28,6 +30,9 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST─�
 | `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                  |
 
 The service fails fast at startup if any required Azure var is missing.
+The composer sends an allowlisted public model id and reasoning effort for each
+turn; the service maps it to a private deployment name and only advertises
+models configured on that service.
 
 Each WebSocket includes `terminalSessionId` in its query string. With no other
 chat selector, the service resumes the newest chat linked to that terminal. An

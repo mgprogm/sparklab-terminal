@@ -88,12 +88,33 @@ export type SendKeysRequest = z.infer<typeof SendKeysRequestSchema>;
 // ---------------------------------------------------------------------------
 
 /** User sends a chat message to the agent. */
+export const AgentModelSchema = z.enum([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+]);
+export type AgentModel = z.infer<typeof AgentModelSchema>;
+
+export const AgentReasoningEffortSchema = z.enum([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+export type AgentReasoningEffort = z.infer<typeof AgentReasoningEffortSchema>;
+
 export const AgentUserMessageSchema = z.object({
   type: z.literal("user_message"),
   /** The user's message text. */
   text: z.string(),
   /** Terminal session the user is currently viewing, if any. */
   activeSessionId: z.string().optional(),
+  /** Public model id; the service maps this to an Azure deployment. */
+  model: AgentModelSchema.optional(),
+  /** Reasoning budget for this turn. */
+  reasoningEffort: AgentReasoningEffortSchema.optional(),
 });
 export type AgentUserMessage = z.infer<typeof AgentUserMessageSchema>;
 
@@ -206,6 +227,16 @@ export const AgentChatStartedSchema = z.object({
   terminalSessionId: z.string().min(1),
 });
 export type AgentChatStarted = z.infer<typeof AgentChatStartedSchema>;
+
+/** Models configured on the service; deployment names are never exposed. */
+export const AgentCapabilitiesSchema = z.object({
+  type: z.literal("agent_capabilities"),
+  models: z.array(AgentModelSchema).min(1),
+  reasoningEfforts: z.array(AgentReasoningEffortSchema).min(1),
+  defaultModel: AgentModelSchema,
+  defaultReasoningEffort: AgentReasoningEffortSchema,
+});
+export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 
 /** Incremental chunk of the assistant's in-progress reply. */
 export const AgentAssistantDeltaSchema = z.object({
@@ -712,6 +743,7 @@ export type BrowserHandoffServerControl = z.infer<
 /** Discriminated union of all server -> client agent chat messages. */
 export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatStartedSchema,
+  AgentCapabilitiesSchema,
   AgentAssistantDeltaSchema,
   AgentAssistantMessageSchema,
   AgentToolUseSchema,

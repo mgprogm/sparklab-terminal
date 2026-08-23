@@ -35,7 +35,7 @@ Browser (Next.js + xterm.js) --WS--> Gateway (node-pty) --tmux attach--> tmux se
 It also ships an **Agent Chat**: an AI agent (a custom tool-calling loop over Azure OpenAI, in `apps/agent-service`) that views and drives terminals — with per-write approval — through the gateway. Conversation history is scoped per terminal and automatically follows the focused terminal. It can operate an isolated Browser Use instance, save a one-time-approved bounded viewport capture to an absolute path on a selected terminal server, and temporarily hand the same browser/profile to the user over an authenticated `/browser-handoff` channel. Public domain and literal-IP HTTP(S) destinations are admitted only through the validating, IP-pinning proxy. JPEG-over-WebSocket remains the production transport and automatic fallback; typed WebRTC signaling and the frontend `<video>` receiver are present behind a feature flag, but no media provider is advertised yet. See [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md), [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md), and [ADR-BROWSER-HANDOFF-WEBRTC.md](ADR-BROWSER-HANDOFF-WEBRTC.md).
 
 - `apps/terminal-gateway` — Node gateway (plain JS): REST session CRUD + agent REST (`/screen`, `/keys`) + `/attach` WebSocket.
-- `apps/agent-service` — Node/TS agent service: the `/agent` WebSocket + the tool-calling loop over `gpt-5.6-sol`.
+- `apps/agent-service` — Node/TS agent service: the `/agent` WebSocket + the tool-calling loop over configured GPT-5.6 Azure deployments.
 - `apps/terminal` — Next.js frontend: the terminal (xterm.js, TanStack Query, Zustand) + the Agent Chat panel.
 - `apps/web` — Next.js app that carries the exemplar patterns for future product features.
 - `apps/e2e` — Playwright suite proving the cut-over gates.
