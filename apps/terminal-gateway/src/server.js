@@ -54,6 +54,11 @@ const ALLOWED_ORIGINS = new Set(
     .filter(Boolean),
 );
 const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
+// Azure Speech stays optional so a terminal deployment without voice input
+// continues to boot normally. The subscription key is used only to mint a
+// short-lived browser token; it is never returned to the client.
+const AZURE_SPEECH_KEY = (process.env.AZURE_SPEECH_KEY || "").trim();
+const AZURE_SPEECH_REGION = (process.env.AZURE_SPEECH_REGION || "").trim();
 // Optional scoped bearer token for the artifact APIs (/api/kanban/* and
 // /api/pm/*). Lets an external AI CLI (Claude/Codex) drive them without a cookie
 // login. Prefers GATEWAY_API_TOKEN (covers both artifacts); the original
@@ -1282,6 +1287,44 @@ function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
   res.end(body);
+}
+
+async function issueAzureSpeechToken(req, res) {
+  if (!AZURE_SPEECH_KEY || !AZURE_SPEECH_REGION) {
+    return sendJson(res, 503, {
+      error: "speech recognition is not configured",
+    });
+  }
+
+  let tokenResponse;
+  try {
+    tokenResponse = await fetch(
+      `https://${AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
+      {
+        method: "POST",
+        headers: { "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+  } catch {
+    return sendJson(res, 502, { error: "could not reach Azure Speech" });
+  }
+
+  if (!tokenResponse.ok) {
+    console.warn(
+      `[speech] Azure token request failed with ${tokenResponse.status}`,
+    );
+    return sendJson(res, 502, {
+      error: "could not authorize speech recognition",
+    });
+  }
+
+  const token = (await tokenResponse.text()).trim();
+  if (!token)
+    return sendJson(res, 502, {
+      error: "Azure returned an empty speech token",
+    });
+  return sendJson(res, 200, { token, region: AZURE_SPEECH_REGION });
 }
 
 // A4: 64 KB body cap.
@@ -5605,6 +5648,13 @@ async function handleApi(req, res, url) {
     !(isHookNotifyRoute && isHookNotifyAuthorized(req))
   ) {
     return sendJson(res, 401, { error: "unauthorized" });
+  }
+
+  // ---- Azure Speech short-lived browser token ----
+  if (parts[1] === "speech" && parts[2] === "token" && parts.length === 3) {
+    if (req.method !== "POST")
+      return sendJson(res, 405, { error: "method not allowed" });
+    return issueAzureSpeechToken(req, res);
   }
 
   // ---- Munder Difflin viewer: /api/munder-difflin/* ----

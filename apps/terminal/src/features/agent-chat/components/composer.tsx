@@ -20,11 +20,13 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
+  Mic,
+  MicOff,
   Pin,
   SlidersHorizontal,
   Square,
 } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useAgentStore } from "../store";
 
@@ -49,6 +51,8 @@ const EFFORT_LABELS: Record<AgentReasoningEffort, string> = {
   max: "Max",
 };
 
+const WAVEFORM_DELAYS_MS = [0, 90, 180, 270, 360, 450, 540, 630, 720, 810];
+
 export function Composer({
   sessions,
   activeSessionId,
@@ -68,7 +72,17 @@ export function Composer({
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
+  const [interimText, setInterimText] = useState("");
+  const [listening, setListening] = useState(false);
+  const [speechError, setSpeechError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const recognizerRef = useRef<{
+    stopContinuousRecognitionAsync: (
+      onSuccess: () => void,
+      onError?: (error: string) => void,
+    ) => void;
+    close: () => void;
+  } | null>(null);
   const status = useAgentStore((s) => s.status);
   const pinnedTargetId = useAgentStore((s) => s.pinnedTargetId);
   const setPinnedTargetId = useAgentStore((s) => s.setPinnedTargetId);
@@ -96,7 +110,90 @@ export function Composer({
     const next = Math.min(ta.scrollHeight, 132);
     ta.style.height = `${next}px`;
     ta.style.overflowY = ta.scrollHeight > 132 ? "auto" : "hidden";
-  }, [text]);
+  }, [text, interimText]);
+
+  const stopListening = () => {
+    const recognizer = recognizerRef.current;
+    recognizerRef.current = null;
+    setListening(false);
+    setInterimText("");
+    if (!recognizer) return;
+    recognizer.stopContinuousRecognitionAsync(
+      () => recognizer.close(),
+      () => recognizer.close(),
+    );
+  };
+
+  useEffect(() => () => stopListening(), []);
+
+  const appendTranscript = (transcript: string) => {
+    setText((current) => {
+      const prefix = current.trimEnd();
+      return prefix ? `${prefix} ${transcript}` : transcript;
+    });
+  };
+
+  const startListening = async () => {
+    if (disabled || working || listening) return;
+    setSpeechError(null);
+
+    try {
+      const tokenResponse = await fetch("/api/speech/token", {
+        method: "POST",
+      });
+      const tokenBody: unknown = await tokenResponse.json();
+      const maybeSpeechToken =
+        tokenBody && typeof tokenBody === "object"
+          ? (tokenBody as Partial<{ token: string; region: string }>)
+          : null;
+      if (
+        !tokenResponse.ok ||
+        !maybeSpeechToken ||
+        typeof maybeSpeechToken.token !== "string" ||
+        typeof maybeSpeechToken.region !== "string"
+      ) {
+        throw new Error("Speech recognition is unavailable");
+      }
+      const speechToken = maybeSpeechToken as { token: string; region: string };
+
+      const SpeechSDK = await import("microsoft-cognitiveservices-speech-sdk");
+      const speechConfig = SpeechSDK.SpeechConfig.fromAuthorizationToken(
+        speechToken.token,
+        speechToken.region,
+      );
+      speechConfig.speechRecognitionLanguage = navigator.language || "en-US";
+      const recognizer = new SpeechSDK.SpeechRecognizer(
+        speechConfig,
+        SpeechSDK.AudioConfig.fromDefaultMicrophoneInput(),
+      );
+
+      recognizerRef.current = recognizer;
+      recognizer.recognizing = (_, event) => setInterimText(event.result.text);
+      recognizer.recognized = (_, event) => {
+        if (event.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+          appendTranscript(event.result.text);
+        }
+        setInterimText("");
+      };
+      recognizer.canceled = (_, event) => {
+        if (event.reason === SpeechSDK.CancellationReason.Error) {
+          setSpeechError("Speech recognition stopped unexpectedly");
+        }
+        stopListening();
+      };
+      recognizer.sessionStopped = () => stopListening();
+      recognizer.startContinuousRecognitionAsync(
+        () => setListening(true),
+        () => {
+          setSpeechError("Could not access the microphone");
+          stopListening();
+        },
+      );
+    } catch {
+      setSpeechError("Speech recognition is unavailable");
+      stopListening();
+    }
+  };
 
   const submit = () => {
     const t = text.trim();
@@ -111,8 +208,12 @@ export function Composer({
         <textarea
           ref={taRef}
           rows={1}
-          value={text}
-          disabled={disabled}
+          value={
+            interimText
+              ? `${text}${text.trimEnd() ? " " : ""}${interimText}`
+              : text
+          }
+          disabled={disabled || listening}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
@@ -125,6 +226,33 @@ export function Composer({
           }
           className="text-foreground placeholder:text-muted-foreground max-h-[132px] min-h-8 resize-none bg-transparent px-3 pb-1 pt-2 text-base leading-relaxed outline-none sm:text-sm"
         />
+
+        {listening && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="border-border/60 flex h-8 items-center gap-2 border-t px-3"
+          >
+            <span className="text-destructive shrink-0 text-xs font-medium">
+              Listening
+            </span>
+            <div
+              aria-hidden="true"
+              className="flex h-4 flex-1 items-center justify-center gap-1"
+            >
+              {WAVEFORM_DELAYS_MS.map((delay) => (
+                <span
+                  key={delay}
+                  className="voice-wave-bar bg-destructive/80 w-0.5 rounded-full"
+                  style={{ animationDelay: `${delay}ms` }}
+                />
+              ))}
+            </div>
+            <span className="text-muted-foreground shrink-0 text-xs">
+              Tap mic to stop
+            </span>
+          </div>
+        )}
 
         <div className="flex items-center justify-between gap-2 px-2 pb-2">
           <div className="flex min-w-0 items-center gap-1">
@@ -204,29 +332,54 @@ export function Composer({
             </DropdownMenu>
           </div>
 
-          {working ? (
+          <div className="flex items-center gap-1">
+            {speechError && (
+              <span className="text-destructive max-w-28 truncate text-xs">
+                {speechError}
+              </span>
+            )}
             <button
               type="button"
-              onClick={onStop}
-              aria-label="Stop the agent"
-              className="border-chart-2/50 text-chart-2 hover:bg-chart-2/10 flex size-7 shrink-0 items-center justify-center rounded-sm border transition-colors"
-            >
-              <Square className="size-3 fill-current" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!text.trim() || disabled}
-              aria-label="Send"
+              onClick={listening ? stopListening : () => void startListening()}
+              disabled={disabled || working}
+              aria-label={listening ? "Stop voice input" : "Start voice input"}
+              aria-pressed={listening}
+              title={listening ? "Stop voice input" : "Start voice input"}
               className={cn(
-                "bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-sm transition-opacity",
-                (!text.trim() || disabled) && "opacity-40",
+                "text-muted-foreground hover:bg-accent hover:text-foreground flex size-7 shrink-0 items-center justify-center rounded-sm transition-colors disabled:pointer-events-none disabled:opacity-40",
+                listening && "bg-destructive/10 text-destructive",
               )}
             >
-              <ArrowUp className="size-4" />
+              {listening ? (
+                <MicOff className="size-4" />
+              ) : (
+                <Mic className="size-4" />
+              )}
             </button>
-          )}
+            {working ? (
+              <button
+                type="button"
+                onClick={onStop}
+                aria-label="Stop the agent"
+                className="border-chart-2/50 text-chart-2 hover:bg-chart-2/10 flex size-7 shrink-0 items-center justify-center rounded-sm border transition-colors"
+              >
+                <Square className="size-3 fill-current" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!text.trim() || disabled}
+                aria-label="Send"
+                className={cn(
+                  "bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-sm transition-opacity",
+                  (!text.trim() || disabled) && "opacity-40",
+                )}
+              >
+                <ArrowUp className="size-4" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

@@ -37,10 +37,33 @@
   }
 }
 
+/* Recording indicator for the Agent Chat speech composer. It deliberately
+ * avoids a second getUserMedia stream: Azure's recognizer owns the microphone. */
+.voice-wave-bar {
+  height: 6px;
+  transform-origin: center;
+  animation: voice-wave-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes voice-wave-pulse {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+  }
+  50% {
+    transform: scaleY(2.25);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .brand-shimmer {
     animation: none;
     background-position: 50% 0;
+  }
+
+  .voice-wave-bar {
+    animation: none;
+    transform: scaleY(1);
   }
 }
 

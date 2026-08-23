@@ -28,6 +28,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "lucide-react": "^0.525.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.51.0",
     "next": "^15.3.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
