@@ -16,12 +16,14 @@ describe("useTerminalStore persistence", () => {
     const persisted = options.partialize!({
       ...useTerminalStore.getState(),
       activeSessionId: "web-abc",
+      recentSessionIds: ["web-abc"],
       sidebarCollapsed: true,
       terminalFontSize: 16,
       mobileSidebarOpen: true,
     });
     expect(persisted).toEqual({
       activeSessionId: "web-abc",
+      recentSessionIds: ["web-abc"],
       sidebarCollapsed: true,
       terminalFontSize: 16,
       collapsedGroups: {},

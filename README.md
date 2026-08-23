@@ -26,6 +26,7 @@ Full rationale in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/DESI
 
 - **Persistent jobs** — survive tab close, network loss, and gateway restart.
 - **Multi-session** — create/rename/organize sessions; group them by org → project in the sidebar.
+- **Terminal switcher** — quickly move between sessions from a searchable, most-recently-used switcher without losing the persistent sidebar.
 - **Multi-server** — attach to remote hosts over SSH (key or password auth) with connection multiplexing; local and remote sessions live side by side.
 - **File explorer** — browse, preview, upload, download, rename, and delete files on any session's host (local or remote).
 - **Git-status footer** — live branch + working-tree summary for the active session's cwd.

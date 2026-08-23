@@ -31,6 +31,7 @@ import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AppWindow,
+  ArrowLeftRight,
   Bot,
   FolderTree,
   Globe2,
@@ -53,6 +54,7 @@ import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
 import { TerminalFooter } from "./terminal-footer";
+import { TerminalSwitcher } from "./terminal-switcher";
 import { useMediaQuery } from "../hooks/use-media-query";
 import { useServers } from "../hooks/use-servers";
 import { useSessionUrlSync } from "../hooks/use-session-url-sync";
@@ -98,6 +100,8 @@ export function TerminalShell() {
   const {
     activeSessionId,
     setActiveSessionId,
+    recentSessionIds,
+    markSessionActive,
     sidebarCollapsed,
     toggleSidebar,
     mobileSidebarOpen,
@@ -139,6 +143,7 @@ export function TerminalShell() {
     state: ConnectionStatus;
     text: string;
   }>({ state: "disconnected", text: "idle" });
+  const [switcherOpen, setSwitcherOpen] = useState(false);
 
   // Ref to the xterm container for focus restoration.
   const termContainerRef = useRef<HTMLDivElement>(null);
@@ -152,6 +157,23 @@ export function TerminalShell() {
 
   // iOS keyboard fallback: mirror visualViewport.height into --app-height.
   useVisualViewport();
+
+  // ⌘⇧O / Win⇧O (Ctrl⇧O fallback) is intentionally used instead of ⌘Tab:
+  // browsers and macOS reserve the latter for their own app/tab switching.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLocaleLowerCase() === "o"
+      ) {
+        event.preventDefault();
+        setSwitcherOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Deep-linking: `?session=<id>` ↔ activeSessionId. The URL read (on mount)
   // overrides the persisted id; resolveActiveSession below then validates it
@@ -242,8 +264,9 @@ export function TerminalShell() {
   const handleSelectSession = useCallback(
     (id: string) => {
       setActiveSessionId(id);
+      markSessionActive(id);
     },
-    [setActiveSessionId],
+    [markSessionActive, setActiveSessionId],
   );
 
   // These return the mutation promise so dialogs in SessionList can keep a
@@ -252,8 +275,9 @@ export function TerminalShell() {
     (params?: CreateSessionParams) =>
       createSession.mutateAsync(params).then((created) => {
         setActiveSessionId(created.id);
+        markSessionActive(created.id);
       }),
-    [createSession, setActiveSessionId],
+    [createSession, markSessionActive, setActiveSessionId],
   );
 
   const handleUpdateSession = useCallback(
@@ -288,6 +312,15 @@ export function TerminalShell() {
       textarea?.focus();
     }
   }, []);
+
+  const handleSwitcherSelect = useCallback(
+    (id: string) => {
+      handleSelectSession(id);
+      setSwitcherOpen(false);
+      requestAnimationFrame(handleDialogClose);
+    },
+    [handleDialogClose, handleSelectSession],
+  );
 
   // ---- Mobile drawer wrappers: auto-close on select/create/delete (§1.2).
   // No focus restoration on mobile — refocusing xterm would summon the
@@ -401,13 +434,29 @@ export function TerminalShell() {
           </Button>
           <span
             className={cn(
-              "min-w-0 truncate text-sm font-medium",
+              "min-w-0 flex-1 truncate text-sm font-medium",
               activeSessionId ? "text-foreground" : "text-muted-foreground",
             )}
           >
             {activeMeta?.name ??
               (activeSessionId ? activeSessionId : "no session")}
           </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label="Switch terminal"
+                className="h-7 shrink-0 gap-1.5 px-2 text-xs"
+                disabled={sessions.length === 0}
+                onClick={() => setSwitcherOpen(true)}
+                size="sm"
+                variant="outline"
+              >
+                <ArrowLeftRight className="size-3.5" />
+                Switch
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Switch terminal (⌘/Win⇧O)</TooltipContent>
+          </Tooltip>
           {activeMeta &&
             (activeMeta.org || (activeServer && servers.length > 1)) && (
               <span className="text-muted-foreground flex min-w-0 items-center gap-1 text-xs">
@@ -612,6 +661,19 @@ export function TerminalShell() {
               both anchored inside the terminal viewport. */}
           <AgentActivityOverlay activeSessionId={activeSessionId} />
           <AgentFab />
+
+          <TerminalSwitcher
+            activeSessionId={activeSessionId}
+            onClose={() => {
+              setSwitcherOpen(false);
+              requestAnimationFrame(handleDialogClose);
+            }}
+            onSelect={handleSwitcherSelect}
+            open={switcherOpen}
+            recentSessionIds={recentSessionIds}
+            servers={servers}
+            sessions={sessions}
+          />
         </div>
 
         {/* Mini footer bar below the xterm frame: server + current command. */}

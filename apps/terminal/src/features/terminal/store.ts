@@ -33,6 +33,11 @@ interface TerminalState {
   activeSessionId: string | null;
   setActiveSessionId: (id: string | null) => void;
 
+  /** Most-recently focused sessions, newest first. This powers the terminal
+   * switcher without changing the sidebar's structural ordering. */
+  recentSessionIds: string[];
+  markSessionActive: (id: string) => void;
+
   /** Whether the sidebar is collapsed (desktop-only). */
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -106,6 +111,14 @@ export const useTerminalStore = create<TerminalState>()(
     (set) => ({
       activeSessionId: null,
       setActiveSessionId: (id) => set({ activeSessionId: id }),
+      recentSessionIds: [],
+      markSessionActive: (id) =>
+        set((state) => ({
+          recentSessionIds: [
+            id,
+            ...state.recentSessionIds.filter((sessionId) => sessionId !== id),
+          ].slice(0, 100),
+        })),
 
       sidebarCollapsed: false,
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
@@ -180,6 +193,7 @@ export const useTerminalStore = create<TerminalState>()(
       // Persist only durable UI prefs; ephemeral drawer/modal state stays out.
       partialize: (state) => ({
         activeSessionId: state.activeSessionId,
+        recentSessionIds: state.recentSessionIds,
         sidebarCollapsed: state.sidebarCollapsed,
         terminalFontSize: state.terminalFontSize,
         collapsedGroups: state.collapsedGroups,

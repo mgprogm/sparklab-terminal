@@ -48,6 +48,22 @@ pnpm --filter @sparklab/terminal dev           # Next.js terminal app, port 3002
 pnpm --filter @sparklab/web dev                # Next.js web app, port 3001
 ```
 
+## Switch terminals quickly
+
+The left sidebar remains the complete, persistent session list. For fast
+switching, use the **Switch** button beside the active terminal name in the
+terminal header. It opens a searchable switcher over the terminal pane and
+orders sessions by the one you focused most recently; sessions with no local
+switch history fall back to their gateway-reported activity time.
+
+- **macOS:** <kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>
+- **Windows:** <kbd>Win</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>
+- **Fallback:** <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>
+
+With the switcher open, type to filter by session name, command, server, or
+workspace; use <kbd>↑</kbd>/<kbd>↓</kbd> to select, <kbd>Enter</kbd> to switch,
+and <kbd>Esc</kbd> to close it.
+
 ## Environment variables
 
 | Variable                         | Default                                       | Used by         | Purpose                                                                                                                                                                              |

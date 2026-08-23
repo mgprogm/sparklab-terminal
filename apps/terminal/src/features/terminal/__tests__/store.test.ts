@@ -12,6 +12,7 @@ describe("useTerminalStore", () => {
     // Reset store to initial state between tests
     useTerminalStore.setState({
       activeSessionId: null,
+      recentSessionIds: [],
       sidebarCollapsed: false,
       mobileSidebarOpen: false,
     });
@@ -20,6 +21,7 @@ describe("useTerminalStore", () => {
   afterEach(() => {
     useTerminalStore.setState({
       activeSessionId: null,
+      recentSessionIds: [],
       sidebarCollapsed: false,
       mobileSidebarOpen: false,
     });
@@ -39,6 +41,20 @@ describe("useTerminalStore", () => {
       useTerminalStore.getState().setActiveSessionId("web-abc");
       useTerminalStore.getState().setActiveSessionId(null);
       expect(useTerminalStore.getState().activeSessionId).toBeNull();
+    });
+  });
+
+  describe("recentSessionIds", () => {
+    it("keeps the most recently focused session first without duplicates", () => {
+      const store = useTerminalStore.getState();
+      store.markSessionActive("web-a");
+      store.markSessionActive("web-b");
+      store.markSessionActive("web-a");
+
+      expect(useTerminalStore.getState().recentSessionIds).toEqual([
+        "web-a",
+        "web-b",
+      ]);
     });
   });
 
