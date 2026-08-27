@@ -134,15 +134,33 @@ export async function tmux(args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * `POST /api/sessions` (createSession() below) always returns a QUALIFIED
+ * session ref, `<serverId>/<tmuxName>` (`formatSessionRef` in
+ * server.js/shared-types, unconditional since the multi-server feature —
+ * even for the implicit "local" server: id is "local/web-<uuid>"). The
+ * actual tmux session tmux itself knows about is created with the BARE
+ * tmuxName only (`createSession()` in server.js passes just `tmuxName` to
+ * `new-session -s`) — tmux does not implicitly know the "local/" qualifier.
+ * Every helper below that talks to tmux DIRECTLY (as opposed to through the
+ * gateway's REST API, which does accept the qualified form) must strip it
+ * first, or every `tmux -t <qualified-id>` lookup 404s with "can't find
+ * session/pane". Bare ids (no "/") pass through unchanged.
+ */
+export function bareTmuxName(sessionRef: string): string {
+  const slash = sessionRef.indexOf("/");
+  return slash < 0 ? sessionRef : sessionRef.slice(slash + 1);
+}
+
 export async function captureTmuxPane(sessionName: string): Promise<string> {
-  return tmux(["capture-pane", "-t", sessionName, "-p"]);
+  return tmux(["capture-pane", "-t", bareTmuxName(sessionName), "-p"]);
 }
 
 export async function tmuxWindowWidth(sessionName: string): Promise<number> {
   const out = await tmux([
     "display",
     "-t",
-    sessionName,
+    bareTmuxName(sessionName),
     "-p",
     "#{window_width}",
   ]);
@@ -153,7 +171,7 @@ export async function tmuxWindowHeight(sessionName: string): Promise<number> {
   const out = await tmux([
     "display",
     "-t",
-    sessionName,
+    bareTmuxName(sessionName),
     "-p",
     "#{window_height}",
   ]);
@@ -162,7 +180,7 @@ export async function tmuxWindowHeight(sessionName: string): Promise<number> {
 
 export async function tmuxListClients(sessionName: string): Promise<number> {
   try {
-    const out = await tmux(["list-clients", "-t", sessionName]);
+    const out = await tmux(["list-clients", "-t", bareTmuxName(sessionName)]);
     if (!out.trim()) return 0;
     return out.trim().split("\n").length;
   } catch {
@@ -175,7 +193,7 @@ export async function tmuxSendKeys(
   keys: string,
   enter = true,
 ): Promise<void> {
-  const args = ["send-keys", "-t", sessionName, keys];
+  const args = ["send-keys", "-t", bareTmuxName(sessionName), keys];
   if (enter) args.push("Enter");
   await tmux(args);
 }

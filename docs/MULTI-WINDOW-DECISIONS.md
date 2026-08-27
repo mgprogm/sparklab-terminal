@@ -225,3 +225,91 @@ widened to a read-only ref shape, see below). Unit tests:
   `single` mode still showed zero `[data-testid=terminal-pane]` elements
   throughout (D10 intact). Single mode was never affected by this bug
   in the first place (it never enters the `<ResizableSplit>` tree).
+
+## Phase 3 (BE) — testing notes
+
+New E2E spec `apps/e2e/specs/gate-10-multi-window.spec.ts` (plan §6). One
+Chromium test covering the full arc in `cols-2`:
+
+- **D10**: default (single) mode has **zero** `[data-testid="terminal-pane"]`
+  elements in the DOM; opening `cols-2` via the layout menu ("Terminal layout"
+  button → "Two columns") renders exactly two, each with a live
+  `.xterm-helper-textarea`.
+- **Isolation**: two different sessions attached to the two panes; typing
+  `echo <token>` into pane B reaches **only** session B's tmux pane
+  (`waitForTmuxContent`) and is **absent** from session A's
+  (`captureTmuxPane` — server-side assertion, never through the xterm canvas).
+- **D4 (visible)**: re-opening pane B's session picker shows session A
+  (already in pane A) rendered `data-disabled=""` with a "shown" badge.
+  (The top-level ⌘⇧O `TerminalSwitcher` was **not** updated to grey these
+  out — noted FE follow-up — so this gate asserts only the per-pane picker,
+  which is where D4's enforcement actually lives.)
+- **D5 (resize coalescing)**: the test listens to the **real** `/attach`
+  WebSocket traffic via `page.on("websocket")` / `ws.on("framesent")` and
+  counts `type:"resize"` frames. During a `[role="separator"]` divider drag
+  (pointer down, six incremental `mouse.move`s, pointer up) it asserts
+  **zero** resize frames while the pointer is down and moving, and **≥ 1**
+  after `pointerup`. Not "exactly one": the split's `onRatiosChange` commit
+  and `xterm.tsx`'s coalesced-flush effect can each fire an idempotent
+  `sendResize()` in the same tick. **No `window.__resizeFrames` counter was
+  added** — `connection.ts` stays untouched; the WS-frame listener is
+  sufficient and tests the real wire behavior.
+- **Close-pane downgrade**: closing pane B (`aria-label="Close pane"`)
+  returns the layout to `single` per `CLOSE_PANE_DOWNGRADE` (§8 #5); the DOM
+  drops back to zero pane wrappers (D10) and the surviving session A is
+  cleanly, singly attached (`expect.poll(() => tmuxListClients(A)).toBe(1)`
+  — polled, not slept, because a layout-mode change remounts the affected
+  xterm, per the Phase-2 notes above).
+
+### E2E helper fix (required, committed with the spec)
+
+`apps/e2e/helpers.ts` gained `bareTmuxName(sessionRef)` — strips the
+`<serverId>/` qualifier that `POST /api/sessions` has returned unconditionally
+since the multi-server feature (even `local/web-…`). Every helper that shells
+out to tmux **directly** (`captureTmuxPane`, `tmuxWindowWidth/Height`,
+`tmuxListClients`, `tmuxSendKeys`) now strips it first — a `tmux -t
+local/web-…` lookup 404s otherwise. Bare ids pass through unchanged, so this
+is backward-compatible with any spec still passing an unqualified name.
+`gate-7-auth.spec.ts`'s cleanup was updated to use it too. This is a latent
+bug in the existing helpers, surfaced (not caused) by gate-10 being the first
+spec to drive tmux assertions against a `createSession()` id in the
+multi-server era.
+
+### Verification result (run on this dev machine)
+
+`pnpm --filter @sparklab/terminal typecheck` / `lint` / `test` — all green
+(41 files, 318 unit tests; the 40 lint _warnings_ are pre-existing
+import-order noise in unrelated test files, 0 errors).
+
+Full E2E suite (`.next-e2e` production build, `NEXT_PUBLIC_GATEWAY_URL` at the
+test gateway): **gate-10 passes.** **16 passed / 3 failed.** All three
+failures are **pre-existing on `main` (`cdfbe53`), independent of this
+branch**, and reproduce there:
+
+- `gate-7-auth.spec.ts` "e. UI journey" — asserts `getByText("Signed in as
+gate7-user")`; the sidebar account row was changed to render the bare
+  username (no "Signed in as " prefix) by commit `adf8ba9`
+  (`refactor(sidebar): move New action into the account footer row`), which
+  predates this branch. The string "Signed in as" does not exist anywhere in
+  `apps/terminal/src/`. `session-sidebar.tsx` / `session-list.tsx` are
+  untouched by this branch (`git diff cdfbe53..HEAD` empty for both). Stale
+  assertion, not a regression — flagged as a one-line spec fix for whoever
+  owns gate-7.
+- `gate-8-scrollback.spec.ts` a & b — the documented pre-existing scrollback
+  E2E failure at HEAD (baseline-proven prior to this work; unrelated to
+  multi-window, which never changes the single-pane scrollback path).
+
+Two environmental gotchas hit during verification (neither a code issue):
+exported `GATEWAY_AUTH_*` / `GATEWAY_API_TOKEN` / `PORT` in the shell leak
+into the gateway subprocesses that gates 1/3/7 spawn (→ spurious 401s — run
+with `env -u …`), and the E2E gateway reads the real `servers.json` /
+`data/sessions.json` unless `SERVERS_FILE` + `GATEWAY_DATA_DIR` are pointed
+at temp paths (the repo's `playwright.config.ts` does not isolate these). A
+clean run needs:
+
+```
+env -u GATEWAY_AUTH_USER -u GATEWAY_AUTH_PASSWORD -u GATEWAY_AUTH_PASSWORD_HASH \
+    -u GATEWAY_API_TOKEN -u KANBAN_API_TOKEN -u PORT \
+    SERVERS_FILE=<tmp>/servers.json GATEWAY_DATA_DIR=<tmp>/data \
+    pnpm --filter @sparklab/e2e e2e
+```

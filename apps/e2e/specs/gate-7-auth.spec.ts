@@ -29,6 +29,7 @@ import WebSocket from "ws";
 import {
   GATEWAY_PORT,
   GATEWAY_URL,
+  bareTmuxName,
   killGatewayListener,
   spawnOrphanGateway,
   tmux,
@@ -120,7 +121,9 @@ test.describe("Gate 7: Auth enforcement", () => {
       ).catch(() => {});
     }
     if (sessionId) {
-      await tmux(["kill-session", "-t", sessionId]).catch(() => {});
+      await tmux(["kill-session", "-t", bareTmuxName(sessionId)]).catch(
+        () => {},
+      );
     }
     // Restore an OPEN-MODE gateway for the specs that run after this one.
     // NOTE: this replacement is owned by THIS worker; specs running in a
