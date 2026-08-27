@@ -194,3 +194,34 @@ widened to a read-only ref shape, see below). Unit tests:
   `window.__resizeFrames++` next to the `sendResize()` calls in
   `connection.ts`, added by BE if gate-10 needs to assert the coalescing
   property directly rather than just the post-drag `cols`/`rows` result.
+  Note also that "exactly 1 frame after pointerup" is not quite the right
+  assertion: `handleUp`'s `onRatiosChange` commit and the coalesced
+  drag-end flush effect in `xterm.tsx` can each independently trigger a
+  `sendResize()` in the same tick (both idempotent, same final dimensions)
+  — BE should assert **zero frames during pointermove, ≥1 after
+  pointerup**, not an exact count.
+- **Box-model bugfix (caught by review before handoff, not by the unit
+  suite — jsdom has no layout engine, so this class of bug is invisible to
+  it).** The first cut of `<ResizableSplit>` sized its root with `flex-1`
+  only, and each per-child wrapper div was `display:block` (no `flex`
+  class). Both broke silently in multi-pane mode: (1) `flex-1` only takes
+  effect when the _parent_ is `display:flex` — the shell's viewport
+  container (`termContainerRef`'s div) is a plain block element (it's
+  `relative min-h-0 flex-1 overflow-hidden`, not `flex`), so the split's
+  root resolved to its content's natural (`auto`) height instead of filling
+  the viewport; (2) even with a correctly-sized wrapper, `TerminalPane`'s
+  own `flex-1` had no `display:flex` ancestor to grow inside, since the
+  wrapper was block. Net effect: every multi-pane layout rendered each pane
+  as just its ~26px chrome strip with a 0×0 xterm underneath —
+  `fitAddon.fit()` ran against a zero-size container. Fixed by adding
+  `h-full w-full` to `<ResizableSplit>`'s root (works whether its actual
+  parent is flex or not) and `flex` to the per-child wrapper div (so a
+  `TerminalPane` or nested `<ResizableSplit>` inside it has a flex ancestor
+  to grow against). **Verified live** (not just by re-reading the CSS): a
+  throwaway Playwright script against a real `pnpm dev` instance drove
+  `cols-2` (each pane's xterm area 498×624 of a 514×650 pane, confirmed
+  full-height, not 26px), a divider drag (pane widths reflowed 514/514 →
+  661/366 with heights unchanged), and `grid-2x2` (four ~514×323 panes) —
+  `single` mode still showed zero `[data-testid=terminal-pane]` elements
+  throughout (D10 intact). Single mode was never affected by this bug
+  in the first place (it never enters the `<ResizableSplit>` tree).

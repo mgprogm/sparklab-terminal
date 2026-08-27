@@ -205,17 +205,31 @@ export function ResizableSplit({
   );
 
   return (
+    // h-full/w-full (not just flex-1): this root is not always a flex child
+    // of a flex parent — at the top of the grid it's a plain block child of
+    // terminal-shell.tsx's viewport div — so flex-1 alone would resolve to
+    // an "auto" (content-sized) box. h-full/w-full explicitly fills
+    // whatever positioned/sized ancestor is actually there; flex-1 stays for
+    // the nested case (a <ResizableSplit> as a grid-2x2 inner split, itself
+    // wrapped by the flex child div below).
     <div
       ref={containerRef}
       className={cn(
-        "flex min-h-0 min-w-0 flex-1",
+        "flex h-full min-h-0 w-full min-w-0 flex-1",
         axis === "x" ? "flex-row" : "flex-col",
       )}
     >
       {children.map((child, i) => (
         <Fragment key={i}>
+          {/* `flex` (not just flex-1 on the CHILD): this wrapper must be a
+              flex container itself so a <TerminalPane>'s own `flex-1` (or a
+              nested <ResizableSplit>'s h-full/w-full) has something to
+              size against — a plain block parent ignores flex-grow
+              entirely. The inline `flex` shorthand below (from `ratios`)
+              still governs how THIS wrapper is sized by the axis-row/col
+              parent above. */}
           <div
-            className="min-h-0 min-w-0 flex-1 overflow-hidden"
+            className="flex min-h-0 min-w-0 overflow-hidden"
             style={{ flex: `${Math.max(activeRatios[i] ?? 0, 0)} 1 0%` }}
           >
             {child}

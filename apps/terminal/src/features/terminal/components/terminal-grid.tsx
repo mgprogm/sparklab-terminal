@@ -22,7 +22,7 @@
  * `resizeCoalesced`.
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 import { ResizableSplit } from "./resizable-split";
 import { TerminalPane } from "./terminal-pane";
@@ -64,13 +64,20 @@ export function TerminalGrid({
 
   const [dragging, setDragging] = useState(false);
 
-  const registerHandle = (paneId: string, handle: TerminalHandle | null) => {
-    if (handle) {
-      paneHandlesRef.current.set(paneId, handle);
-    } else {
-      paneHandlesRef.current.delete(paneId);
-    }
-  };
+  // Stable identity (deps: [paneHandlesRef], itself a stable ref object) —
+  // an inline function here would be a new identity every render, causing
+  // every xterm's registration effect (deps [onRegisterHandle, paneId,
+  // focus]) to unregister+re-register on every dragging state change.
+  const registerHandle = useCallback(
+    (paneId: string, handle: TerminalHandle | null) => {
+      if (handle) {
+        paneHandlesRef.current.set(paneId, handle);
+      } else {
+        paneHandlesRef.current.delete(paneId);
+      }
+    },
+    [paneHandlesRef],
+  );
 
   const { panes, focusedPaneId, mode, ratios } = layout;
 
