@@ -35,25 +35,24 @@ import {
   Bot,
   FolderTree,
   Globe2,
-  Loader2,
   Menu,
   SquareGanttChart,
   SquareKanban,
-  Unplug,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AgenticDialog } from "./agentic-dialog";
-import { DynamicXTerm } from "./dynamic-xterm";
 import { ExtraKeysBar } from "./extra-keys-bar";
 import { FileExplorerDialog } from "./file-explorer-dialog";
 import { KanbanDialog } from "./kanban-dialog";
+import { LayoutMenu } from "./layout-menu";
 import { MunderDifflinDialog } from "./munder-difflin-dialog";
 import { PmDialog } from "./pm-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
 import { TerminalFooter } from "./terminal-footer";
+import { TerminalGrid } from "./terminal-grid";
 import { TerminalSwitcher } from "./terminal-switcher";
 import { useMediaQuery } from "../hooks/use-media-query";
 import { useServers } from "../hooks/use-servers";
@@ -67,8 +66,8 @@ import {
 import { useSettingsUrlSync } from "../hooks/use-settings-url-sync";
 import { useUrlFlagSync } from "../hooks/use-url-flag-sync";
 import { useVisualViewport } from "../hooks/use-visual-viewport";
+import { resolvePaneSessions } from "../resolve-pane-sessions";
 import { serverStatus, sessionServerId } from "../server-grouping";
-import { resolveActiveSession } from "../session-fallback";
 import { useTerminalStore } from "../store";
 
 import type { TerminalHandle } from "./xterm";
@@ -78,6 +77,7 @@ import type {
   UpdateSessionParams,
 } from "../hooks/use-sessions";
 import type { ModifierSnapshot } from "../keys";
+import type { LayoutMode } from "../store";
 
 import {
   AgentActivityOverlay,
@@ -102,6 +102,9 @@ export function TerminalShell() {
     setActiveSessionId,
     recentSessionIds,
     markSessionActive,
+    layout,
+    setLayoutMode,
+    reconcilePanes,
     sidebarCollapsed,
     toggleSidebar,
     mobileSidebarOpen,
@@ -139,16 +142,22 @@ export function TerminalShell() {
   const deleteSession = useDeleteSession();
   const updateSession = useUpdateSession();
 
-  const [status, setStatus] = useState<{
-    state: ConnectionStatus;
-    text: string;
-  }>({ state: "disconnected", text: "idle" });
+  // Per-pane connection status (D-note in plan §3a: "session-scoped UI
+  // follows focus" — the header dot / Settings Connection tab read the
+  // FOCUSED pane's entry; per-pane chrome/overlays read their own, passed
+  // straight through TerminalPane's local state instead of round-tripping
+  // through this map).
+  const [statusByPane, setStatusByPane] = useState<
+    Record<string, { state: ConnectionStatus; text: string }>
+  >({});
   const [switcherOpen, setSwitcherOpen] = useState(false);
 
   // Ref to the xterm container for focus restoration.
   const termContainerRef = useRef<HTMLDivElement>(null);
-  // Imperative terminal handle (focus / sendInput / cursor-keys mode).
-  const terminalHandleRef = useRef<TerminalHandle | null>(null);
+  // Per-pane imperative terminal handle registry (D6) — replaces the old
+  // single-slot terminalHandleRef, which could only ever reflect the
+  // last-mounted pane.
+  const paneHandlesRef = useRef<Map<string, TerminalHandle>>(new Map());
   // Sticky Ctrl/Alt state shared between the extra-keys bar and xterm onData.
   const modifiersRef = useRef<ModifierSnapshot | null>(null);
 
@@ -194,18 +203,32 @@ export function TerminalShell() {
   useUrlFlagSync("agentic", agenticOpen, setAgenticOpen);
   useUrlFlagSync("munder-difflin", munderDifflinOpen, setMunderDifflinOpen);
 
-  // ---- "Active session vanished → fall back" ----
-  // Decision lives in resolveActiveSession (pure, unit-tested). It gates on
-  // the first successful load so the initial-fetch window (sessions === [],
-  // no initialData) can't null a persisted/URL-supplied id.
+  // ---- "Active session vanished → fall back" (grid-aware, D7) ----
+  // Decision lives in resolvePaneSessions (pure, unit-tested) — the
+  // multi-pane sibling of resolveActiveSession. Same load-gate reasoning:
+  // gates on the first successful load so the initial-fetch window
+  // (sessions === [], no initialData) can't null every pane's
+  // persisted/URL-supplied session. `layout.panes` is a stable reference
+  // between real store mutations (SA's contract), so this only re-fires on
+  // an actual layout or sessions change, not every render.
   useEffect(() => {
-    const next = resolveActiveSession(
+    const focusedIndex = layout.panes.findIndex(
+      (p) => p.id === layout.focusedPaneId,
+    );
+    const next = resolvePaneSessions(
       sessionsLoaded,
       sessions,
-      activeSessionId,
+      layout.panes.map((p) => p.sessionId),
+      focusedIndex,
     );
-    if (next !== undefined) setActiveSessionId(next);
-  }, [sessionsLoaded, sessions, activeSessionId, setActiveSessionId]);
+    if (next !== undefined) reconcilePanes(next);
+  }, [
+    sessionsLoaded,
+    sessions,
+    layout.panes,
+    layout.focusedPaneId,
+    reconcilePanes,
+  ]);
 
   // ---- Auto-expand ancestors of the active session ----
   // Keyed on the active session's org/project primitives so it fires both
@@ -245,9 +268,9 @@ export function TerminalShell() {
   ]);
 
   // ---- Callbacks ----
-  const handleStatusChange = useCallback(
-    (state: ConnectionStatus, text: string) => {
-      setStatus({ state, text });
+  const handlePaneStatus = useCallback(
+    (paneId: string, state: ConnectionStatus, text: string) => {
+      setStatusByPane((prev) => ({ ...prev, [paneId]: { state, text } }));
     },
     [],
   );
@@ -297,21 +320,32 @@ export function TerminalShell() {
   );
 
   const handleDialogClose = useCallback(() => {
-    // Return focus to the terminal after dialogs close. The XTerm component
-    // stashes a __termFocus method on its container div.
-    const container = termContainerRef.current?.firstElementChild as
-      (HTMLDivElement & { __termFocus?: () => void }) | null | undefined;
-    if (container?.__termFocus) {
-      container.__termFocus();
-    } else {
-      // Fallback: focus xterm's hidden textarea directly.
-      const textarea =
-        termContainerRef.current?.querySelector<HTMLTextAreaElement>(
-          ".xterm-helper-textarea",
-        );
-      textarea?.focus();
+    // Return focus to the terminal after dialogs close, via the focused
+    // pane's registered imperative handle (D6) — replaces the old
+    // __termFocus-on-firstElementChild hack, which couldn't survive a grid
+    // wrapper (see docs/MULTI-WINDOW-PLAN.md "Grounding").
+    const handle = paneHandlesRef.current.get(layout.focusedPaneId);
+    if (handle) {
+      handle.focus();
+      return;
     }
-  }, []);
+    // Fallback for the brief window before the dynamically-imported xterm
+    // chunk has registered its handle. In `single` mode (today's only
+    // reachable path pre-this-feature) the container IS the one pane, so an
+    // unscoped query matches gate-6's existing `.xterm-helper-textarea`
+    // selector exactly; in multi-pane mode, scope to the focused pane's
+    // subtree so this can't grab a different pane's textarea.
+    const root =
+      layout.mode === "single"
+        ? termContainerRef.current
+        : (termContainerRef.current?.querySelector(
+            `[data-pane-id="${layout.focusedPaneId}"]`,
+          ) ?? termContainerRef.current);
+    const textarea = root?.querySelector<HTMLTextAreaElement>(
+      ".xterm-helper-textarea",
+    );
+    textarea?.focus();
+  }, [layout.focusedPaneId, layout.mode]);
 
   const handleSwitcherSelect = useCallback(
     (id: string) => {
@@ -361,15 +395,32 @@ export function TerminalShell() {
     : undefined;
   const activeServerUnreachable =
     !!activeServer && serverStatus(activeServer) === "unreachable";
-  const activeServerName = activeServer?.name ?? activeServerId ?? "the server";
+
+  // Header dot / Settings Connection tab: the FOCUSED pane's status (D-note,
+  // plan §3a) — falls back to the same literal `useState` initial the old
+  // single `status` state used, so the header is identical on first render.
+  const focusedStatus = statusByPane[layout.focusedPaneId] ?? {
+    state: "disconnected" as ConnectionStatus,
+    text: "idle",
+  };
 
   // Status dot color classes matching the original design.
   const dotClass = cn(
     "size-[7px] rounded-full",
-    status.state === "connected" && "bg-chart-1",
-    status.state === "reconnecting" && "bg-chart-2",
-    status.state === "disconnected" && "bg-destructive",
+    focusedStatus.state === "connected" && "bg-chart-1",
+    focusedStatus.state === "reconnecting" && "bg-chart-2",
+    focusedStatus.state === "disconnected" && "bg-destructive",
   );
+
+  // Read-only ref shape for ExtraKeysBar (D6): always reflects the
+  // currently focused pane's handle, without needing a reactive effect to
+  // keep a real ref in sync with registry mutations (which happen on a
+  // plain ref, not store state).
+  const focusedHandleRef = {
+    get current() {
+      return paneHandlesRef.current.get(layout.focusedPaneId) ?? null;
+    },
+  };
 
   return (
     <div className="bg-background text-secondary-foreground flex h-[var(--app-height,100dvh)] overflow-hidden pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)] font-sans text-sm antialiased">
@@ -457,6 +508,15 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Switch terminal (⌘/Win⇧O)</TooltipContent>
           </Tooltip>
+          {/* Multi-window layout presets (D2/D9) — desktop-only; the grid
+              force-collapses to a single pane on mobile regardless of the
+              stored mode, so the picker stays hidden there too. */}
+          {!isMobile && (
+            <LayoutMenu
+              mode={layout.mode}
+              onSelect={(mode: LayoutMode) => setLayoutMode(mode)}
+            />
+          )}
           {activeMeta &&
             (activeMeta.org || (activeServer && servers.length > 1)) && (
               <span className="text-muted-foreground flex min-w-0 items-center gap-1 text-xs">
@@ -600,65 +660,42 @@ export function TerminalShell() {
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
             <span className={dotClass} />
             <span className="text-muted-foreground text-[11px] font-medium uppercase tracking-wider">
-              {status.text}
+              {focusedStatus.text}
             </span>
           </span>
         </div>
 
-        {/* Terminal viewport or empty state */}
+        {/* Terminal viewport: the multi-window grid (D2). In `single` mode
+            (the default) TerminalGrid renders the exact single-pane subtree
+            this container used to render directly — one <DynamicXTerm> (or
+            the plain empty state) plus the reconnecting/unreachable
+            overlays, with no extra wrapper — so this is pixel- and
+            DOM-structure-identical to pre-multi-window behavior (D10). */}
         <div
           className="relative min-h-0 flex-1 overflow-hidden"
           ref={termContainerRef}
         >
-          {activeSessionId ? (
-            <DynamicXTerm
-              sessionId={activeSessionId}
-              onStatusChange={handleStatusChange}
-              onSessionError={handleSessionError}
-              onAuthError={handleAuthError}
-              handleRef={terminalHandleRef}
-              modifiersRef={modifiersRef}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center">
-              <p className="text-muted-foreground">No session selected.</p>
-            </div>
-          )}
+          <TerminalGrid
+            isMobile={isMobile}
+            modifiersRef={modifiersRef}
+            onAuthError={handleAuthError}
+            onPaneStatus={handlePaneStatus}
+            onSessionError={handleSessionError}
+            paneHandlesRef={paneHandlesRef}
+            servers={servers}
+            sessions={sessions}
+          />
 
           {/* Read-only screenshots cover xterm in-place. Xterm remains mounted,
-              connected, and at the same size beneath this absolute layer. */}
+              connected, and at the same size beneath this absolute layer.
+              Grid-global (unchanged) — covers the whole viewport regardless
+              of layout mode. */}
           <BrowserViewOverlay />
 
-          {/* Connect/reconnect overlay: the header badge alone is easy to miss,
-              so surface the wait on the pane itself. Removed reactively when
-              onStatus("connected") fires at ws.onopen — before the first binary
-              frame triggers tmux's attach redraw, so it never covers live
-              output. The unreachable-server overlay below takes precedence. */}
-          {activeSessionId &&
-            !activeServerUnreachable &&
-            status.state === "reconnecting" && (
-              <div className="bg-background/80 absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-center backdrop-blur-sm">
-                <Loader2 className="text-muted-foreground size-6 animate-spin" />
-                <p className="text-muted-foreground text-xs">{status.text}</p>
-              </div>
-            )}
-
-          {/* Unreachable-server overlay (§7.2): muted reassurance that the job
-              is safe. Distinct from the transient gateway-disconnect state. */}
-          {activeSessionId && activeServerUnreachable && (
-            <div className="bg-background/80 absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 text-center backdrop-blur-sm">
-              <Unplug className="text-muted-foreground size-8" />
-              <p className="text-foreground text-sm">
-                Can&apos;t reach {activeServerName}.
-              </p>
-              <p className="text-muted-foreground text-xs">
-                The session is still running there. Reconnecting…
-              </p>
-            </div>
-          )}
-
           {/* Agent Chat: amber attribution overlay + floating entry button,
-              both anchored inside the terminal viewport. */}
+              both anchored inside the terminal viewport. Minimal v1 (plan
+              §3a): highlights only when the agent's target is the FOCUSED
+              pane's session; full per-pane targeting is a follow-up. */}
           <AgentActivityOverlay activeSessionId={activeSessionId} />
           <AgentFab />
 
@@ -683,7 +720,7 @@ export function TerminalShell() {
 
         {/* Extra keys — coarse-pointer devices only (CSS-gated, §3.2). */}
         <ExtraKeysBar
-          handleRef={terminalHandleRef}
+          handleRef={focusedHandleRef}
           modifiersRef={modifiersRef}
         />
       </div>
@@ -700,8 +737,8 @@ export function TerminalShell() {
         username={me?.username}
         onLogout={me?.username ? () => logoutMutation.mutate() : undefined}
         logoutPending={logoutMutation.isPending}
-        statusState={status.state}
-        statusText={status.text}
+        statusState={focusedStatus.state}
+        statusText={focusedStatus.text}
         sessionCount={sessions.length}
       />
 

@@ -51,10 +51,27 @@ export interface XTermProps {
   onSessionError?: () => void;
   /** Called when the WebSocket closes because authentication expired. */
   onAuthError?: () => void;
-  /** Populated with the imperative TerminalHandle (stable ref from useRef). */
-  handleRef?: RefObject<TerminalHandle | null>;
+  /** Stable pane id for the handle registry (D6). Required alongside
+   * `onRegisterHandle` — omit both in contexts that don't need imperative
+   * focus/sendInput access. */
+  paneId?: string;
+  /** Registers/unregisters this instance's imperative handle in the parent's
+   * per-pane handle map: called with `(paneId, handle)` on mount/update and
+   * `(paneId, null)` on unmount. Replaces the old single-slot `handleRef`
+   * prop (D6) — a single shared ref could not survive more than one pane. */
+  onRegisterHandle?: (paneId: string, handle: TerminalHandle | null) => void;
   /** Sticky-modifier state owned by the extra-keys bar (stable ref). */
   modifiersRef?: RefObject<ModifierSnapshot | null>;
+  /** True while an ancestor <ResizableSplit> divider is being dragged (D5).
+   * While true: ResizeObserver-triggered `fitAddon.fit()` calls are
+   * rAF-throttled (collapsing N firings within one frame into one) and
+   * `connection.sendResize()` is deferred until this prop transitions back
+   * to false, at which point one final fit+sendResize flushes. This is what
+   * keeps a divider drag from flooding the gateway/tmux/ssh with resize
+   * frames. Default/omitted behaves exactly as before (immediate fit +
+   * sendResize on every ResizeObserver firing) — single-pane mode is
+   * unaffected. */
+  resizeCoalesced?: boolean;
 }
 
 // Stable encoder reused across all keystroke sends.
@@ -74,8 +91,10 @@ export function XTermComponent({
   onStatusChange,
   onSessionError,
   onAuthError,
-  handleRef,
+  paneId,
+  onRegisterHandle,
   modifiersRef,
+  resizeCoalesced,
 }: XTermProps) {
   // ---- Refs for the one-shot lifecycle ----
   const containerRef = useRef<HTMLDivElement>(null);
@@ -83,6 +102,8 @@ export function XTermComponent({
   const fitRef = useRef<FitAddon | null>(null);
   const connectionRef = useRef<Connection | null>(null);
   const roRef = useRef<ResizeObserver | null>(null);
+  // rAF handle for the ResizeObserver's coalesced-mode fit() throttle (D5).
+  const roRafIdRef = useRef<number | null>(null);
 
   // Persisted font-size preference. Kept in a ref so the once-created
   // breakpoint listener reads the latest value without rebuilding the terminal;
@@ -90,6 +111,11 @@ export function XTermComponent({
   const fontSize = useTerminalStore((s) => s.terminalFontSize);
   const fontSizeRef = useRef(fontSize);
   fontSizeRef.current = fontSize;
+
+  // Read through a ref inside the one-shot effect's closures (D5) — mirrors
+  // the fontSizeRef idiom so the one-shot effect's `[]` deps stay untouched.
+  const coalescedRef = useRef(resizeCoalesced ?? false);
+  coalescedRef.current = resizeCoalesced ?? false;
 
   // Store callbacks in refs so the Connection always sees the latest without
   // needing to rebuild it on every render.
@@ -155,16 +181,18 @@ export function XTermComponent({
       connectionRef.current?.send(encoder.encode(payload));
     });
 
-    // Resize: notify the gateway so tmux can adjust.
+    // Resize: notify the gateway so tmux can adjust. During a coalesced
+    // drag (D5) this is deferred to the resizeCoalesced true->false
+    // transition (see the dedicated effect below) instead of firing here.
     const resizeDisposable = term.onResize(() => {
+      if (coalescedRef.current) return;
       connectionRef.current?.sendResize();
     });
 
-    // ResizeObserver: refit terminal when container size changes. If the
-    // viewport was scrolled to the bottom before the fit, keep it pinned
-    // there so the prompt row stays visible above the mobile keyboard /
-    // extra-keys bar (spec §2.4).
-    const ro = new ResizeObserver(() => {
+    // If the viewport was scrolled to the bottom before the fit, keep it
+    // pinned there so the prompt row stays visible above the mobile
+    // keyboard / extra-keys bar (spec §2.4).
+    const runFit = () => {
       try {
         const buffer = term.buffer.active;
         const atBottom = buffer.viewportY === buffer.baseY;
@@ -173,6 +201,25 @@ export function XTermComponent({
       } catch {
         /* container might be detached */
       }
+    };
+
+    // ResizeObserver: refit terminal when container size changes. Default
+    // (resizeCoalesced falsy — includes single-pane mode) behaves exactly
+    // as before: fit() synchronously on every firing. While
+    // resizeCoalesced is true (an ancestor <ResizableSplit> divider is
+    // being dragged), N firings within one animation frame collapse into
+    // one rAF-scheduled fit() (D5) — sendResize() above stays deferred.
+    const ro = new ResizeObserver(() => {
+      if (coalescedRef.current) {
+        if (roRafIdRef.current === null) {
+          roRafIdRef.current = requestAnimationFrame(() => {
+            roRafIdRef.current = null;
+            runFit();
+          });
+        }
+        return;
+      }
+      runFit();
     });
     ro.observe(container);
     roRef.current = ro;
@@ -208,11 +255,38 @@ export function XTermComponent({
       smallScreen.removeEventListener("change", onFontBreakpointChange);
       ro.disconnect();
       roRef.current = null;
+      if (roRafIdRef.current !== null) {
+        cancelAnimationFrame(roRafIdRef.current);
+        roRafIdRef.current = null;
+      }
       fitRef.current = null;
       term.dispose();
       termRef.current = null;
     };
   }, []); // one-shot: created once, cleaned up on unmount
+
+  // ---- Coalesced-resize drag-end flush (D5) ----
+  // On the resizeCoalesced true->false transition (a divider drag just
+  // ended), flush one final fit()+sendResize() via rAF even if no further
+  // ResizeObserver firing arrives — the RO may have already settled on the
+  // pre-drag-end size while sendResize() was still being withheld above.
+  const wasCoalescedRef = useRef(resizeCoalesced ?? false);
+  useEffect(() => {
+    const dragging = resizeCoalesced ?? false;
+    const wasDragging = wasCoalescedRef.current;
+    wasCoalescedRef.current = dragging;
+    if (!wasDragging || dragging) return;
+
+    const id = requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        /* container might be detached */
+      }
+      connectionRef.current?.sendResize();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [resizeCoalesced]);
 
   // ---- Font-size preference effect ----
   // Apply the persisted preference to the live terminal and refit so the grid
@@ -280,32 +354,24 @@ export function XTermComponent({
     termRef.current?.focus();
   }, []);
 
-  // Expose focus for parent components.
-  // Store on a data attribute so parent can access without forwardRef overhead.
+  // Imperative handle for the shell / extra-keys bar (spec §3.4), registered
+  // into the parent's per-pane handle map (D6) instead of a single shared
+  // ref — see XTermProps.onRegisterHandle. sendInput uses the exact same
+  // binary-frame path as keystrokes.
   useEffect(() => {
-    const container = containerRef.current;
-    if (container) {
-      (container as HTMLDivElement & { __termFocus?: () => void }).__termFocus =
-        focus;
-    }
-  }, [focus]);
-
-  // Imperative handle for the shell / extra-keys bar (spec §3.4). sendInput
-  // uses the exact same binary-frame path as keystrokes.
-  useEffect(() => {
-    if (!handleRef) return;
-    handleRef.current = {
+    if (!onRegisterHandle || !paneId) return;
+    onRegisterHandle(paneId, {
       focus,
       sendInput: (data: string) => {
         connectionRef.current?.send(encoder.encode(data));
       },
       getApplicationCursorKeysMode: () =>
         termRef.current?.modes.applicationCursorKeysMode ?? false,
-    };
+    });
     return () => {
-      handleRef.current = null;
+      onRegisterHandle(paneId, null);
     };
-  }, [handleRef, focus]);
+  }, [onRegisterHandle, paneId, focus]);
 
   return (
     <div

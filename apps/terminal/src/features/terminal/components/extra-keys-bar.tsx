@@ -65,8 +65,12 @@ function nextModifierState(state: ModifierState): ModifierState {
 }
 
 export interface ExtraKeysBarProps {
-  /** Imperative handle populated by XTermComponent. */
-  handleRef: RefObject<TerminalHandle | null>;
+  /** Imperative handle for the FOCUSED pane, populated by XTermComponent via
+   * the shell's per-pane handle registry (D6). Read-only here — this bar
+   * never assigns `.current` — so the shell can hand in either a real
+   * `RefObject` (single-pane) or a small getter object that always reflects
+   * the currently focused pane's handle (multi-pane). */
+  handleRef: { readonly current: TerminalHandle | null };
   /** Shared modifier snapshot consumed by xterm's onData handler. */
   modifiersRef: RefObject<ModifierSnapshot | null>;
 }

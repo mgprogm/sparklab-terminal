@@ -123,3 +123,74 @@ legacyActiveSessionId)` — an exported, pure, directly-unit-tested function
   `resolvePaneSessions` + `reconcilePanes`"), even though the phase-1 task
   brief's action list didn't name it explicitly — it's the resolver's writer
   half and FE's vanish-fallback effect (phase 2) needs both.
+
+## Phase 2 (FE) — implementation notes and deviations
+
+Built: `components/resizable-split.tsx`, `terminal-pane.tsx`,
+`terminal-grid.tsx`, `layout-menu.tsx` (all NEW); `xterm.tsx` (paneId /
+onRegisterHandle / resizeCoalesced props, lifecycle untouched);
+`terminal-shell.tsx` rewire; `extra-keys-bar.tsx` (handleRef prop type
+widened to a read-only ref shape, see below). Unit tests:
+`__tests__/resizable-split.test.tsx`, `__tests__/terminal-pane.test.tsx`.
+
+- **D10 mechanics.** `TerminalPane` returns a bare fragment (no wrapper
+  `<div>`, no `data-*`, no ring, no pointer-focus handler) when
+  `multiPane === false` — exactly the subtree `terminal-shell.tsx` rendered
+  directly before this feature. `[data-testid="terminal-pane"]` /
+  `data-pane-id` exist **only** when `layout.mode !== "single"`, per the
+  plan's own D10 wording ("_Multi-pane_ markup adds..."), which is narrower
+  than the phase-2 task brief's literal wording ("always show the X in
+  multiPane mode" implied testid always present) — the plan text wins.
+  Reconnecting/unreachable overlays moved from the shell's viewport
+  container into `TerminalPane`, changing their DOM nesting relative to
+  `BrowserViewOverlay`/`AgentActivityOverlay`, but not their stacking:
+  `BrowserViewOverlay` is `z-20` (unchanged) so it always wins regardless of
+  DOM order, and the two moved overlays keep the same relative order to each
+  other and to `AgentActivityOverlay` (all `z-10`) as before.
+- **Accepted, not fixed: a layout-mode change remounts the affected
+  `DynamicXTerm`(s).** Because `single`'s bare-fragment return and
+  multi-pane's chrome-wrapped return are different tree shapes, React
+  remounts on `setLayoutMode`/`closePane` (a fresh WS attach). The plan's
+  no-remount invariant is about _session switching within a pane_, not
+  _layout-mode switching_ — unifying the markup to avoid this would violate
+  D10 instead, so it's accepted as-is.
+- **RO throttling is scoped to `resizeCoalesced === true`, not universal.**
+  Plan §3/D5 prose reads as if `fitAddon.fit()` becomes rAF-throttled
+  unconditionally once the prop exists ("the ResizeObserver handler still
+  calls fitAddon.fit() every time (rAF-throttled)"). Implemented instead:
+  the RO handler stays byte-identical (synchronous `fit()` per firing) when
+  `resizeCoalesced` is falsy/omitted — i.e. always in `single` mode — and
+  only switches to rAF-batched `fit()` + deferred `sendResize()` while a
+  divider drag is actually in progress. This is the more surgical reading
+  and the one that keeps `single` mode's resize path untouched byte-for-byte
+  (xterm.tsx's own doc calls it "the most safety-critical file").
+- **`TerminalSwitcher` was NOT updated** to grey out sessions already shown
+  in another pane, though plan §4's interaction table lists that as expected
+  behavior. It wasn't in the phase-2 component edit list (only
+  `xterm.tsx`/`dynamic-xterm.tsx`/`terminal-pane.tsx`/`terminal-grid.tsx`/
+  `layout-menu.tsx`/`terminal-shell.tsx`), and D4 is still enforced
+  correctly at the store layer regardless — picking an already-shown session
+  via the switcher still works, it just also clears that session from the
+  other pane that held it (store's `setPaneSession`), with no visual
+  "already shown" cue in the switcher itself. Flagged as a small follow-up.
+- **`LayoutMenu` is hidden on mobile** (`isMobile` gate in
+  `terminal-shell.tsx`, alongside D9's grid force-collapse) — not specified
+  either way by the plan, but consistent with the plan's "Desktop-only"
+  framing and keeps the mobile header uncluttered without touching the
+  persisted `layout.mode` (D9's re-expand-on-desktop guarantee is
+  unaffected; the menu is simply not reachable from the mobile viewport).
+- **`ExtraKeysBar`'s `handleRef` prop type was widened** from
+  `RefObject<TerminalHandle | null>` to `{ readonly current: TerminalHandle
+| null }` — a one-line, non-behavioral change (the component never writes
+  `.current`). This lets the shell hand it a small getter object
+  (`focusedHandleRef`) that always reads the currently focused pane's entry
+  out of `paneHandlesRef` (a `Map`, not a single ref), instead of needing a
+  reactive effect to keep a plain ref in sync with registry mutations that
+  happen imperatively outside React state.
+- **D5 has no test/observability hook.** `connection.ts` is explicitly
+  unchanged per the plan, so there's no counter or log line BE can assert
+  against to prove "one resize frame per drag, not per pointermove" from
+  Playwright. Recommended (not built): a dev-only counter such as
+  `window.__resizeFrames++` next to the `sendResize()` calls in
+  `connection.ts`, added by BE if gate-10 needs to assert the coalescing
+  property directly rather than just the post-drag `cols`/`rows` result.
