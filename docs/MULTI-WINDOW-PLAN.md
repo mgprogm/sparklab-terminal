@@ -1,6 +1,11 @@
 # Multi-window terminal display — Design & Implementation Plan
 
-> Status: **design, not started** (2026-08-27). Scope: show **2–4 terminal
+> Status: **v1 implemented on `feat/multi-window-terminal`** (2026-08-27) —
+> SA store foundation (`8dba601`), FE grid UI (`f274687`, `24c763c`), BE E2E
+> gate-10 (`6a4add1`). Terminal typecheck/lint/unit (318) green; gate-10
+> passes; the §8 open decisions are resolved in `docs/MULTI-WINDOW-DECISIONS.md`,
+> which is the authoritative record of what actually shipped vs. this plan.
+> Scope: show **2–4 terminal
 > sessions side by side** in the main terminal viewport as a preset grid with
 > draggable split handles, click-to-focus, and all existing session-scoped UI
 > (header, footer/git, file explorer, agent target, connection status) bound to
