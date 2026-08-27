@@ -38,6 +38,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentStore } from "../store";
 import { useAgentChat } from "../use-agent-chat";
+import { useAzureSpeechSynthesis } from "../use-azure-speech-synthesis";
 import { ApprovalCard } from "./approval-card";
 import { ChatHistoryDialog } from "./chat-history-dialog";
 import { AssistantMessage, UserMessage } from "./chat-message";
@@ -378,6 +379,7 @@ function MessageStream({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const speech = useAzureSpeechSynthesis();
 
   // The agent is busy but nothing in the stream shows it yet: no streaming
   // assistant bubble, no running tool row, no pending approval card. This
@@ -432,7 +434,18 @@ function MessageStream({
           case "user":
             return <UserMessage key={e.id} entry={e} />;
           case "assistant":
-            return <AssistantMessage key={e.id} entry={e} />;
+            return (
+              <AssistantMessage
+                key={e.id}
+                entry={e}
+                speechStatus={
+                  speech.messageId === e.id ? speech.status : "idle"
+                }
+                speechError={speech.messageId === e.id ? speech.error : null}
+                onSpeak={speech.speak}
+                onStop={speech.stop}
+              />
+            );
           case "tool":
             return (
               <ToolEventRow

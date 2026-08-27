@@ -59,6 +59,9 @@ const MAX_WS_CONNECTIONS = Number(process.env.MAX_WS_CONNECTIONS) || 32;
 // short-lived browser token; it is never returned to the client.
 const AZURE_SPEECH_KEY = (process.env.AZURE_SPEECH_KEY || "").trim();
 const AZURE_SPEECH_REGION = (process.env.AZURE_SPEECH_REGION || "").trim();
+const AZURE_SPEECH_VOICE = (
+  process.env.AZURE_SPEECH_VOICE || "th-TH-PremwadeeNeural"
+).trim();
 // Optional scoped bearer token for the artifact APIs (/api/kanban/* and
 // /api/pm/*). Lets an external AI CLI (Claude/Codex) drive them without a cookie
 // login. Prefers GATEWAY_API_TOKEN (covers both artifacts); the original
@@ -1324,7 +1327,11 @@ async function issueAzureSpeechToken(req, res) {
     return sendJson(res, 502, {
       error: "Azure returned an empty speech token",
     });
-  return sendJson(res, 200, { token, region: AZURE_SPEECH_REGION });
+  return sendJson(res, 200, {
+    token,
+    region: AZURE_SPEECH_REGION,
+    voice: AZURE_SPEECH_VOICE,
+  });
 }
 
 // A4: 64 KB body cap.
