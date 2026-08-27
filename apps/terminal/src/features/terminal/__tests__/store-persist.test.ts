@@ -5,18 +5,24 @@
  * mobileSidebarOpen must NOT be persisted (mobile UX spec §1.2) — a
  * persisted open drawer would flash on reload — while the existing
  * persisted fields keep working.
+ *
+ * `layout` joined `partialize` with the multi-window feature (see
+ * docs/MULTI-WINDOW-DECISIONS.md) — `activeSessionId` stays alongside it as
+ * a denormalized, always-in-sync mirror rather than being dropped.
  */
 import { describe, expect, it } from "vitest";
 
-import { useTerminalStore } from "../store";
+import { defaultLayout, useTerminalStore } from "../store";
 
 describe("useTerminalStore persistence", () => {
-  it("partialize keeps activeSessionId + sidebarCollapsed and drops mobileSidebarOpen", () => {
+  it("partialize keeps activeSessionId + layout + sidebarCollapsed and drops mobileSidebarOpen", () => {
     const options = useTerminalStore.persist.getOptions();
+    const layout = defaultLayout();
     const persisted = options.partialize!({
       ...useTerminalStore.getState(),
       activeSessionId: "web-abc",
       recentSessionIds: ["web-abc"],
+      layout,
       sidebarCollapsed: true,
       terminalFontSize: 16,
       mobileSidebarOpen: true,
@@ -24,6 +30,7 @@ describe("useTerminalStore persistence", () => {
     expect(persisted).toEqual({
       activeSessionId: "web-abc",
       recentSessionIds: ["web-abc"],
+      layout,
       sidebarCollapsed: true,
       terminalFontSize: 16,
       collapsedGroups: {},
