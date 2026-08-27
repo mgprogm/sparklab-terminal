@@ -8,6 +8,8 @@
 2. **Reopening the web restores the session seamlessly** — the user sees the output they missed while disconnected plus the current screen state, then live streaming resumes in real time.
 3. Multi-session (multiple terminals can be open) and multi-viewer (multiple tabs can watch the same session).
 
+> The **multi-window** UI layer (2–4 sessions visible at once in a preset pane grid, one focused pane driving all session-scoped chrome) sits on top of this core without touching the three-lifetimes model, the byte pipeline, or reconnect — each pane is just another independent `XTermComponent`/`Connection`. Specified separately in [MULTI-WINDOW-PLAN.md](MULTI-WINDOW-PLAN.md) / [MULTI-WINDOW-DECISIONS.md](MULTI-WINDOW-DECISIONS.md).
+
 ## Core Insight: Decouple Three Lifetimes
 
 The problem with typical web terminals is that the PTY is tied to the WebSocket — when the WS closes, the PTY is killed and the job dies. This design separates the system into three layers that fail independently:
