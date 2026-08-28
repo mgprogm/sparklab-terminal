@@ -30,7 +30,6 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  AppWindow,
   ArrowLeftRight,
   Bot,
   FolderTree,
@@ -626,21 +625,8 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Agentic AI Creator</TooltipContent>
           </Tooltip>
-          {/* Munder Difflin is gateway-global too — always enabled. */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0"
-                aria-label="Munder Difflin"
-                onClick={() => setMunderDifflinOpen(true)}
-              >
-                <AppWindow className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Munder Difflin</TooltipContent>
-          </Tooltip>
+          {/* Munder Difflin header button is disabled/hidden — the viewer is
+              still reachable via the ?munder-difflin URL flag. */}
           {browserView && !browserVisible && (
             <Tooltip>
               <TooltipTrigger asChild>
