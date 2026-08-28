@@ -1454,7 +1454,7 @@ export type Agent = z.infer<typeof AgentSchema>;
 /** Scoped access from an Agentic AI's agents to another artifact's MCP server. */
 export const ArtifactConnectionSchema = z.object({
   id: z.string(),
-  targetType: z.enum(["pm", "kanban"]),
+  targetType: z.enum(["pm", "kanban", "notes"]),
   scope: z.enum(["fixed", "runtime-selection"]),
   /** A specific project/board id, when scope = "fixed". */
   targetId: z.string().nullable().default(null),
@@ -1756,7 +1756,7 @@ export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequestSchema>;
 
 /** Request body for POST /api/agentic/connections. */
 export const CreateConnectionRequestSchema = z.object({
-  targetType: z.enum(["pm", "kanban"]),
+  targetType: z.enum(["pm", "kanban", "notes"]),
   scope: z.enum(["fixed", "runtime-selection"]).default("fixed"),
   targetId: z.string().nullable().optional(),
 });

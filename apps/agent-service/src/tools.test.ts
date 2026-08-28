@@ -766,3 +766,219 @@ test("AC7: pm_move_task retries once on 409 stale", async () => {
     gateway.movePmTask = originalMovePm;
   }
 });
+
+// ---- Notes tools (docs/NOTES-TOOL-PLAN.md) ----------------------------------
+
+const NOTES_READ_TOOLS = [
+  "notes_list",
+  "notes_get_notebook",
+  "notes_get_page",
+  "notes_search",
+];
+const NOTES_ALLOW_ALWAYS_WRITE_TOOLS = [
+  "notes_create_notebook",
+  "notes_create_section",
+  "notes_create_page",
+  "notes_append_to_page",
+  "notes_move_page",
+];
+const NOTES_ONE_TIME_WRITE_TOOLS = [
+  "notes_update_page",
+  "notes_delete_page",
+  "notes_delete_section",
+  "notes_delete_notebook",
+];
+const NOTES_TOOLS = [
+  ...NOTES_READ_TOOLS,
+  ...NOTES_ALLOW_ALWAYS_WRITE_TOOLS,
+  ...NOTES_ONE_TIME_WRITE_TOOLS,
+];
+
+test("all thirteen Notes tools are exposed", () => {
+  const names = toolNames();
+  for (const t of NOTES_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("every Notes tool has a closed parameters schema", () => {
+  for (const name of NOTES_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("Notes reads are auto (NOT write tools)", () => {
+  for (const t of NOTES_READ_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), false, `${t} should NOT be a WRITE tool`);
+  }
+});
+
+test("the five additive/structural Notes writes are WRITE tools, allow-always (D9)", () => {
+  for (const t of NOTES_ALLOW_ALWAYS_WRITE_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      false,
+      `${t} should permit allow-always`,
+    );
+  }
+});
+
+test("notes_update_page is approval-gated AND coerced one-time (D9 — inverted from the naive reading)", () => {
+  assert.equal(WRITE_TOOLS.has("notes_update_page"), true);
+  assert.equal(ONE_TIME_TOOLS.has("notes_update_page"), true);
+});
+
+test("notes_append_to_page is NOT in the one-time set (cannot clobber, D9)", () => {
+  assert.equal(ONE_TIME_TOOLS.has("notes_append_to_page"), false);
+});
+
+test("the three Notes deletes are approval-gated AND coerced one-time (D10)", () => {
+  for (const t of [
+    "notes_delete_page",
+    "notes_delete_section",
+    "notes_delete_notebook",
+  ]) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+    assert.equal(ONE_TIME_TOOLS.has(t), true, `${t} should be one-time`);
+  }
+});
+
+test("describeCall returns a non-empty summary for each Notes tool", () => {
+  const args = {
+    notebook_id: "nb-1",
+    section_id: "sec-1",
+    page_id: "pg-1",
+    query: "kickoff",
+    name: "Engineering",
+    title: "Kickoff",
+    markdown: "- follow up",
+    to_section_id: "sec-2",
+    to_index: 0,
+  };
+  for (const t of NOTES_TOOLS) {
+    const s = describeCall(t, args);
+    assert.equal(typeof s, "string");
+    assert.ok(s.length > 0, `${t} produced an empty describeCall`);
+  }
+});
+
+test("notes_get_notebook requires notebook_id (no gateway call when missing)", async () => {
+  assert.equal(
+    await executeTool("notes_get_notebook", {}),
+    "error: notebook_id is required",
+  );
+});
+
+test("notes_create_page requires either section_id or parent_id", async () => {
+  assert.equal(
+    await executeTool("notes_create_page", { notebook_id: "nb-1" }),
+    "error: either section_id or parent_id is required",
+  );
+});
+
+test("notes_move_page retries ONCE on a 409 stale (safe: re-derived splice, D4)", async () => {
+  const originalGetNotebook = gateway.getNotebook.bind(gateway);
+  const originalMovePage = gateway.movePage.bind(gateway);
+  let moveCallCount = 0;
+
+  gateway.getNotebook = async () =>
+    ({ id: "nb-test", rev: 5, sections: [], pages: [] }) as never;
+
+  gateway.movePage = async () => {
+    moveCallCount++;
+    if (moveCallCount === 1) {
+      return {
+        stale: true,
+        notebook: { id: "nb-test", rev: 6, sections: [], pages: [] } as never,
+      };
+    }
+    return {
+      stale: false,
+      notebook: { id: "nb-test", rev: 7, sections: [], pages: [] } as never,
+    };
+  };
+
+  try {
+    const result = await executeTool("notes_move_page", {
+      notebook_id: "nb-test",
+      page_id: "pg-1",
+      to_section_id: "sec-1",
+      to_index: 0,
+    });
+    assert.equal(
+      moveCallCount,
+      2,
+      `409 stale must trigger exactly 2 gateway calls, got ${moveCallCount}`,
+    );
+    assert.ok(
+      !result.startsWith("error:"),
+      `retried move should succeed, got: ${result}`,
+    );
+  } finally {
+    gateway.getNotebook = originalGetNotebook;
+    gateway.movePage = originalMovePage;
+  }
+});
+
+test("notes_update_page does NOT retry a 409 stale (D4 — blind overwrite, surfaced not replayed)", async () => {
+  const originalGetPage = gateway.getPage.bind(gateway);
+  const originalUpdatePage = gateway.updatePage.bind(gateway);
+  let updateCallCount = 0;
+
+  gateway.getPage = async () =>
+    ({
+      id: "pg-1",
+      title: "Kickoff",
+      rev: 3,
+      body: "old body",
+    }) as never;
+
+  gateway.updatePage = async () => {
+    updateCallCount++;
+    return {
+      stale: true,
+      page: {
+        id: "pg-1",
+        title: "Kickoff",
+        rev: 4,
+        body: "someone else's newer body",
+      } as never,
+    };
+  };
+
+  try {
+    const result = await executeTool("notes_update_page", {
+      notebook_id: "nb-1",
+      page_id: "pg-1",
+      body: "my overwrite",
+    });
+    assert.equal(
+      updateCallCount,
+      1,
+      `a stale update must trigger exactly 1 gateway call (no retry), got ${updateCallCount}`,
+    );
+    assert.ok(
+      result.startsWith("error:") && result.includes("stale"),
+      `stale update should surface the conflict as an error string, got: ${result}`,
+    );
+    assert.ok(
+      result.includes("someone else's newer body"),
+      "the conflict should carry the CURRENT server page so the model sees what it would have clobbered",
+    );
+  } finally {
+    gateway.getPage = originalGetPage;
+    gateway.updatePage = originalUpdatePage;
+  }
+});

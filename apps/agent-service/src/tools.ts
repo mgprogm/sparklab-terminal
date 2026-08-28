@@ -57,6 +57,19 @@ export const WRITE_TOOLS = new Set([
   "pm_add_comment",
   "pm_watch_task",
   "pm_unwatch_task",
+  // Notes writes (D9 in docs/NOTES-TOOL-PLAN.md — INVERTED from the naive
+  // reading: the additive/structural writes below permit allow-always, while
+  // notes_update_page (a blind full-body replace) and the three deletes are
+  // additionally in ONE_TIME_TOOLS so they are re-approved on every call.
+  "notes_create_notebook",
+  "notes_create_section",
+  "notes_create_page",
+  "notes_append_to_page",
+  "notes_move_page",
+  "notes_update_page",
+  "notes_delete_page",
+  "notes_delete_section",
+  "notes_delete_notebook",
 ]);
 
 /**
@@ -83,6 +96,16 @@ export const ONE_TIME_TOOLS = new Set([
   "pm_delete_project",
   // Deleting a column can strand/relocate many tasks — coerce one-time (§3.7).
   "pm_delete_column",
+  // Notes D9/D10: a blind full-body replace can silently destroy pages of
+  // human writing, so it is coerced one-time like a delete (INVERTED from the
+  // naive "writes allow-always, deletes one-time" reading — see the plan).
+  // The three deletes are coerced one-time too (D10 — notes_delete_page is a
+  // deliberate divergence from Kanban/PM's "no card/task-delete tool"
+  // precedent, mitigated by one-time approval + default mode:"orphan").
+  "notes_update_page",
+  "notes_delete_page",
+  "notes_delete_section",
+  "notes_delete_notebook",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
@@ -1143,6 +1166,271 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // --- Notes (OneNote-style: notebooks -> sections -> pages) ----------------
+  // A separate artifact from Kanban/PM (docs/NOTES-TOOL-PLAN.md). D9 approval
+  // tiers are INVERTED from the naive reading: reads are auto; the additive/
+  // structural writes below permit allow-always; a full-body replace
+  // (notes_update_page) and the three deletes are coerced one-time
+  // (ONE_TIME_TOOLS) because a blind overwrite or delete can destroy pages of
+  // human writing, while an append cannot clobber.
+  {
+    type: "function",
+    function: {
+      name: "notes_list",
+      description:
+        "List all Notes notebooks (id, name, tags, rev, section/page counts). Read-only. Call this first to discover which notebooks exist before getting or mutating one.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_get_notebook",
+      description:
+        "Get one notebook in full: its sections (ordered pageIds) and a FLAT array of all pages in render order, each with a derived sectionId and indent depth (subpages nest under their parent). No page bodies. Read-only. Use before creating/moving/editing a page so you know the section ids, page ids, and the notebook's current rev (for move).",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string", description: "Notebook id (nb-...)." },
+        },
+        required: ["notebook_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_get_page",
+      description:
+        "Get one page in full: title, tags, parentId, derived sectionId/depth, its current rev (for update), and its Markdown body. Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          page_id: { type: "string" },
+        },
+        required: ["notebook_id", "page_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_search",
+      description:
+        "Case-insensitive substring search over page titles and bodies across all notebooks. Returns notebookId/sectionId/pageId plus a short context snippet per hit. Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1 },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 100,
+            description: "Max results (default 20).",
+          },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_create_notebook",
+      description:
+        'Create a new notebook. Seeds one section named "Notes" with one empty "Untitled page" (OneNote-like first open). Requires user approval.',
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 200 },
+          tags: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_create_section",
+      description:
+        "Add a new section to a notebook (appended at the end). Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          name: { type: "string", minLength: 1, maxLength: 128 },
+        },
+        required: ["notebook_id", "name"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_create_page",
+      description:
+        "Create a new page. Provide section_id for a top-level page, OR parent_id to create it as a subpage (it then joins the parent's section automatically). Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          section_id: {
+            type: "string",
+            description:
+              "Target section id. Required unless parent_id is given.",
+          },
+          title: { type: "string", minLength: 1, maxLength: 512 },
+          parent_id: {
+            type: "string",
+            description:
+              "Optional parent page id to create this as a subpage (containment only, not order).",
+          },
+          body: {
+            type: "string",
+            maxLength: 1048576,
+            description: "Optional initial Markdown body.",
+          },
+        },
+        required: ["notebook_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_append_to_page",
+      description:
+        "Append Markdown to the end of a page's body (server-atomic, separated by a blank line). Cannot clobber concurrent edits — no revision to manage. The tool the agent should use for journaling / capturing findings into an existing page. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          page_id: { type: "string" },
+          markdown: { type: "string", minLength: 1, maxLength: 1048576 },
+        },
+        required: ["notebook_id", "page_id", "markdown"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_move_page",
+      description:
+        "Move a page (and its whole subtree of subpages) to another section/position, optionally reparenting it. You do NOT manage the notebook revision — the tool reads it and retries once on a concurrent change. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          page_id: { type: "string" },
+          to_section_id: { type: "string" },
+          to_index: {
+            type: "integer",
+            minimum: 0,
+            description: "0-based position within the destination section.",
+          },
+          to_parent_id: {
+            type: "string",
+            description:
+              "Optional new parent page id (must be in the destination section); omit to keep top-level / unchanged.",
+          },
+        },
+        required: ["notebook_id", "page_id", "to_section_id", "to_index"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_update_page",
+      description:
+        "Replace a page's title and/or body wholesale. DESTRUCTIVE — this is a blind overwrite of the body, so it requires user approval EVERY time (no allow-always). The tool fetches the page's current revision itself; if it changed concurrently, the update is rejected and surfaced back to you rather than silently overwriting the other change (prefer notes_append_to_page when you only need to add content).",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          page_id: { type: "string" },
+          title: { type: "string", minLength: 1, maxLength: 512 },
+          body: { type: "string", maxLength: 1048576 },
+          tags: {
+            type: "array",
+            items: { type: "string", minLength: 1, maxLength: 64 },
+          },
+        },
+        required: ["notebook_id", "page_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_delete_page",
+      description:
+        'Delete a page. mode "orphan" (default) promotes its children to its own parent (their content is kept); mode "cascade" deletes the whole subtree. This is destructive and requires user approval EVERY time (no allow-always).',
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          page_id: { type: "string" },
+          mode: { type: "string", enum: ["orphan", "cascade"] },
+        },
+        required: ["notebook_id", "page_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_delete_section",
+      description:
+        'Delete a section. mode "block" (default) refuses a non-empty section; mode "cascade" deletes the section and every page in it. This is destructive and requires user approval EVERY time (no allow-always).',
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+          section_id: { type: "string" },
+          mode: { type: "string", enum: ["block", "cascade"] },
+        },
+        required: ["notebook_id", "section_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "notes_delete_notebook",
+      description:
+        "Delete an entire notebook and every page in it (irreversible). This is destructive and requires user approval EVERY time (no allow-always). Confirm the notebook id first with notes_list.",
+      parameters: {
+        type: "object",
+        properties: {
+          notebook_id: { type: "string" },
+        },
+        required: ["notebook_id"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
@@ -1206,6 +1494,14 @@ export interface ToolArgs {
   interval_seconds?: number;
   expires_at?: string;
   max_executions?: number;
+  // Notes
+  notebook_id?: string;
+  section_id?: string;
+  page_id?: string;
+  query?: string;
+  markdown?: string;
+  to_section_id?: string;
+  to_parent_id?: string;
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -1322,6 +1618,32 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `unwatch task ${args.task_id ?? ""}`.trimEnd();
     case "pm_list_attachments":
       return `list attachments on task ${args.task_id ?? ""}`.trimEnd();
+    case "notes_list":
+      return "list Notes notebooks";
+    case "notes_get_notebook":
+      return `get Notes notebook ${args.notebook_id ?? ""}`.trimEnd();
+    case "notes_get_page":
+      return `get Notes page ${args.page_id ?? ""}`.trimEnd();
+    case "notes_search":
+      return `search Notes for "${truncate(String(args.query ?? ""), 80)}"`;
+    case "notes_create_notebook":
+      return `create Notes notebook "${truncate(String(args.name ?? ""), 80)}"`;
+    case "notes_create_section":
+      return `create Notes section "${truncate(String(args.name ?? ""), 80)}"`;
+    case "notes_create_page":
+      return `create Notes page${args.title ? ` "${truncate(args.title, 80)}"` : ""}${args.parent_id ? ` under ${args.parent_id}` : ""}`;
+    case "notes_append_to_page":
+      return `append to Notes page ${args.page_id ?? ""}: ${truncate(String(args.markdown ?? ""), 80)}`;
+    case "notes_move_page":
+      return `move Notes page ${args.page_id ?? ""} to section ${args.to_section_id ?? ""} (index ${args.to_index ?? 0})`;
+    case "notes_update_page":
+      return `overwrite Notes page ${args.page_id ?? ""}${args.title ? ` title="${truncate(args.title, 40)}"` : ""}${args.body !== undefined ? " (replaces body)" : ""}`.trimEnd();
+    case "notes_delete_page":
+      return `delete Notes page ${args.page_id ?? ""}${args.mode === "cascade" ? " (cascade: deletes subpages too)" : ""}`.trimEnd();
+    case "notes_delete_section":
+      return `delete Notes section ${args.section_id ?? ""}${args.mode === "cascade" ? " (cascade: deletes its pages too)" : ""}`.trimEnd();
+    case "notes_delete_notebook":
+      return `delete Notes notebook ${args.notebook_id ?? ""}`.trimEnd();
     default:
       return tool;
   }
@@ -1862,6 +2184,146 @@ export async function executeTool(
           args.task_id,
         );
         return JSON.stringify(attachments);
+      }
+      // --- Notes (docs/NOTES-TOOL-PLAN.md) --------------------------------
+      case "notes_list": {
+        const notebooks = await gateway.listNotebooks();
+        return JSON.stringify(notebooks);
+      }
+      case "notes_get_notebook": {
+        if (!args.notebook_id) return "error: notebook_id is required";
+        const nb = await gateway.getNotebook(args.notebook_id);
+        return JSON.stringify(nb);
+      }
+      case "notes_get_page": {
+        if (!args.notebook_id || !args.page_id)
+          return "error: notebook_id and page_id are required";
+        const page = await gateway.getPage(args.notebook_id, args.page_id);
+        return JSON.stringify(page);
+      }
+      case "notes_search": {
+        if (!args.query) return "error: query is required";
+        const results = await gateway.searchNotes(args.query, args.limit);
+        return JSON.stringify(results);
+      }
+      case "notes_create_notebook": {
+        if (!args.name) return "error: name is required";
+        const nb = await gateway.createNotebook({
+          name: args.name,
+          tags: args.tags ?? [],
+        });
+        return JSON.stringify(nb);
+      }
+      case "notes_create_section": {
+        if (!args.notebook_id || !args.name)
+          return "error: notebook_id and name are required";
+        const nb = await gateway.createSection(args.notebook_id, {
+          name: args.name,
+        });
+        return JSON.stringify(nb);
+      }
+      case "notes_create_page": {
+        if (!args.notebook_id) return "error: notebook_id is required";
+        if (!args.section_id && !args.parent_id)
+          return "error: either section_id or parent_id is required";
+        const page = await gateway.createPage(args.notebook_id, {
+          ...(args.section_id ? { sectionId: args.section_id } : {}),
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.parent_id !== undefined ? { parentId: args.parent_id } : {}),
+          ...(args.body !== undefined ? { body: args.body } : {}),
+        });
+        return JSON.stringify(page);
+      }
+      case "notes_append_to_page": {
+        if (!args.notebook_id || !args.page_id || !args.markdown)
+          return "error: notebook_id, page_id and markdown are required";
+        const page = await gateway.appendToPage(
+          args.notebook_id,
+          args.page_id,
+          args.markdown,
+        );
+        return JSON.stringify(page);
+      }
+      case "notes_move_page": {
+        if (
+          !args.notebook_id ||
+          !args.page_id ||
+          !args.to_section_id ||
+          typeof args.to_index !== "number"
+        )
+          return "error: notebook_id, page_id, to_section_id and to_index are required";
+        // The model does not manage rev: read the notebook's current
+        // (structural) rev, move, and on a 409 (stale) retry ONCE using the
+        // fresh notebook the gateway echoed back — safe, movePage is a
+        // re-derived splice (D4), unlike notes_update_page below.
+        const notebook = await gateway.getNotebook(args.notebook_id);
+        const move = {
+          toSectionId: args.to_section_id,
+          toIndex: args.to_index,
+          ...(args.to_parent_id !== undefined
+            ? { toParentId: args.to_parent_id }
+            : {}),
+        };
+        let r = await gateway.movePage(args.notebook_id, args.page_id, {
+          ...move,
+          rev: notebook.rev,
+        });
+        if (r.stale) {
+          r = await gateway.movePage(args.notebook_id, args.page_id, {
+            ...move,
+            rev: r.notebook.rev,
+          });
+        }
+        if (r.stale)
+          return "error: notebook changed concurrently; refetch and retry";
+        return JSON.stringify(r.notebook);
+      }
+      case "notes_update_page": {
+        if (!args.notebook_id || !args.page_id)
+          return "error: notebook_id and page_id are required";
+        if (
+          args.title === undefined &&
+          args.body === undefined &&
+          args.tags === undefined
+        )
+          return "error: at least one of title/body/tags is required";
+        // D4: fetch the page's current rev, PATCH ONCE, and surface a 409 to
+        // the model WITHOUT retrying — a blind overwrite auto-retried against
+        // a fresh rev would silently discard whatever the other writer just
+        // saved (unlike notes_move_page above, which is a safe re-derived
+        // splice).
+        const current = await gateway.getPage(args.notebook_id, args.page_id);
+        const r = await gateway.updatePage(args.notebook_id, args.page_id, {
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.body !== undefined ? { body: args.body } : {}),
+          ...(args.tags ? { tags: args.tags } : {}),
+          rev: current.rev,
+        });
+        if (r.stale) {
+          return `error: page changed concurrently (stale rev); NOT overwritten — current page: ${JSON.stringify(r.page)}`;
+        }
+        return JSON.stringify(r.page);
+      }
+      case "notes_delete_page": {
+        if (!args.notebook_id || !args.page_id)
+          return "error: notebook_id and page_id are required";
+        await gateway.deletePage(args.notebook_id, args.page_id, {
+          mode: args.mode as "orphan" | "cascade" | undefined,
+        });
+        return `ok: page ${args.page_id} deleted`;
+      }
+      case "notes_delete_section": {
+        if (!args.notebook_id || !args.section_id)
+          return "error: notebook_id and section_id are required";
+        await gateway.deleteSection(args.notebook_id, args.section_id, {
+          mode: args.mode as "block" | "cascade" | undefined,
+        });
+        return `ok: section ${args.section_id} deleted`;
+      }
+      case "notes_delete_notebook": {
+        if (!args.notebook_id) return "error: notebook_id is required";
+        await gateway.deleteNotebook(args.notebook_id);
+        return `ok: notebook ${args.notebook_id} deleted`;
       }
       default:
         return `error: unknown tool ${tool}`;
