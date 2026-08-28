@@ -13,26 +13,36 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST─�
 
 ## Configuration (`.env`, gitignored)
 
-| Var                                           | Purpose                                                          |
-| --------------------------------------------- | ---------------------------------------------------------------- |
-| `AZURE_OPENAI_ENDPOINT`                       | Azure AI Foundry resource endpoint                               |
-| `AZURE_OPENAI_API_KEY`                        | secret — never committed                                         |
-| `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                             |
-| `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                            |
-| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer     |
-| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer      |
-| `AGENT_PORT`                                  | listen port (default 3009)                                       |
-| `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                              |
-| `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                         |
-| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                |
-| `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools |
-| `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)               |
-| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                  |
+| Var                                           | Purpose                                                                                                                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `AZURE_OPENAI_ENDPOINT`                       | Azure AI Foundry resource endpoint                                                                                              |
+| `AZURE_OPENAI_API_KEY`                        | secret — never committed                                                                                                        |
+| `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                                                                                            |
+| `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                                                                                           |
+| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer                                                                    |
+| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer                                                                     |
+| `ARK_API_KEY`                                 | optional; enables the BytePlus Ark models (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`, `glm-byteplus`) in the composer |
+| `ARK_BASE_URL`                                | optional Ark base URL (default `https://ark.ap-southeast.bytepluses.com`)                                                       |
+| `ARK_DEEPSEEK_DEPLOYMENT`                     | optional Ark id for `deepseek-v4-pro-byteplus` (default `deepseek-v4-pro-260425`)                                               |
+| `ARK_DEEPSEEK_V32_DEPLOYMENT`                 | optional Ark id for `deepseek-v32-byteplus` (default `deepseek-v3-2-251201`)                                                    |
+| `ARK_GLM_DEPLOYMENT`                          | optional Ark id for `glm-byteplus` (default `glm-4-7-251222`)                                                                   |
+| `AGENT_PORT`                                  | listen port (default 3009)                                                                                                      |
+| `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                                                                                             |
+| `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                                                                                        |
+| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                                                                               |
+| `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools                                                                |
+| `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)                                                                              |
+| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                                                                                 |
 
 The service fails fast at startup if any required Azure var is missing.
 The composer sends an allowlisted public model id and reasoning effort for each
 turn; the service maps it to a private deployment name and only advertises
-models configured on that service.
+models configured on that service. Most models run on Azure OpenAI; the
+optional `*-byteplus` ids (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`,
+`glm-byteplus`) route to BytePlus Ark instead (OpenAI-compatible REST, Bearer
+auth, no `reasoning_effort` — the composer hides the effort control for any
+`-byteplus` model; DeepSeek also gets `thinking` disabled). A first-turn empty
+reply surfaces an `error` frame rather than silently ending the turn.
 
 Each WebSocket includes `terminalSessionId` in its query string. With no other
 chat selector, the service resumes the newest chat linked to that terminal. An

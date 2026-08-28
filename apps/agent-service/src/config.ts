@@ -78,6 +78,28 @@ export const config = {
       luna: optionalValue("GPT56LUNA_DEPLOYMENT"),
     },
   },
+  // BytePlus Ark — optional OpenAI-compatible provider. Its models are offered
+  // in the picker only when `apiKey` is set. Each deployment id is
+  // env-overridable (Ark uses dated suffixes; verify current ids in the
+  // ModelArk console). DeepSeek keeps `thinking` disabled (merged into the
+  // request body by resolveModel): the agent loop's SSE parser reads only
+  // `delta.content`, and reasoning latency would fight the per-turn caps.
+  byteplus: {
+    baseUrl: optional(
+      "ARK_BASE_URL",
+      "https://ark.ap-southeast.bytepluses.com",
+    ).replace(/\/$/, ""),
+    apiKey: process.env.ARK_API_KEY?.trim() || "",
+    deepseekV4Pro: optional(
+      "ARK_DEEPSEEK_DEPLOYMENT",
+      "deepseek-v4-pro-260425",
+    ),
+    deepseekV32: optional(
+      "ARK_DEEPSEEK_V32_DEPLOYMENT",
+      "deepseek-v3-2-251201",
+    ),
+    glm: optional("ARK_GLM_DEPLOYMENT", "glm-4-7-251222"),
+  },
   port: Number(optional("AGENT_PORT", "3009")),
   host: optional("AGENT_HOST", "127.0.0.1"),
   gatewayUrl: optional("GATEWAY_URL", "http://127.0.0.1:3007").replace(

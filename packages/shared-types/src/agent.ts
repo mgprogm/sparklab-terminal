@@ -92,6 +92,12 @@ export const AgentModelSchema = z.enum([
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
+  // Models served by BytePlus Ark (OpenAI-compatible REST). The `-byteplus`
+  // suffix is load-bearing: the composer keys "no reasoning_effort" off it, and
+  // the agent service only lists these when ARK_API_KEY is configured.
+  "deepseek-v4-pro-byteplus",
+  "deepseek-v32-byteplus",
+  "glm-byteplus",
 ]);
 export type AgentModel = z.infer<typeof AgentModelSchema>;
 

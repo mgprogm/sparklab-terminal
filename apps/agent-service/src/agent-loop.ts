@@ -18,7 +18,7 @@ import type {
   AgentReasoningEffort,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
-import { azure, DEFAULT_MODEL, deploymentFor } from "./azure.js";
+import { DEFAULT_MODEL, resolveModel, type ResolvedModel } from "./azure.js";
 import { CAPS } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
 import { appendMessages, loadChat, reconstructTranscript } from "./history.js";
@@ -196,8 +196,8 @@ export class AgentLoop {
       });
       return;
     }
-    const deployment = deploymentFor(model);
-    if (!deployment) {
+    const resolved = resolveModel(model);
+    if (!resolved) {
       this.send({
         type: "error",
         message: "The selected agent model is not configured on this service.",
@@ -238,9 +238,28 @@ export class AgentLoop {
         const { text: segmentText, toolCalls } = await this.streamOnce(
           [system, ...this.history],
           signal,
-          deployment,
+          resolved,
           reasoningEffort,
         );
+
+        // An empty first turn — no text, no tool calls — means the model gave
+        // us nothing to act on and the loop would otherwise exit silently.
+        // DeepSeek/Ark is the likely culprit (it can leak raw DSML tool markup
+        // instead of a real reply); we don't port a DSML workaround, just make
+        // the dead turn visible. Harmless for the Azure models too.
+        if (
+          !signal.aborted &&
+          !segmentText.trim() &&
+          toolCalls.length === 0 &&
+          modelCalls === 1
+        ) {
+          this.send({
+            type: "error",
+            message:
+              "The model returned an empty response. Try resending, or switch models.",
+          });
+          break;
+        }
 
         // Persist the assistant turn (content + any tool calls together).
         const assistantMsg: ChatCompletionMessageParam = {
@@ -494,20 +513,30 @@ export class AgentLoop {
   private async streamOnce(
     messages: ChatCompletionMessageParam[],
     signal: AbortSignal,
-    deployment: string,
+    resolved: ResolvedModel,
     reasoningEffort: AgentReasoningEffort,
   ): Promise<{ text: string; toolCalls: AccumulatedToolCall[] }> {
-    const stream = await azure.chat.completions.create(
-      {
-        model: deployment,
-        messages,
-        tools: TOOLS,
-        // openai@4's declaration predates GPT-5.6's `none`, `xhigh`, and
-        // `max` values; the Azure Chat Completions API receives this field
-        // unchanged and validates support for the selected deployment.
-        reasoning_effort: reasoningEffort as "low" | "medium" | "high",
-        stream: true,
-      },
+    const params: Record<string, unknown> = {
+      model: resolved.deployment,
+      messages,
+      tools: TOOLS,
+      stream: true,
+      // GPT-5.6 takes `reasoning_effort`; DeepSeek / Ark rejects it, and Ark
+      // instead takes a `thinking` flag (via `resolved.extraBody`).
+      ...(resolved.supportsReasoningEffort
+        ? // openai@4's declaration predates GPT-5.6's `none`, `xhigh`, and
+          // `max` values; the Azure Chat Completions API receives this field
+          // unchanged and validates support for the selected deployment.
+          { reasoning_effort: reasoningEffort }
+        : {}),
+      ...(resolved.extraBody ?? {}),
+    };
+    const stream = await resolved.client.chat.completions.create(
+      // `params` carries non-typed passthrough fields (reasoning_effort's
+      // GPT-5.6 values, Ark's `thinking`); the request body is sent unchanged.
+      params as unknown as Parameters<
+        typeof resolved.client.chat.completions.create
+      >[0],
       { signal },
     );
 
