@@ -1,13 +1,18 @@
 # Notes (pluggable HTML artifact, OneNote-style) — Design & Implementation Plan
 
-> Status: **design, not implemented.** This document is the decision record to
-> review before any code is written. It deliberately mirrors the structure and
-> the settled patterns of `docs/KANBAN-PLAN.md` (§0 grounding → D-numbered
-> decisions → data model → endpoints → AI access → frontend → phases → testing
-> → deferred → open decisions → critical files); it also mirrors the
-> **store-splitting** decision from `docs/PM-ARTIFACT-ENHANCEMENTS-PLAN.md`
-> (`src/pm-collab.js`), because notes do not fit Kanban's whole-file-rewrite
-> store.
+> Status: **v1 implemented on `feat/notes-tool`** (2026-08-28) — built through the
+> SA → BE → FE role pipeline: store module + shared-types schemas (`02c81c0`),
+> frontend host modal/store slice (`05ca83f`), gateway routes, agent tools, MCP,
+> endpoint tests (`e77420e`), and the `main`-tracking docs/CLAUDE.md updates
+> (`072838d`). Verification: `test:notes-endpoints.js` (96 checks, `test:notes`),
+> agent-service `tools.test.ts` (131 tests), and a live headless-chromium smoke
+> against the real gateway with zero regressions in kanban/pm/agentic. This
+> document is the decision record (mirrors `docs/KANBAN-PLAN.md` + the PM
+> enhancement store-splitting); all §9 open decisions are RESOLVED as written,
+> and the authoritative route/tool contract lives in `docs/TERMINAL-PROTOCOL.md`
+> and `docs/AGENT-PROTOCOL.md`. The document keeps its original structure: §0
+> grounding → D-numbered decisions → data model → endpoints → AI access →
+> frontend → phases → testing → deferred → open decisions → critical files.
 >
 > Scope: a **OneNote-style hierarchical note-taking tool** — Notebooks →
 > Sections → Pages, each page a Markdown document — owned end-to-end by the
