@@ -17,6 +17,7 @@
     "test:codex": "node test/codex-endpoints.js",
     "test:kanban": "node test/kanban-endpoints.js",
     "test:pm": "node test/pm-endpoints.js",
+    "test:notes-store": "node test/notes-store.mjs",
     "test:parse": "node test/parse-result.js",
     "test:agentic": "node test/agentic-endpoints.js",
     "test:hook-notify": "node test/hook-notify-endpoints.js",
