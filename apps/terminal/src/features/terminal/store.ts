@@ -327,6 +327,12 @@ interface TerminalState {
   munderDifflinOpen: boolean;
   setMunderDifflinOpen: (open: boolean) => void;
 
+  /** Whether the Notes dialog is open. NOT persisted — like the
+   * Kanban/PM/Agentic/Munder Difflin/file-explorer/settings modals, a
+   * persisted-open dialog would flash on reload. */
+  notesOpen: boolean;
+  setNotesOpen: (open: boolean) => void;
+
   /** Set of collapsed group keys ("org" or "org/project"). Keys present =
    *  collapsed. Default (absent) = expanded. Persisted. */
   collapsedGroups: Record<string, boolean>;
@@ -508,6 +514,9 @@ export const useTerminalStore = create<TerminalState>()(
 
       munderDifflinOpen: false,
       setMunderDifflinOpen: (open) => set({ munderDifflinOpen: open }),
+
+      notesOpen: false,
+      setNotesOpen: (open) => set({ notesOpen: open }),
 
       collapsedGroups: {},
       toggleGroupCollapsed: (key) =>

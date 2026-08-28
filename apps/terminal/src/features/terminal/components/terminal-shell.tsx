@@ -35,6 +35,7 @@ import {
   FolderTree,
   Globe2,
   Menu,
+  NotebookText,
   SquareGanttChart,
   SquareKanban,
 } from "lucide-react";
@@ -46,6 +47,7 @@ import { FileExplorerDialog } from "./file-explorer-dialog";
 import { KanbanDialog } from "./kanban-dialog";
 import { LayoutMenu } from "./layout-menu";
 import { MunderDifflinDialog } from "./munder-difflin-dialog";
+import { NotesDialog } from "./notes-dialog";
 import { PmDialog } from "./pm-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
@@ -122,6 +124,8 @@ export function TerminalShell() {
     setAgenticOpen,
     munderDifflinOpen,
     setMunderDifflinOpen,
+    notesOpen,
+    setNotesOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -201,6 +205,7 @@ export function TerminalShell() {
   useUrlFlagSync("pm", pmOpen, setPmOpen);
   useUrlFlagSync("agentic", agenticOpen, setAgenticOpen);
   useUrlFlagSync("munder-difflin", munderDifflinOpen, setMunderDifflinOpen);
+  useUrlFlagSync("notes", notesOpen, setNotesOpen);
 
   // ---- "Active session vanished → fall back" (grid-aware, D7) ----
   // Decision lives in resolvePaneSessions (pure, unit-tested) — the
@@ -625,6 +630,21 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Agentic AI Creator</TooltipContent>
           </Tooltip>
+          {/* Notes is gateway-global too (D7) — always enabled. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Notes"
+                onClick={() => setNotesOpen(true)}
+              >
+                <NotebookText className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Notes</TooltipContent>
+          </Tooltip>
           {/* Munder Difflin header button is disabled/hidden — the viewer is
               still reachable via the ?munder-difflin URL flag. */}
           {browserView && !browserVisible && (
@@ -758,6 +778,10 @@ export function TerminalShell() {
         open={munderDifflinOpen}
         onOpenChange={setMunderDifflinOpen}
       />
+
+      {/* Notes modal — gateway-global (D7), not session-scoped. Mounted once;
+          open state lives in the store (deep-linked via `?notes`). */}
+      <NotesDialog open={notesOpen} onOpenChange={setNotesOpen} />
     </div>
   );
 }
