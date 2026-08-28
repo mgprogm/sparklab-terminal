@@ -161,6 +161,19 @@ deleting individual cards stays a human action in the board UI.
 | `pm_list_activity` | read | `GET /api/pm/projects/:id/activity` |
 | `pm_watch_task` / `pm_unwatch_task` | **write** | `POST /api/pm/tasks/:id/watch`\|`unwatch` (idempotent) |
 | `pm_list_attachments` | read | `GET /api/pm/tasks/:id/attachments` |
+| `notes_list` | read | `GET /api/notes/notebooks` |
+| `notes_get_notebook` | read | `GET /api/notes/notebooks/:id` |
+| `notes_get_page` | read | `GET /api/notes/notebooks/:id/pages/:pageId` |
+| `notes_search` | read | `GET /api/notes/search?q=&limit=` |
+| `notes_create_notebook` | **write** | `POST /api/notes/notebooks` — seeds one section "Notes" + one "Untitled page" |
+| `notes_create_section` | **write** | `POST /api/notes/notebooks/:id/sections` |
+| `notes_create_page` | **write** | `POST /api/notes/notebooks/:id/pages` (`section_id` for top-level, or `parent_id` for a subpage) |
+| `notes_append_to_page` | **write** | `POST /api/notes/pages/:id/append` — additive, no `rev` to manage |
+| `notes_move_page` | **write** | `POST /api/notes/pages/:id/move` (auto-manages the **notebook** `rev`, retries once on 409) |
+| `notes_update_page` | **write** | `PATCH /api/notes/pages/:id` — blind title/body/tags replace (one-time approval, **never retried** on 409) |
+| `notes_delete_page` | **write** | `DELETE /api/notes/pages/:id` — `mode` "orphan" (default) \| "cascade" (one-time approval) |
+| `notes_delete_section` | **write** | `DELETE /api/notes/sections/:id` — `mode` "block" (default) \| "cascade" (one-time approval) |
+| `notes_delete_notebook` | **write** | `DELETE /api/notes/notebooks/:id` — irreversible (one-time approval) |
 
 The PM tools drive the project-management artifact's `/api/pm/*` API (design:
 [`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md), extended by
@@ -182,6 +195,33 @@ Attachment **upload** and all notification management are deliberately
 **not** exposed as agent tools (binary upload and notification triage stay
 human actions in the artifact UI); `pm_list_attachments` (metadata only) is
 the one read exposed for attachments.
+
+The Notes tools drive the gateway's `/api/notes/*` OneNote-style note tool
+(design: [`NOTES-TOOL-PLAN.md`](./NOTES-TOOL-PLAN.md)) — a separate artifact
+from Kanban/PM. Approval tiers (D9) are **deliberately inverted** from the
+naive "writes allow-always, deletes one-time" reading, because the risk runs
+the other way for notes: reads are auto; the additive/structural writes
+(`notes_create_notebook`, `notes_create_section`, `notes_create_page`,
+`notes_append_to_page`, `notes_move_page`) are approvable **allow-always**;
+`notes_update_page` (a blind full title/body/tags replace) is in
+`ONE_TIME_TOOLS` — re-approved on **every** call, because an allow-always
+overwrite could silently destroy pages of human writing, whereas
+`notes_append_to_page` is server-atomic and additive so it **cannot clobber**
+and carries no `rev`. The three deletes (`notes_delete_page`,
+`notes_delete_section`, `notes_delete_notebook`) are also one-time. Two
+**independent** revisions gate concurrency: `notes_move_page` manages the
+**notebook** (structural) `rev` itself and retries once on a `409` — safe,
+because a move is a re-derived splice, mirroring `kanban_move`/`pm_move_task`.
+`notes_update_page` manages the **page** (body) `rev` itself but **never
+retries** a `409` — a body `PATCH` is a blind overwrite, so a stale write is
+surfaced back to the model as an error (naming the current server page)
+instead of silently discarding whatever the other writer just saved.
+**`notes_delete_page` is a deliberate divergence (D10)** from Kanban/PM's "no
+card/task-delete tool" precedent — a notebook accretes many disposable pages
+and routing every one through a human is disproportionate friction; it is
+mitigated by the one-time approval, a `mode:"orphan"` default (children are
+promoted, not cascaded), and the store's orphan-`.md` sweep leaving an
+accidental delete recoverable until the next `load()`.
 
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.

@@ -921,16 +921,24 @@ async function main() {
     );
   }
 
-  // ---- GET /mcp-servers -> pm + kanban ----------------------------------
+  // ---- GET /mcp-servers -> pm + kanban + notes ---------------------------
+  // Notes joined the registry array per NOTES-TOOL-PLAN.md §9.3 (resolved
+  // YES). NOTE: apps/terminal-gateway/src/agentic.js's own CONNECTION_TARGETS
+  // set (out of the Notes BE scope) does not yet accept targetType "notes"
+  // for POST /api/agentic/connections — this only proves the registry LISTING
+  // includes notes, not that a notes connection can be created yet.
   {
     const res = await req("GET", "/api/agentic/mcp-servers");
     assert(res.status === 200, `mcp-servers -> ${res.status}`);
     const ids = (await res.json()).servers.map((s) => s.id).sort();
     assert(
-      ids.length === 2 && ids[0] === "kanban" && ids[1] === "pm",
-      `mcp-servers = pm + kanban (got ${ids.join(",")})`,
+      ids.length === 3 &&
+        ids[0] === "kanban" &&
+        ids[1] === "notes" &&
+        ids[2] === "pm",
+      `mcp-servers = pm + kanban + notes (got ${ids.join(",")})`,
     );
-    console.log(`  ok: GET /mcp-servers returns pm + kanban`);
+    console.log(`  ok: GET /mcp-servers returns pm + kanban + notes`);
   }
 
   // ---- (iter7) templates: export -> import (fresh ids + remapped refs) ---

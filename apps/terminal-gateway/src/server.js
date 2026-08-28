@@ -22,6 +22,7 @@ import metadata from "./metadata.js";
 import registry from "./registry.js";
 import push from "./push.js";
 import kanban from "./kanban.js";
+import notes from "./notes.js";
 import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
 import agentic from "./agentic.js";
@@ -298,7 +299,7 @@ function mintScopedMcpToken(runId, nodeId, prefixes) {
     runId,
     nodeId,
     prefixes: [...new Set(prefixes)].filter(
-      (prefix) => prefix === "pm" || prefix === "kanban",
+      (prefix) => prefix === "pm" || prefix === "kanban" || prefix === "notes",
     ),
     expiresAt: now + AGENT_MCP_TOKEN_TTL_MS,
   });
@@ -325,7 +326,7 @@ function isScopedMcpAuthorized(req, url) {
   const parts = url.pathname.split("/").filter(Boolean);
   if (
     parts[0] === "api" &&
-    (parts[1] === "pm" || parts[1] === "kanban") &&
+    (parts[1] === "pm" || parts[1] === "kanban" || parts[1] === "notes") &&
     entry.prefixes.includes(parts[1])
   ) {
     return true;
@@ -1634,6 +1635,348 @@ async function handleKanban(req, res, url) {
   }
 }
 
+// ---- Notes (/api/notes/*) ----
+// A OneNote-style hierarchical note tool (docs/NOTES-TOOL-PLAN.md), a separate
+// artifact from Kanban/PM. Store is the SPLIT tree+body module src/notes.js
+// (D2): every mutator there is synchronous => atomic (no mutex). This handler
+// only validates input and maps coded store errors to HTTP via
+// notesErrorStatus: not_found -> 404, stale -> 409 (carrying the current
+// page/notebook via e.details), not_empty -> 422, everything else -> 400
+// (incl. cycle, bad_request). `seg` = path after /api/notes.
+function notesErrorStatus(code) {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "stale":
+      return 409;
+    case "not_empty":
+      return 422;
+    default:
+      return 400; // cycle | bad_request | validation
+  }
+}
+
+async function handleNotes(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // GET /api/notes/notebooks — list
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "notebooks") {
+      return sendJson(res, 200, { notebooks: notes.listNotebooks() });
+    }
+    // GET /api/notes/notebooks/:nbId — get
+    if (req.method === "GET" && seg.length === 2 && seg[0] === "notebooks") {
+      const nb = notes.getNotebook(seg[1]);
+      if (!nb) return sendJson(res, 404, { error: "notebook not found" });
+      return sendJson(res, 200, nb);
+    }
+    // GET /api/notes/notebooks/:nbId/pages/:pageId — get page content
+    if (
+      req.method === "GET" &&
+      seg.length === 4 &&
+      seg[0] === "notebooks" &&
+      seg[2] === "pages"
+    ) {
+      const page = notes.getPage(seg[1], seg[3]);
+      if (!page) return sendJson(res, 404, { error: "page not found" });
+      return sendJson(res, 200, page);
+    }
+    // GET /api/notes/search?q=…&limit=… — search
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "search") {
+      const q = url.searchParams.get("q") || "";
+      const limitParam = url.searchParams.get("limit");
+      const limit = limitParam != null ? Number(limitParam) : undefined;
+      return sendJson(res, 200, { results: notes.search(q, { limit }) });
+    }
+
+    // POST /api/notes/notebooks — create
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "notebooks") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name, tags } = r.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      const nb = notes.createNotebook({
+        name: name.trim(),
+        tags: Array.isArray(tags) ? tags.map(String) : [],
+      });
+      return sendJson(res, 201, nb);
+    }
+    // PATCH /api/notes/notebooks/:nbId — rename / retag
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "notebooks") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const patch = {};
+      if (r.body.name !== undefined) {
+        if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+          return sendJson(res, 400, {
+            error: "name must be a non-empty string",
+          });
+        }
+        patch.name = r.body.name.trim();
+      }
+      if (r.body.tags !== undefined) {
+        if (!Array.isArray(r.body.tags)) {
+          return sendJson(res, 400, { error: "tags must be an array" });
+        }
+        patch.tags = r.body.tags.map(String);
+      }
+      if (patch.name === undefined && patch.tags === undefined) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      return sendJson(res, 200, notes.updateNotebook(seg[1], patch));
+    }
+    // DELETE /api/notes/notebooks/:nbId — delete
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "notebooks") {
+      if (!notes.deleteNotebook(seg[1])) {
+        return sendJson(res, 404, { error: "notebook not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/notes/notebooks/:nbId/sections — create section
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "notebooks" &&
+      seg[2] === "sections"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name } = r.body;
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      const nb = notes.createSection(seg[1], { name: name.trim() });
+      return sendJson(res, 201, nb);
+    }
+    // PATCH /api/notes/sections/:secId — rename (notebookId in body)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "sections") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { notebookId, name } = r.body;
+      if (typeof notebookId !== "string") {
+        return sendJson(res, 400, { error: "notebookId is required" });
+      }
+      if (typeof name !== "string" || !name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      const nb = notes.updateSection(notebookId, seg[1], {
+        name: name.trim(),
+      });
+      return sendJson(res, 200, nb);
+    }
+    // POST /api/notes/sections/:secId/move — reorder (rev-guarded, D3)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "sections" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { notebookId, toIndex, rev } = r.body;
+      if (typeof notebookId !== "string") {
+        return sendJson(res, 400, { error: "notebookId is required" });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      if (typeof rev !== "number") {
+        return sendJson(res, 400, { error: "rev is required" });
+      }
+      const nb = notes.moveSection(notebookId, seg[1], {
+        toIndex,
+        expectedRev: rev,
+      });
+      return sendJson(res, 200, nb);
+    }
+    // DELETE /api/notes/sections/:secId — notebookId + mode via query or body
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "sections") {
+      let notebookId = url.searchParams.get("notebookId") || "";
+      let mode = url.searchParams.get("mode") || undefined;
+      if (!notebookId || mode === undefined) {
+        const r = await readJsonObject(req);
+        if (r.ok) {
+          if (!notebookId && typeof r.body.notebookId === "string")
+            notebookId = r.body.notebookId;
+          if (mode === undefined && typeof r.body.mode === "string")
+            mode = r.body.mode;
+        }
+      }
+      if (!notebookId)
+        return sendJson(res, 400, { error: "notebookId is required" });
+      if (!notes.deleteSection(notebookId, seg[1], { mode })) {
+        return sendJson(res, 404, { error: "section not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+    // POST /api/notes/notebooks/:nbId/pages — create page
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "notebooks" &&
+      seg[2] === "pages"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { sectionId, title, parentId, body } = r.body;
+      if (sectionId !== undefined && typeof sectionId !== "string") {
+        return sendJson(res, 400, { error: "sectionId must be a string" });
+      }
+      if (
+        parentId !== undefined &&
+        parentId !== null &&
+        typeof parentId !== "string"
+      ) {
+        return sendJson(res, 400, {
+          error: "parentId must be a string or null",
+        });
+      }
+      if (body !== undefined && typeof body !== "string") {
+        return sendJson(res, 400, { error: "body must be a string" });
+      }
+      const page = notes.createPage(seg[1], {
+        sectionId,
+        title: typeof title === "string" ? title : undefined,
+        parentId: parentId ?? undefined,
+        body,
+      });
+      return sendJson(res, 201, page);
+    }
+    // PATCH /api/notes/pages/:pageId — full/partial title/body/tags replace
+    // (D3/D4: page.rev-guarded, NEVER auto-retried by any client)
+    if (req.method === "PATCH" && seg.length === 2 && seg[0] === "pages") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { notebookId, title, body, tags, rev } = r.body;
+      if (typeof notebookId !== "string") {
+        return sendJson(res, 400, { error: "notebookId is required" });
+      }
+      if (typeof rev !== "number") {
+        return sendJson(res, 400, { error: "rev is required" });
+      }
+      if (title === undefined && body === undefined && tags === undefined) {
+        return sendJson(res, 400, { error: "nothing to update" });
+      }
+      if (tags !== undefined && !Array.isArray(tags)) {
+        return sendJson(res, 400, { error: "tags must be an array" });
+      }
+      const page = notes.updatePage(notebookId, seg[1], {
+        title,
+        body,
+        tags: Array.isArray(tags) ? tags.map(String) : undefined,
+        expectedRev: rev,
+      });
+      return sendJson(res, 200, page);
+    }
+    // POST /api/notes/pages/:pageId/append — server-atomic additive (D9: no rev)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "pages" &&
+      seg[2] === "append"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { notebookId, markdown } = r.body;
+      if (typeof notebookId !== "string") {
+        return sendJson(res, 400, { error: "notebookId is required" });
+      }
+      if (typeof markdown !== "string" || !markdown) {
+        return sendJson(res, 400, { error: "markdown is required" });
+      }
+      const page = notes.appendToPage(notebookId, seg[1], { markdown });
+      return sendJson(res, 200, page);
+    }
+    // POST /api/notes/pages/:pageId/move — subtree move (notebook rev-guarded, D3/D5)
+    if (
+      req.method === "POST" &&
+      seg.length === 3 &&
+      seg[0] === "pages" &&
+      seg[2] === "move"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { notebookId, toSectionId, toIndex, toParentId, rev } = r.body;
+      if (typeof notebookId !== "string") {
+        return sendJson(res, 400, { error: "notebookId is required" });
+      }
+      if (typeof toSectionId !== "string") {
+        return sendJson(res, 400, { error: "toSectionId is required" });
+      }
+      if (!Number.isInteger(toIndex) || toIndex < 0) {
+        return sendJson(res, 400, {
+          error: "toIndex must be a non-negative integer",
+        });
+      }
+      if (
+        toParentId !== undefined &&
+        toParentId !== null &&
+        typeof toParentId !== "string"
+      ) {
+        return sendJson(res, 400, {
+          error: "toParentId must be a string or null",
+        });
+      }
+      if (typeof rev !== "number") {
+        return sendJson(res, 400, { error: "rev is required" });
+      }
+      const nb = notes.movePage(notebookId, seg[1], {
+        toSectionId,
+        toIndex,
+        toParentId,
+        expectedRev: rev,
+      });
+      return sendJson(res, 200, nb);
+    }
+    // DELETE /api/notes/pages/:pageId — notebookId + mode via query or body
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "pages") {
+      let notebookId = url.searchParams.get("notebookId") || "";
+      let mode = url.searchParams.get("mode") || undefined;
+      if (!notebookId || mode === undefined) {
+        const r = await readJsonObject(req);
+        if (r.ok) {
+          if (!notebookId && typeof r.body.notebookId === "string")
+            notebookId = r.body.notebookId;
+          if (mode === undefined && typeof r.body.mode === "string")
+            mode = r.body.mode;
+        }
+      }
+      if (!notebookId)
+        return sendJson(res, 400, { error: "notebookId is required" });
+      if (!notes.deletePage(notebookId, seg[1], { mode })) {
+        return sendJson(res, 404, { error: "page not found" });
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      // A stale rev conflict reports the short code "stale" (matching Kanban/
+      // PM's move-endpoint convention) so the client's `error === "stale"`
+      // check is uniform across page-body PATCH and structural move; every
+      // other coded error keeps its descriptive message.
+      return sendJson(res, notesErrorStatus(e.code), {
+        error: e.code === "stale" ? "stale" : e.message,
+        ...(e.details || {}),
+      });
+    }
+    throw e;
+  }
+}
+
 // Map a coded pm.js store error to an HTTP status. New-rejection slugs use 422
 // (never blindly retried by the agent, unlike 409 stale — plan P5); state
 // conflicts use 409; not_found 404; everything else (cycle/bad_request/
@@ -2614,6 +2957,7 @@ function agenticErrorStatus(code) {
 const AGENTIC_MCP_SERVERS = [
   { id: "pm", name: "Project Management" },
   { id: "kanban", name: "Kanban" },
+  { id: "notes", name: "Notes" },
 ];
 
 // ===========================================================================
@@ -2827,7 +3171,12 @@ function scopedMcpPrefixes(cfg, agent) {
     ...new Set(
       toolPolicies
         .map((policy) => cfg.connections?.[policy.connectionId]?.targetType)
-        .filter((targetType) => targetType === "pm" || targetType === "kanban"),
+        .filter(
+          (targetType) =>
+            targetType === "pm" ||
+            targetType === "kanban" ||
+            targetType === "notes",
+        ),
     ),
   ];
 }
@@ -5638,18 +5987,21 @@ async function handleApi(req, res, url) {
   }
 
   // A2: All other /api/* routes require a valid session (or open mode). The
-  // artifact prefixes (/api/kanban/*, /api/pm/*, /api/agentic/*) additionally
-  // accept a scoped bearer token so an external AI CLI can drive them without a
-  // cookie login. POST /api/push/hook-notify is a THIRD, deliberately separate
-  // bearer path (its own token, isHookNotifyAuthorized) — kept out of the
-  // artifact-prefix clause above so that token never also grants Kanban/PM/
-  // Agentic access (D1, docs/HOOK-NOTIFICATIONS-SETUP.md).
+  // artifact prefixes (/api/kanban/*, /api/pm/*, /api/agentic/*, /api/notes/*)
+  // additionally accept a scoped bearer token so an external AI CLI can drive
+  // them without a cookie login. POST /api/push/hook-notify is a THIRD,
+  // deliberately separate bearer path (its own token, isHookNotifyAuthorized)
+  // — kept out of the artifact-prefix clause above so that token never also
+  // grants Kanban/PM/Agentic/Notes access (D1, docs/HOOK-NOTIFICATIONS-SETUP.md).
   const isHookNotifyRoute =
     req.method === "POST" && parts[1] === "push" && parts[2] === "hook-notify";
   if (
     !isAuthenticated(req) &&
     !(
-      (parts[1] === "kanban" || parts[1] === "pm" || parts[1] === "agentic") &&
+      (parts[1] === "kanban" ||
+        parts[1] === "pm" ||
+        parts[1] === "agentic" ||
+        parts[1] === "notes") &&
       (isArtifactBearerAuthorized(req) || isScopedMcpAuthorized(req, url))
     ) &&
     !(isHookNotifyRoute && isHookNotifyAuthorized(req))
@@ -5672,6 +6024,11 @@ async function handleApi(req, res, url) {
   // ---- Kanban: /api/kanban/* ----
   if (parts[1] === "kanban") {
     return handleKanban(req, res, url);
+  }
+
+  // ---- Notes: /api/notes/* ----
+  if (parts[1] === "notes") {
+    return handleNotes(req, res, url);
   }
 
   // ---- Project-management tool: /api/pm/* ----

@@ -36,6 +36,15 @@ import type {
   CreateColumnRequest,
   UpdateColumnRequest,
   FsUploadResponse,
+  NotesNotebook,
+  NotesNotebookSummary,
+  NotesPageContent,
+  NotesListResponse,
+  NotesSearchHit,
+  NotesSearchResponse,
+  CreateNotebookRequest,
+  CreateSectionRequest,
+  CreatePageRequest,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -702,6 +711,212 @@ class GatewayClient {
         `/api/pm/tasks/${encodeURIComponent(taskId)}/attachments?projectId=${encodeURIComponent(projectId)}`,
       ),
     );
+  }
+
+  // --- Notes ---------------------------------------------------------------
+  // Same posture as Kanban/PM: the agent drives the gateway-owned Notes tree
+  // (docs/NOTES-TOOL-PLAN.md) purely as a REST client; the gateway remains the
+  // single store of record and enforcement point. Two DISTINCT revs (D3):
+  // page.rev (title/body — updatePage) and notebook.rev (structure —
+  // movePage). D4: a page-body 409 is surfaced but NEVER auto-retried here —
+  // that's the caller's (tools.ts executeTool) responsibility to respect.
+
+  async listNotebooks(): Promise<NotesNotebookSummary[]> {
+    const r = await this.json<NotesListResponse>(
+      await this.call("/api/notes/notebooks"),
+    );
+    return r.notebooks;
+  }
+
+  async getNotebook(notebookId: string): Promise<NotesNotebook> {
+    return this.json<NotesNotebook>(
+      await this.call(`/api/notes/notebooks/${encodeURIComponent(notebookId)}`),
+    );
+  }
+
+  async getPage(notebookId: string, pageId: string): Promise<NotesPageContent> {
+    return this.json<NotesPageContent>(
+      await this.call(
+        `/api/notes/notebooks/${encodeURIComponent(notebookId)}/pages/${encodeURIComponent(pageId)}`,
+      ),
+    );
+  }
+
+  async searchNotes(q: string, limit?: number): Promise<NotesSearchHit[]> {
+    const params = new URLSearchParams({ q });
+    if (limit !== undefined) params.set("limit", String(limit));
+    const r = await this.json<NotesSearchResponse>(
+      await this.call(`/api/notes/search?${params.toString()}`),
+    );
+    return r.results;
+  }
+
+  async createNotebook(body: CreateNotebookRequest): Promise<NotesNotebook> {
+    return this.json<NotesNotebook>(
+      await this.call("/api/notes/notebooks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  /** Delete a whole notebook (and every page body in it). 204 on success. */
+  async deleteNotebook(notebookId: string): Promise<void> {
+    const res = await this.call(
+      `/api/notes/notebooks/${encodeURIComponent(notebookId)}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async createSection(
+    notebookId: string,
+    body: CreateSectionRequest,
+  ): Promise<NotesNotebook> {
+    return this.json<NotesNotebook>(
+      await this.call(
+        `/api/notes/notebooks/${encodeURIComponent(notebookId)}/sections`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  /** Delete a section. `mode` "block" (default, 422 if non-empty) | "cascade". */
+  async deleteSection(
+    notebookId: string,
+    sectionId: string,
+    opts: { mode?: "block" | "cascade" } = {},
+  ): Promise<void> {
+    const params = new URLSearchParams({ notebookId });
+    if (opts.mode) params.set("mode", opts.mode);
+    const res = await this.call(
+      `/api/notes/sections/${encodeURIComponent(sectionId)}?${params.toString()}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
+  async createPage(
+    notebookId: string,
+    // sectionId is required by CreatePageRequestSchema in the general case,
+    // but the store (and route) treat it as optional when parentId is given
+    // (the page then joins the parent's section) — loosen it here to match.
+    body: Omit<CreatePageRequest, "sectionId"> & { sectionId?: string },
+  ): Promise<NotesPageContent> {
+    return this.json<NotesPageContent>(
+      await this.call(
+        `/api/notes/notebooks/${encodeURIComponent(notebookId)}/pages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  /**
+   * Full/partial title-and-body replace (D9: destructive, one-time approved
+   * at the tool layer). `page.rev`-guarded (D3). On a stale rev the gateway
+   * returns 409 with the current page — surfaced here as `{stale:true, page}`
+   * so the tool executor can show the model the conflict WITHOUT retrying
+   * (D4 — a page-body PATCH is a blind overwrite; auto-retry would silently
+   * discard whatever the other writer just saved).
+   */
+  async updatePage(
+    notebookId: string,
+    pageId: string,
+    body: { title?: string; body?: string; tags?: string[]; rev: number },
+  ): Promise<{ stale: boolean; page: NotesPageContent }> {
+    const res = await this.call(
+      `/api/notes/pages/${encodeURIComponent(pageId)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ notebookId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as {
+        error?: string;
+        page: NotesPageContent;
+      };
+      return { stale: true, page: b.page };
+    }
+    return { stale: false, page: await this.json<NotesPageContent>(res) };
+  }
+
+  /**
+   * Server-atomic append (D9: additive, cannot clobber — no `rev`, no
+   * retry needed).
+   */
+  async appendToPage(
+    notebookId: string,
+    pageId: string,
+    markdown: string,
+  ): Promise<NotesPageContent> {
+    return this.json<NotesPageContent>(
+      await this.call(`/api/notes/pages/${encodeURIComponent(pageId)}/append`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ notebookId, markdown }),
+      }),
+    );
+  }
+
+  /**
+   * Move a page (and its whole subtree, D5) to another section/position/
+   * parent. `notebook.rev`-guarded (D3, distinct from page.rev); a stale rev
+   * echoes the current notebook as `{stale:true, notebook}` so the tool
+   * executor can refetch and retry ONCE — safe here because a move is a
+   * re-derived splice (D4), unlike updatePage above.
+   */
+  async movePage(
+    notebookId: string,
+    pageId: string,
+    body: {
+      toSectionId: string;
+      toIndex: number;
+      toParentId?: string | null;
+      rev: number;
+    },
+  ): Promise<{ stale: boolean; notebook: NotesNotebook }> {
+    const res = await this.call(
+      `/api/notes/pages/${encodeURIComponent(pageId)}/move`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ notebookId, ...body }),
+      },
+    );
+    if (res.status === 409) {
+      const b = (await res.json()) as {
+        error?: string;
+        notebook: NotesNotebook;
+      };
+      return { stale: true, notebook: b.notebook };
+    }
+    return { stale: false, notebook: await this.json<NotesNotebook>(res) };
+  }
+
+  /** Delete a page. `mode` "orphan" (default, promotes children) | "cascade". */
+  async deletePage(
+    notebookId: string,
+    pageId: string,
+    opts: { mode?: "orphan" | "cascade" } = {},
+  ): Promise<void> {
+    const params = new URLSearchParams({ notebookId });
+    if (opts.mode) params.set("mode", opts.mode);
+    const res = await this.call(
+      `/api/notes/pages/${encodeURIComponent(pageId)}?${params.toString()}`,
+      { method: "DELETE" },
+    );
+    if (res.status !== 204) throw await this.error(res);
   }
 
   /** Build a GatewayError from a non-2xx response (used by the 204 methods). */
