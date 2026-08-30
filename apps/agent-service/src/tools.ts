@@ -16,6 +16,7 @@
  */
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { AgentNamedKeySchema } from "@sparklab/shared-types";
+import { config } from "./config.js";
 import { gateway, GatewayError } from "./gateway-client.js";
 
 export const WRITE_TOOLS = new Set([
@@ -32,6 +33,10 @@ export const WRITE_TOOLS = new Set([
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
+  // Virtual Computer (CUA) — spike. computer_observe is a read (absent here);
+  // computer_act is a write and also in ONE_TIME_TOOLS (re-approved every call,
+  // like browser_act).
+  "computer_act",
   // Kanban writes (D9). The routine four permit allow-always; kanban_delete is
   // additionally in ONE_TIME_TOOLS so it is re-approved on every call.
   "kanban_create",
@@ -89,6 +94,7 @@ export const ONE_TIME_TOOLS = new Set([
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
+  "computer_act",
   "run_codex",
   "kanban_delete",
   // Destroying a whole project is coerced one-time (D12), like kanban_delete.
@@ -1433,6 +1439,60 @@ export const TOOLS: ChatCompletionTool[] = [
   },
 ];
 
+// --- Virtual Computer (CUA) — spike (docs/VIRTUAL-COMPUTER.md) --------------
+// Offered to the model ONLY when CUA_ENABLED=true. A desktop tool that always
+// fails until Docker + a multi-GB image exist would be pure per-turn token
+// cost and would invite the model to spend approvals on it. WRITE_TOOLS /
+// ONE_TIME_TOOLS membership above is unconditional (keyed by name).
+if (config.cua.enabled) {
+  TOOLS.push(
+    {
+      type: "function",
+      function: {
+        name: "computer_observe",
+        description:
+          "Observe the disposable Linux desktop owned by this chat: viewport size, indexed on-screen elements (role, name, bounds, index), and a screenshot. Starts the desktop lazily. Call before every computer_act and re-observe after each one. Returns a snapshotId; pass it back with an element index to target that element.",
+        parameters: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "computer_act",
+        description:
+          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. Prefer targeting by element_index + snapshot_id from the latest observation; fall back to window_id + x,y (window-local pixels) only when no element matches. Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
+        parameters: {
+          type: "object",
+          properties: {
+            kind: {
+              type: "string",
+              enum: ["click", "type_text", "press_key", "scroll"],
+            },
+            element_index: { type: "integer", minimum: 0, maximum: 100000 },
+            snapshot_id: { type: "string", minLength: 1, maxLength: 128 },
+            window_id: { type: "string", minLength: 1, maxLength: 128 },
+            x: { type: "integer", minimum: 0, maximum: 100000 },
+            y: { type: "integer", minimum: 0, maximum: 100000 },
+            text: { type: "string", maxLength: 10000 },
+            key: { type: "string", maxLength: 64 },
+            direction: {
+              type: "string",
+              enum: ["up", "down", "left", "right"],
+            },
+            amount: { type: "string", enum: ["line", "page"] },
+          },
+          required: ["kind"],
+          additionalProperties: false,
+        },
+      },
+    },
+  );
+}
+
 const SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash"]);
 
 export interface ToolArgs {
@@ -1502,6 +1562,15 @@ export interface ToolArgs {
   markdown?: string;
   to_section_id?: string;
   to_parent_id?: string;
+  // Virtual Computer (CUA)
+  kind?: string;
+  element_index?: number;
+  snapshot_id?: string;
+  window_id?: string;
+  x?: number;
+  y?: number;
+  key?: string;
+  amount?: string;
 }
 
 /** Which session a call targets (for UI attribution), if any. */
@@ -1566,6 +1635,23 @@ export function describeCall(tool: string, args: ToolArgs): string {
       if (args.action === "close_tab")
         return `close browser tab ${args.tab_id ?? ""}`;
       return "go back in browser";
+    case "computer_observe":
+      return "observe computer desktop";
+    case "computer_act": {
+      const where =
+        typeof args.element_index === "number"
+          ? `element ${args.element_index}`
+          : args.window_id
+            ? `window ${args.window_id} @ ${args.x ?? "?"},${args.y ?? "?"}`
+            : "target ?";
+      if (args.kind === "type_text")
+        return `type into computer ${where}: [redacted]`;
+      if (args.kind === "press_key")
+        return `press ${String(args.key ?? "?")} on computer ${where}`;
+      if (args.kind === "scroll")
+        return `scroll computer ${where} ${String(args.direction ?? "")}`.trimEnd();
+      return `click computer ${where}`;
+    }
     case "kanban_list":
       return "list Kanban boards";
     case "kanban_get":

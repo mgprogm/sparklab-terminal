@@ -91,6 +91,7 @@ import {
   BrowserViewOverlay,
   useBrowserViewStore,
 } from "@/features/browser-view";
+import { ComputerViewOverlay } from "@/features/computer-view";
 
 export function TerminalShell() {
   const queryClient = useQueryClient();
@@ -697,6 +698,11 @@ export function TerminalShell() {
               Grid-global (unchanged) — covers the whole viewport regardless
               of layout mode. */}
           <BrowserViewOverlay />
+
+          {/* Same in-place read-only overlay pattern for the agent's virtual
+              computer (CUA) desktop. Renders only when a computer_view frame
+              has arrived; no-op otherwise. */}
+          <ComputerViewOverlay />
 
           {/* Agent Chat: amber attribution overlay + floating entry button,
               both anchored inside the terminal viewport. Minimal v1 (plan

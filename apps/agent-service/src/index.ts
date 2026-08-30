@@ -24,6 +24,7 @@ import { deleteChat, listChats, openChat } from "./history.js";
 import { browserResources } from "./browser-resource-limiter.js";
 import { browserHandoffMetrics } from "./browser-handoff-transport.js";
 import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
+import { ComputerRuntime } from "./computer-runtime.js";
 import { isAllowedWebSocketOrigin } from "./agent-security.js";
 
 const server = createServer((req, res) => {
@@ -401,6 +402,9 @@ function safeSend(ws: WebSocket, frame: AgentWsServerMessage): void {
 
 server.headersTimeout = 30_000;
 server.requestTimeout = 60_000;
+// Virtual Computer (CUA) — remove any desktop containers a prior hard crash
+// left running. No-op unless CUA_ENABLED=true; never blocks startup.
+void ComputerRuntime.sweepOrphans().catch(() => undefined);
 void runs
   .recover()
   .then(() => {

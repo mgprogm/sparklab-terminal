@@ -19,7 +19,7 @@ import type {
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
 import { DEFAULT_MODEL, resolveModel, type ResolvedModel } from "./azure.js";
-import { CAPS } from "./config.js";
+import { CAPS, config } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
 import { appendMessages, loadChat, reconstructTranscript } from "./history.js";
 import { systemPrompt } from "./system-prompt.js";
@@ -33,6 +33,11 @@ import {
   type ToolArgs,
 } from "./tools.js";
 import { BrowserRuntime, type BrowserAction } from "./browser-runtime.js";
+import {
+  ComputerRuntime,
+  type ComputerAction,
+  type ComputerTarget,
+} from "./computer-runtime.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { gateway } from "./gateway-client.js";
 
@@ -52,6 +57,11 @@ export class AgentLoop {
   private running = false;
   private ready: Promise<void>;
   private browser: BrowserRuntime;
+  // Virtual Computer (CUA) — spike. Independent per-loop lifetime, same as the
+  // browser: lazily started on the first computer_* call, torn down on
+  // interrupt / dispose, replaced on unexpected close. No handoff/broker/lease
+  // (that is docs/VIRTUAL-COMPUTER.md D4, a later phase).
+  private computer: ComputerRuntime;
 
   constructor(
     private send: Send,
@@ -60,8 +70,9 @@ export class AgentLoop {
     private readonly handoffs: BrowserHandoffBroker,
     private readonly user: string,
   ) {
-    this.browser = this.newBrowserRuntime();
     this.chatId = chatId;
+    this.browser = this.newBrowserRuntime();
+    this.computer = this.newComputerRuntime();
     this.ready = loadChat(chatId).then((history) => {
       this.history = history;
     });
@@ -121,6 +132,7 @@ export class AgentLoop {
     this.approvals.denyAll();
     if (this.browser.leaseState === "agent_active") void this.closeBrowser();
     else void this.handoffs.revokeForChat(this.chatId);
+    void this.closeComputer();
   }
 
   async dispose(): Promise<void> {
@@ -129,6 +141,7 @@ export class AgentLoop {
     if (this.browser.leaseState === "agent_active") await this.closeBrowser();
     // A pending or human-controlled browser is owned by the broker and may be
     // adopted by the same authenticated chat after a transient /agent reconnect.
+    await this.closeComputer();
   }
 
   requestBrowserHandoff(browserId: string): void {
@@ -232,7 +245,11 @@ export class AgentLoop {
 
         const system: ChatCompletionMessageParam = {
           role: "system",
-          content: systemPrompt(activeSessionId, this.browser.leaseState),
+          content: systemPrompt(
+            activeSessionId,
+            this.browser.leaseState,
+            config.cua.enabled,
+          ),
         };
 
         const { text: segmentText, toolCalls } = await this.streamOnce(
@@ -477,11 +494,28 @@ export class AgentLoop {
           this.send({ type: "browser_view", ...result.snapshot });
         return result.content;
       }
+      if (tool === "computer_observe") {
+        const result = await this.computer.observe(signal);
+        if (result.snapshot)
+          this.send({ type: "computer_view", ...result.snapshot });
+        return result.content;
+      }
+      if (tool === "computer_act") {
+        const action = parseComputerAction(args);
+        if (typeof action === "string") return `error: ${action}`;
+        const result = await this.computer.act(action, signal);
+        if (result.snapshot)
+          this.send({ type: "computer_view", ...result.snapshot });
+        return result.content;
+      }
       return executeTool(tool, args, signal);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       if (tool.startsWith("browser_") && this.browser.isClosed) {
         this.browser = this.newBrowserRuntime();
+      }
+      if (tool.startsWith("computer_") && this.computer.isClosed) {
+        this.computer = this.newComputerRuntime();
       }
       return `error: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -507,6 +541,26 @@ export class AgentLoop {
           this.browser = this.newBrowserRuntime();
       });
     });
+  }
+
+  private async closeComputer(): Promise<void> {
+    if (!this.computer.isActive && !this.computer.isClosed) return;
+    const closing = this.computer;
+    this.computer = this.newComputerRuntime();
+    const computerId = closing.computerId;
+    const revision = await closing.stop();
+    this.send({ type: "computer_closed", computerId, revision });
+  }
+
+  private newComputerRuntime(): ComputerRuntime {
+    return new ComputerRuntime(
+      (computerId, revision) => {
+        this.send({ type: "computer_closed", computerId, revision });
+        if (this.computer.computerId === computerId)
+          this.computer = this.newComputerRuntime();
+      },
+      { label: this.chatId },
+    );
   }
 
   /** One streaming model call: relay text deltas, accumulate tool calls. */
@@ -585,9 +639,11 @@ function parseArgs(raw: string): ToolArgs {
 }
 
 function redactToolArgs(tool: string, args: ToolArgs): ToolArgs {
-  return tool === "browser_act" && args.action === "type"
-    ? { ...args, text: "[redacted]" }
-    : args;
+  if (tool === "browser_act" && args.action === "type")
+    return { ...args, text: "[redacted]" };
+  if (tool === "computer_act" && args.kind === "type_text")
+    return { ...args, text: "[redacted]" };
+  return args;
 }
 
 export function sanitizePersistedToolArgs(
@@ -619,9 +675,14 @@ export function sanitizePersistedToolResult(
   tool: string,
   content: string,
 ): string {
-  return tool.startsWith("browser_")
-    ? "[browser result omitted from durable history]"
-    : content;
+  if (tool.startsWith("browser_"))
+    return "[browser result omitted from durable history]";
+  // computer_observe carries the AX element slice (roles, names, window
+  // titles) and computer_act echoes a fresh observation — never persisted
+  // (docs/VIRTUAL-COMPUTER.md: desktop/AX state is ephemeral in chat).
+  if (tool.startsWith("computer_"))
+    return "[computer result omitted from durable history]";
+  return content;
 }
 
 function parseBrowserAction(args: ToolArgs): BrowserAction | string {
@@ -659,5 +720,67 @@ function parseBrowserAction(args: ToolArgs): BrowserAction | string {
         : `${args.action} requires a tab_id`;
     default:
       return "unknown browser action";
+  }
+}
+
+function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
+  if (
+    Number.isInteger(args.element_index) &&
+    (args.element_index ?? -1) >= 0 &&
+    typeof args.snapshot_id === "string" &&
+    args.snapshot_id.length > 0
+  ) {
+    return {
+      elementIndex: args.element_index as number,
+      snapshotId: args.snapshot_id,
+    };
+  }
+  if (
+    typeof args.window_id === "string" &&
+    args.window_id.length > 0 &&
+    Number.isInteger(args.x) &&
+    (args.x ?? -1) >= 0 &&
+    Number.isInteger(args.y) &&
+    (args.y ?? -1) >= 0
+  ) {
+    return {
+      windowId: args.window_id,
+      x: args.x as number,
+      y: args.y as number,
+    };
+  }
+  return "target requires element_index + snapshot_id (from computer_observe), or window_id + x + y";
+}
+
+function parseComputerAction(args: ToolArgs): ComputerAction | string {
+  const target = parseComputerTarget(args);
+  if (typeof target === "string") return target;
+  switch (args.kind) {
+    case "click":
+      return { kind: "click", target };
+    case "type_text":
+      return typeof args.text === "string" && args.text.length <= 10_000
+        ? { kind: "type_text", target, text: args.text }
+        : "type_text requires text of at most 10000 characters";
+    case "press_key":
+      return typeof args.key === "string" &&
+        args.key.length > 0 &&
+        args.key.length <= 64
+        ? { kind: "press_key", target, key: args.key }
+        : "press_key requires a key name of at most 64 characters";
+    case "scroll":
+      return args.direction === "up" ||
+        args.direction === "down" ||
+        args.direction === "left" ||
+        args.direction === "right"
+        ? {
+            kind: "scroll",
+            target,
+            direction: args.direction,
+            amount: args.amount === "page" ? "page" : "line",
+          }
+        : "scroll direction must be up, down, left, or right";
+    default:
+      return "unknown computer action kind";
   }
 }

@@ -60,3 +60,30 @@ test("browser capture results omit saved-file metadata from durable history", ()
     "[browser result omitted from durable history]",
   );
 });
+
+test("computer_act redacts typed text from durable history", () => {
+  const sanitized = sanitizePersistedToolArgs("computer_act", {
+    kind: "type_text",
+    element_index: 3,
+    snapshot_id: "snap-1",
+    text: "CANARY_DESKTOP_SECRET",
+  });
+  assert.equal(sanitized.text, "[redacted]");
+  assert.doesNotMatch(JSON.stringify(sanitized), /CANARY/);
+});
+
+test("computer_* results (screenshot + AX tree) never become durable tool results", () => {
+  const content = JSON.stringify({
+    snapshotId: "drv-1",
+    elements: [{ role: "button", name: "CANARY_WINDOW_TITLE" }],
+    screenshot: "CANARY_BASE64_MARKER",
+  });
+  assert.equal(
+    sanitizePersistedToolResult("computer_observe", content),
+    "[computer result omitted from durable history]",
+  );
+  assert.equal(
+    sanitizePersistedToolResult("computer_act", content),
+    "[computer result omitted from durable history]",
+  );
+});

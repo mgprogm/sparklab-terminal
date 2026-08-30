@@ -10,6 +10,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/*.test.ts",
+    "test:computer-e2e": "node --import tsx test/computer-e2e.js",
     "smoke": "node --env-file-if-exists=.env test/smoke.js"
   },
   "dependencies": {

@@ -100,6 +100,31 @@ test("browser handoff is an explicit one-time approved tool", () => {
   );
 });
 
+test("virtual-computer tools are hidden from TOOLS unless CUA_ENABLED, but their approval tiers are always keyed", () => {
+  // This suite runs without CUA_ENABLED, so the model never sees the tools.
+  assert.equal(toolNames().includes("computer_observe"), false);
+  assert.equal(toolNames().includes("computer_act"), false);
+  // Membership is by name and unconditional: if the tool ever is offered, it
+  // is a one-time-approved write (no allow-always), like browser_act.
+  assert.equal(WRITE_TOOLS.has("computer_act"), true);
+  assert.equal(ONE_TIME_TOOLS.has("computer_act"), true);
+  assert.equal(WRITE_TOOLS.has("computer_observe"), false);
+  // describeCall stays defined for both regardless of gating.
+  assert.equal(
+    describeCall("computer_observe", {}),
+    "observe computer desktop",
+  );
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "type_text",
+      element_index: 2,
+      snapshot_id: "s1",
+      text: "hunter2",
+    }),
+    "type into computer element 2: [redacted]",
+  );
+});
+
 test("browser capture is an explicit one-time approved file write", () => {
   const capture = TOOLS.find((t) => t.function.name === "browser_capture");
   assert.ok(capture);

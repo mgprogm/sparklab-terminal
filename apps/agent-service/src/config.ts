@@ -130,6 +130,34 @@ export const config = {
     maxSessions: positiveInt("MAX_BROWSER_SESSIONS", 4, 64),
     maxConcurrentLaunches: positiveInt("MAX_BROWSER_LAUNCHES", 2, 16),
   },
+  // Virtual Computer (CUA) — spike. Disabled unless CUA_ENABLED=true.
+  // See docs/VIRTUAL-COMPUTER.md. v1 runtime = one disposable Docker desktop
+  // per chat with `cua-driver mcp --direct` reached over `docker exec -i`.
+  cua: {
+    enabled: optional("CUA_ENABLED", "false") === "true",
+    dockerBin: optional("CUA_DOCKER_BIN", "docker"),
+    image: optional("CUA_IMAGE", "trycua/xfce-cua:latest"),
+    // Isolated docker network whose only egress route is the agent-service
+    // proxy (enforced at the network layer, not via app proxy env). Empty =
+    // spike default network; MUST be set for any shared deployment.
+    egressNetwork: optionalValue("CUA_EGRESS_NETWORK"),
+    // Default `standard` for the spike: `bounded` admits ONLY what a reviewed
+    // capability manifest lists, so bounded-with-no-manifest fails every call
+    // closed. Set both CUA_DRIVER_PERMISSION_MODE=bounded and
+    // CUA_CAPABILITY_MANIFEST_FILE together (docs/VIRTUAL-COMPUTER.md D6 — the
+    // manifest is a follow-up, required before any shared deployment).
+    driverPermissionMode: optional("CUA_DRIVER_PERMISSION_MODE", "standard"),
+    capabilityManifestFile: optionalValue("CUA_CAPABILITY_MANIFEST_FILE"),
+    // Opt-in container hardening. `--cap-drop ALL --security-opt
+    // no-new-privileges` is untested against the full XFCE image and can break
+    // a sudo/gosu privilege-drop entrypoint; off until verified on first run.
+    harden: optional("CUA_HARDEN", "false") === "true",
+    // TODO(spike): unverified against the pinned driver in the image. The 0.15
+    // action catalog names full-display capture `get_desktop_state`; older
+    // LINUX.md still says `screenshot`. Override once confirmed.
+    captureTool: optional("CUA_CAPTURE_TOOL", "get_desktop_state"),
+    startTimeoutMs: positiveInt("CUA_START_TIMEOUT_MS", 90_000, 300_000),
+  },
   handoff: {
     transport: handoffTransport as "jpeg" | "webrtc-preferred",
     maxConnections: positiveInt("MAX_HANDOFF_CONNECTIONS", 16, 256),
@@ -152,4 +180,5 @@ export const CAPS = {
   maxWriteExecs: 10,
   approvalTimeoutMs: 120_000,
   browserActionTimeoutMs: 30_000,
+  computerActionTimeoutMs: 30_000,
 } as const;
