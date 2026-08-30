@@ -64,7 +64,12 @@ const arkModels: {
   },
 ];
 
-export const DEFAULT_MODEL: AgentModel = "gpt-5.6-sol";
+// Prefer BytePlus Ark's DeepSeek V4 Pro as the default when it's configured
+// (independent of the Azure GPT-5.6 deployments, which have had outages);
+// fall back to the Azure default on installs without ARK_API_KEY set.
+export const DEFAULT_MODEL: AgentModel = config.byteplus.apiKey
+  ? "deepseek-v4-pro-byteplus"
+  : "gpt-5.6-sol";
 
 /** Public ids that have a provider configured on this service. */
 export const availableModels = (): AgentModel[] => {

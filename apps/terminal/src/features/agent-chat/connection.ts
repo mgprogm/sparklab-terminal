@@ -105,6 +105,17 @@ export class AgentConnection {
         )
           return;
         this.deliveredSeq = frame.seq;
+        // Browser-handoff control frames (ready/state) are broadcast through
+        // the same seq-tracked agent_event envelope as every other frame, so
+        // they must be re-checked here too — not just at the top level below,
+        // which only ever sees an already-unwrapped frame in practice.
+        const innerHandoff = BrowserHandoffControlFrameSchema.safeParse(
+          event.data,
+        );
+        if (innerHandoff.success) {
+          this.callbacks.onHandoffFrame?.(innerHandoff.data);
+          return;
+        }
         this.callbacks.onFrame(event.data);
         return;
       }
