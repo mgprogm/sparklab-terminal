@@ -337,6 +337,15 @@ type BrowserHandoffState = {
 never passed into chat entries, tool rows, browser snapshots, or persisted
 state.
 
+Both frames are broadcast over the same `/agent` socket as every other server
+frame, and run-recovery (`AgentRunManager.publish`) wraps every outbound frame
+in a seq-tracked `{type:"agent_event", seq, frame}` envelope for replay. A
+client must check **both** the raw top-level message and the unwrapped
+`agent_event.frame` against the handoff control schema before falling through
+to the generic frame handler — checking only one shipped a regression where
+"Take control" silently did nothing (see incident log in
+[`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md)).
+
 ## User Interface
 
 Extend the browser overlay with:
