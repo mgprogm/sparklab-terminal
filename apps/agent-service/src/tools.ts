@@ -1464,7 +1464,7 @@ if (config.cua.enabled) {
       function: {
         name: "computer_act",
         description:
-          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. Prefer targeting by element_index + snapshot_id from the latest observation; fall back to window_id + x,y (window-local pixels) only when no element matches. Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
+          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. Target by screen-absolute x,y from the latest screenshot (element_index + snapshot_id targeting is not available in v1). Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
         parameters: {
           type: "object",
           properties: {
@@ -1641,8 +1641,8 @@ export function describeCall(tool: string, args: ToolArgs): string {
       const where =
         typeof args.element_index === "number"
           ? `element ${args.element_index}`
-          : args.window_id
-            ? `window ${args.window_id} @ ${args.x ?? "?"},${args.y ?? "?"}`
+          : typeof args.x === "number" && typeof args.y === "number"
+            ? `@ ${args.x},${args.y}`
             : "target ?";
       if (args.kind === "type_text")
         return `type into computer ${where}: [redacted]`;

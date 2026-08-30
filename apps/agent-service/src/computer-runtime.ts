@@ -2,17 +2,27 @@
  * One isolated disposable Linux desktop, owned by one AgentLoop — the desktop
  * counterpart of `browser-runtime.ts`. See docs/VIRTUAL-COMPUTER.md.
  *
- * v1 (this spike): a per-chat Docker container built from the CUA desktop image
- * (`trycua/xfce-cua`), with `cua-driver mcp --direct` running inside it and
- * reached over stdio via `docker exec -i`. The MCP framing, lifecycle, and
- * teardown are the verifiable parts; the two places where the driver's on-wire
- * shape is still unconfirmed (the full-display capture tool name, and the
- * `get_accessibility_tree` field names) are marked TODO(spike) and parsed
- * tolerantly.
+ * v1: a per-chat Docker container from the CUA desktop image
+ * (`sparklab/cua-desktop:0.22.2`, built from test/cua-real/Dockerfile over
+ * `trycua/xfce-cua`), with `cua-driver mcp --direct` running inside it as user
+ * `cua` on `DISPLAY=:1`, reached over stdio via `docker exec -i`.
  *
- * Everything container-specific lives behind `spawnDocker` / the two private
- * `docker*` helpers so the tool layer and the frontend stay backend-agnostic
- * and a later VM/cloud backend is a swap behind `observe()` / `act()` / `stop()`.
+ * Verified against cua-driver 0.22.2 (test:computer-e2e CUA_E2E_REAL=1):
+ *   - start: `docker run` → poll noVNC for X readiness → `docker exec` the
+ *     driver → MCP `initialize`.
+ *   - observe: `get_desktop_state({screenshot_out_file})` writes the PNG to a
+ *     container path (no inline base64 for the desktop); the bytes are pulled
+ *     back with `docker exec … base64 -w0` and the file deleted. Screen dims
+ *     come from that response (fallback `get_screen_size`). `list_windows`
+ *     gives the model a window inventory.
+ *   - act: pixel targets use `scope:"desktop"` screen coordinates with
+ *     `delivery_mode:"background"` (XTEST / XInput2 master pointer, no focus
+ *     steal). Per-window element indexing (get_window_state → elements[] +
+ *     snapshot_id) is a P1 refinement and not wired here.
+ *
+ * Everything container-specific lives behind the private `docker*` helpers so
+ * the tool layer and the frontend stay backend-agnostic and a later VM/cloud
+ * backend is a swap behind `observe()` / `act()` / `stop()`.
  */
 import {
   spawn as nodeSpawn,
@@ -57,7 +67,9 @@ export interface ComputerSnapshot {
 
 export type ComputerTarget =
   | { elementIndex: number; snapshotId: string }
-  | { windowId: string; x: number; y: number };
+  // v1: screen-absolute point (desktop scope). `windowId` is reserved for the
+  // P1 per-window element path and currently ignored.
+  | { x: number; y: number; windowId?: string };
 
 export type ComputerAction =
   | { kind: "click"; target: ComputerTarget }
@@ -91,16 +103,13 @@ const MAX_ELEMENT_NAME = 200;
 const START_ATTEMPTS = 8;
 const ORPHAN_LABEL = "sparklab-cua";
 
-/** cua-driver desktop-input family (docs/action-icon-catalog.md). */
+/** cua-driver desktop-input family (verified against 0.22.2). */
 const ACTION_TOOL: Record<ComputerAction["kind"], string> = {
   click: "click",
   type_text: "type_text",
   press_key: "press_key",
   scroll: "scroll",
 };
-// TODO(spike): confirm against the pinned driver. 0.15 catalog says
-// `get_accessibility_tree`; the response field names below are best-effort.
-const AX_TREE_TOOL = "get_accessibility_tree";
 
 export class ComputerRuntime {
   readonly computerId = randomUUID();
@@ -178,59 +187,93 @@ export class ComputerRuntime {
   }
 
   async observe(signal?: AbortSignal): Promise<ComputerObserveResult> {
-    const captureContent = await this.call(
-      config.cua.captureTool,
-      { include_screenshot: true },
+    // 0.22.2: get_desktop_state writes the PNG to a file INSIDE the container
+    // (no inline base64 for the desktop) and returns its screen dimensions.
+    const shotPath = `${config.cua.screenshotDir.replace(/\/+$/, "")}/cua-${randomUUID()}.png`;
+    const capture = await this.call(
+      "get_desktop_state",
+      { screenshot_out_file: shotPath },
       signal,
     );
-    let elements: IndexedElement[] = [];
-    let driverSnapshotId = "";
-    try {
-      const axContent = await this.call(AX_TREE_TOOL, {}, signal);
-      const parsed = parseAxTree(extractText(axContent));
-      elements = parsed.elements;
-      driverSnapshotId = parsed.snapshotId;
-    } catch {
-      // AX tree is best-effort in the spike; a capture-only observation still
-      // lets the model fall back to window+pixel targeting.
-    }
-    const snapshotId = driverSnapshotId || `snap-${++this.snapshotSeq}`;
-    this.lastSnapshotId = snapshotId;
-    this.lastElements.clear();
-    for (const el of elements.slice(0, MAX_ELEMENTS)) {
-      this.lastElements.set(el.index, el);
-    }
-    // The capture response's screen dimensions are an unverified shape
-    // (TODO(spike)). If they don't parse, ask the driver explicitly rather
-    // than dropping the whole snapshot — a missing frame means no overlay at
-    // all while the tool still reports success.
-    let fallbackViewport: { width: unknown; height: unknown } | undefined;
-    if (!parseViewport(extractText(captureContent))) {
+    const meta = asRecord(pickStructured(capture)) ?? {};
+    let width = boundedDimension(meta.screen_width ?? meta.screenshot_width);
+    let height = boundedDimension(meta.screen_height ?? meta.screenshot_height);
+    if (!width || !height) {
       try {
-        fallbackViewport = parseViewport(
-          extractText(await this.call("get_screen_size", {}, signal)),
-        );
+        const size =
+          asRecord(
+            pickStructured(await this.call("get_screen_size", {}, signal)),
+          ) ?? {};
+        width = boundedDimension(size.width);
+        height = boundedDimension(size.height);
       } catch {
-        // leave undefined; buildSnapshot then returns undefined
+        // leave 0/0 — no snapshot, text-only observation
       }
     }
-    const snapshot = this.buildSnapshot(
-      captureContent,
-      "observed",
-      fallbackViewport,
-    );
-    const elementText = JSON.stringify([...this.lastElements.values()]);
-    this.counters.elementBytes = Buffer.byteLength(elementText);
+
+    let data = "";
+    try {
+      data = await this.readContainerFileBase64(shotPath);
+    } catch {
+      // no bytes → no overlay frame this turn
+    } finally {
+      void this.execInContainer(["rm", "-f", shotPath]).catch(() => undefined);
+    }
+
+    // Window inventory for the model. Per-window element indexing
+    // (get_window_state → elements[] + snapshot_id) is a P1 refinement; v1
+    // targets by desktop x,y.
+    let windowsText = "windows unavailable";
+    try {
+      const wins = asRecord(
+        pickStructured(await this.call("list_windows", {}, signal)),
+      );
+      const list = Array.isArray(wins?.windows) ? wins.windows : [];
+      windowsText = `windows ${JSON.stringify(
+        list.slice(0, MAX_ELEMENTS).map(summarizeWindow),
+      )}`;
+    } catch {
+      // keep default
+    }
+
+    const snapshotId = `snap-${++this.snapshotSeq}`;
+    this.lastSnapshotId = snapshotId;
+    this.lastElements.clear();
+
+    let snapshot: ComputerSnapshot | undefined;
+    const bytes = data ? Buffer.byteLength(data, "base64") : 0;
+    if (data && bytes > 0 && bytes <= MAX_SCREENSHOT_BYTES && width && height) {
+      this.counters.screenshotBytes = bytes;
+      snapshot = {
+        computerId: this.computerId,
+        revision: ++this.revision,
+        viewport: { width, height },
+        screenshot: { mediaType: "image/png", data },
+        status: "observed",
+      };
+    }
     const lines = [
       snapshot
-        ? `viewport ${snapshot.viewport.width}x${snapshot.viewport.height}`
-        : "viewport unknown (no bounded screenshot)",
+        ? `viewport ${width}x${height}`
+        : `viewport ${width || "?"}x${height || "?"} (no screenshot bytes)`,
       `snapshotId ${snapshotId}`,
-      this.lastElements.size
-        ? `elements ${elementText}`
-        : "elements [] (accessibility tree unavailable; use window+pixel targeting)",
+      windowsText,
+      "elements [] (per-window element indexing not wired in v1 — target by desktop x,y)",
     ];
     return { content: lines.join("\n"), snapshot, snapshotId };
+  }
+
+  private execInContainer(cmd: string[]): Promise<string> {
+    if (!this.containerName)
+      return Promise.reject(new Error("computer runtime has no container"));
+    return this.dockerCapture(["exec", this.containerName, ...cmd]);
+  }
+
+  private async readContainerFileBase64(path: string): Promise<string> {
+    const out = await this.execInContainer(["base64", "-w0", path]);
+    const b64 = out.replace(/\s+/g, "");
+    if (!b64) throw new Error("empty screenshot file");
+    return b64;
   }
 
   async act(
@@ -362,10 +405,13 @@ export class ComputerRuntime {
     this.containerName = name;
     this.assertOpen();
 
-    // TODO(spike): replace this retry loop with a real X-server / driver
-    // readiness probe once the trycua/xfce-cua startup signal is confirmed.
-    // For now: attempt the MCP handshake a few times while the container's
-    // supervisor brings up Xvnc + the driver.
+    // The desktop image's supervisor brings up Xtigervnc + XFCE + noVNC
+    // asynchronously. The driver connects to X at startup and fails closed if
+    // the display isn't listening yet, so wait for X BEFORE spawning it. The
+    // image's own HEALTHCHECK polls the same noVNC endpoint.
+    await this.waitForXReady(name, config.cua.startTimeoutMs);
+    this.assertOpen();
+
     let lastError: unknown;
     for (let attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
       this.assertOpen();
@@ -377,36 +423,72 @@ export class ComputerRuntime {
       } catch (error) {
         lastError = error;
         await this.teardownChild();
-        await delay(
-          Math.min(3_000, config.cua.startTimeoutMs / START_ATTEMPTS),
-        );
+        await delay(1_000);
       }
     }
     this.counters.startMs = Date.now() - startedAt;
     throw new Error(`cua-driver did not become ready: ${errMsg(lastError)}`);
   }
 
+  private async waitForXReady(
+    container: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    // A stub `docker` returns exit 0 for any `exec`, so this resolves on the
+    // first probe under test; against a real image it polls until noVNC (and
+    // therefore Xvnc) is up.
+    const deadline = Date.now() + timeoutMs;
+    let lastErr = "";
+    while (Date.now() < deadline) {
+      this.assertOpen();
+      try {
+        await this.dockerCapture([
+          "exec",
+          container,
+          "sh",
+          "-lc",
+          `curl -fsS http://127.0.0.1:${config.cua.novncPort}/vnc.html >/dev/null`,
+        ]);
+        return;
+      } catch (error) {
+        lastErr = errMsg(error);
+        await delay(2_000);
+      }
+    }
+    throw new Error(`X session not ready after ${timeoutMs}ms: ${lastErr}`);
+  }
+
   private async spawnDriverAndHandshake(container: string): Promise<void> {
     const spawnFn = this.opts.spawn ?? nodeSpawn;
-    const child = spawnFn(
-      config.cua.dockerBin,
-      ["exec", "-i", container, "cua-driver", "mcp", "--direct"],
-      {
-        env: {
-          ...process.env,
-          CUA_DRIVER_PERMISSION_MODE: config.cua.driverPermissionMode,
-          ...(config.cua.capabilityManifestFile
-            ? {
-                CUA_DRIVER_CAPABILITY_MANIFEST_FILE:
-                  config.cua.capabilityManifestFile,
-                CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED: "1",
-              }
-            : {}),
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-        detached: true,
-      },
-    ) as ChildProcessWithoutNullStreams;
+    // `docker exec` does NOT forward the host env into the container, so the
+    // driver's config must ride explicit `-e` flags, not the child's env.
+    const execArgs = [
+      "exec",
+      "-i",
+      ...(config.cua.driverUser ? ["-u", config.cua.driverUser] : []),
+      "-e",
+      `HOME=${config.cua.driverHome}`,
+      "-e",
+      `DISPLAY=${config.cua.display}`,
+      "-e",
+      `CUA_DRIVER_PERMISSION_MODE=${config.cua.driverPermissionMode}`,
+      ...(config.cua.capabilityManifestFile
+        ? [
+            "-e",
+            `CUA_DRIVER_CAPABILITY_MANIFEST_FILE=${config.cua.capabilityManifestFile}`,
+            "-e",
+            "CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED=1",
+          ]
+        : []),
+      container,
+      config.cua.driverCmd,
+      "mcp",
+      "--direct",
+    ];
+    const child = spawnFn(config.cua.dockerBin, execArgs, {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
+    }) as ChildProcessWithoutNullStreams;
     this.child = child;
     child.once("error", (error) => this.rejectPending(error));
     child.once("exit", (code, signalName) => {
@@ -576,66 +658,67 @@ export class ComputerRuntime {
       });
     });
   }
-
-  // ---- snapshot assembly ------------------------------------------------
-
-  private buildSnapshot(
-    content: McpContent[],
-    status: string,
-    fallbackViewport?: { width: unknown; height: unknown },
-  ): ComputerSnapshot | undefined {
-    const image = content.find(
-      (item) => item.type === "image" && item.data && item.mimeType,
-    );
-    if (!image?.data || !image.mimeType) return undefined;
-    const mediaType =
-      image.mimeType === "image/webp" ? "image/webp" : "image/png";
-    const bytes = Buffer.byteLength(image.data, "base64");
-    if (bytes <= 0 || bytes > MAX_SCREENSHOT_BYTES) return undefined;
-    const dims = parseViewport(extractText(content)) ??
-      fallbackViewport ?? { width: 0, height: 0 };
-    const width = boundedDimension(dims.width);
-    const height = boundedDimension(dims.height);
-    // A capture without parseable dimensions still ships as a 1x1-bounded
-    // snapshot? No — the overlay needs real dims for aspect ratio. But we
-    // must not silently drop the frame: observe() resolves this by falling
-    // back to get_screen_size before calling here.
-    if (!width || !height) return undefined;
-    this.counters.screenshotBytes = bytes;
-    return {
-      computerId: this.computerId,
-      revision: ++this.revision,
-      viewport: { width, height },
-      screenshot: { mediaType, data: image.data },
-      status,
-    };
-  }
 }
 
 // ---- pure helpers (unit-tested) -----------------------------------------
 
+/**
+ * Map a structured ComputerAction to 0.22.2 driver-tool arguments.
+ * v1 pixel targeting is desktop-scope (`scope:"desktop"`, screen-absolute
+ * x,y); background delivery is via XTEST / XInput2 master pointer (no focus
+ * steal — verified against 0.22.2). Element-index targeting
+ * (element_index + snapshot_id from get_window_state) is passed through for
+ * the P1 path but not produced by observe() yet.
+ */
 export function driverArgs(action: ComputerAction): Record<string, unknown> {
-  const target = action.target;
-  const base =
-    "elementIndex" in target
-      ? { element_index: target.elementIndex, snapshot_id: target.snapshotId }
-      : { window_id: target.windowId, x: target.x, y: target.y };
+  const t = action.target;
+  const byElement = "elementIndex" in t;
+  const point = byElement
+    ? { element_index: t.elementIndex, snapshot_id: t.snapshotId }
+    : { scope: "desktop", x: t.x, y: t.y };
+  const focusScope = byElement
+    ? { element_index: t.elementIndex, snapshot_id: t.snapshotId }
+    : { scope: "desktop" };
   const delivery = { delivery_mode: "background" as const };
   switch (action.kind) {
     case "click":
-      return { ...base, ...delivery };
+      return { ...point, ...delivery };
     case "type_text":
-      return { ...base, ...delivery, text: action.text };
+      // Desktop-scope typing lands in the focused app; no x,y.
+      return { ...focusScope, ...delivery, text: action.text };
     case "press_key":
-      return { ...base, ...delivery, key: action.key };
+      return { ...focusScope, ...delivery, key: action.key };
     case "scroll":
       return {
-        ...base,
+        ...point,
         ...delivery,
         direction: action.direction,
-        unit: action.amount ?? "line",
+        by: action.amount ?? "line",
       };
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function summarizeWindow(value: unknown): unknown {
+  const w = asRecord(value) ?? {};
+  return {
+    window_id: w.window_id,
+    pid: w.pid,
+    title:
+      typeof w.title === "string"
+        ? w.title.slice(0, MAX_ELEMENT_NAME)
+        : w.title,
+    app: w.app_name,
+    x: w.x,
+    y: w.y,
+    width: w.width,
+    height: w.height,
+  };
 }
 
 export function summarizeActionResult(result: unknown): string {
@@ -759,7 +842,7 @@ function extractText(content: McpContent[]): string {
 function describeTarget(target: ComputerTarget): string {
   return "elementIndex" in target
     ? `element ${target.elementIndex}`
-    : `window ${target.windowId} @ ${target.x},${target.y}`;
+    : `desktop @ ${target.x},${target.y}`;
 }
 
 function boundedDimension(value: unknown): number {

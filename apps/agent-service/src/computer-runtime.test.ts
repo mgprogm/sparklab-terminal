@@ -17,7 +17,7 @@ const {
 
 // ---- pure helpers -------------------------------------------------------
 
-test("driverArgs fixes background delivery and maps targets", () => {
+test("driverArgs fixes background delivery and maps targets (0.22.2)", () => {
   const byElement = driverArgs({
     kind: "click",
     target: { elementIndex: 3, snapshotId: "snap-1" },
@@ -26,25 +26,31 @@ test("driverArgs fixes background delivery and maps targets", () => {
   assert.equal(byElement.element_index, 3);
   assert.equal(byElement.snapshot_id, "snap-1");
 
-  const byPixel = driverArgs({
+  // Pixel click → desktop-scope screen coordinates.
+  const pixelClick = driverArgs({ kind: "click", target: { x: 10, y: 20 } });
+  assert.equal(pixelClick.delivery_mode, "background");
+  assert.deepEqual(
+    { scope: pixelClick.scope, x: pixelClick.x, y: pixelClick.y },
+    { scope: "desktop", x: 10, y: 20 },
+  );
+
+  // Pixel type_text → desktop scope, focused app, no x/y.
+  const pixelType = driverArgs({
     kind: "type_text",
-    target: { windowId: "w1", x: 10, y: 20 },
+    target: { x: 10, y: 20 },
     text: "hello",
   });
-  assert.equal(byPixel.delivery_mode, "background");
-  assert.deepEqual(
-    { window_id: byPixel.window_id, x: byPixel.x, y: byPixel.y },
-    { window_id: "w1", x: 10, y: 20 },
-  );
-  assert.equal(byPixel.text, "hello");
+  assert.equal(pixelType.scope, "desktop");
+  assert.equal(pixelType.text, "hello");
+  assert.equal(pixelType.x, undefined);
 
   const scroll = driverArgs({
     kind: "scroll",
-    target: { elementIndex: 0, snapshotId: "s" },
+    target: { x: 5, y: 5 },
     direction: "down",
   });
   assert.equal(scroll.direction, "down");
-  assert.equal(scroll.unit, "line");
+  assert.equal(scroll.by, "line");
 });
 
 test("summarizeActionResult surfaces effect, route, delivery, and refusal reason", () => {
@@ -109,12 +115,17 @@ test("parseViewport reads nested or flat width/height", () => {
 });
 
 // ---- lifecycle with an injected spawn seam ----------------------------
+// Fakes the 0.22.2 contract: get_desktop_state writes a PNG to a container
+// file and returns screen dims; the runtime pulls the bytes with
+// `docker exec … base64`.
+
+const FAKE_PNG_B64 = Buffer.from("fake-png").toString("base64");
 
 class FakeChild extends EventEmitter {
   pid = 4321;
   exitCode: number | null = null;
   signalCode: string | null = null;
-  captureCarriesViewport = true;
+  captureCarriesDims = true;
   stdout = new EventEmitter();
   stderr = new EventEmitter();
   written: string[] = [];
@@ -144,60 +155,67 @@ class FakeChild extends EventEmitter {
       if (typeof msg.id !== "number") continue;
       if (msg.method === "initialize") {
         this.#emit({ id: msg.id, result: { protocolVersion: "2025-06-18" } });
-      } else if (msg.method === "tools/call") {
-        const name = msg.params?.name as string;
-        if (name === "get_accessibility_tree") {
-          this.#emit({
-            id: msg.id,
-            result: {
-              content: [
+        continue;
+      }
+      if (msg.method !== "tools/call") continue;
+      const name = msg.params?.name as string;
+      const path = msg.params?.arguments?.screenshot_out_file ?? "/tmp/x.png";
+      if (name === "get_desktop_state") {
+        this.#emit({
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: `written to ${path}` }],
+            structuredContent: this.captureCarriesDims
+              ? {
+                  screen_width: 1024,
+                  screen_height: 768,
+                  screenshot_file_path: path,
+                  screenshot_mime_type: "image/png",
+                }
+              : { screenshot_file_path: path },
+          },
+        });
+      } else if (name === "list_windows") {
+        this.#emit({
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: "1 window" }],
+            structuredContent: {
+              windows: [
                 {
-                  type: "text",
-                  text: JSON.stringify({
-                    snapshot_id: "drv-1",
-                    elements: [{ index: 0, role: "button", name: "Go" }],
-                  }),
+                  window_id: 9,
+                  pid: 1,
+                  title: "term",
+                  app_name: "X",
+                  x: 0,
+                  y: 0,
+                  width: 100,
+                  height: 20,
                 },
               ],
             },
-          });
-        } else if (name === "get_screen_size") {
-          this.#emit({
-            id: msg.id,
-            result: {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ width: 1280, height: 800 }),
-                },
-              ],
+          },
+        });
+      } else if (name === "get_screen_size") {
+        this.#emit({
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: "1280x800" }],
+            structuredContent: { width: 1280, height: 800, scale_factor: 1 },
+          },
+        });
+      } else {
+        this.#emit({
+          id: msg.id,
+          result: {
+            content: [],
+            structuredContent: {
+              effect: "confirmed",
+              route: "accessibility",
+              delivery: { mode: "background" },
             },
-          });
-        } else {
-          // capture tool
-          this.#emit({
-            id: msg.id,
-            result: {
-              content: [
-                ...(this.captureCarriesViewport
-                  ? [
-                      {
-                        type: "text",
-                        text: JSON.stringify({
-                          viewport: { width: 1024, height: 768 },
-                        }),
-                      },
-                    ]
-                  : []),
-                {
-                  type: "image",
-                  mimeType: "image/png",
-                  data: Buffer.from("fake-png").toString("base64"),
-                },
-              ],
-            },
-          });
-        }
+          },
+        });
       }
     }
   }
@@ -206,39 +224,62 @@ class FakeChild extends EventEmitter {
   }
 }
 
-function fakeSpawn(opts: { captureCarriesViewport?: boolean } = {}) {
+function fakeSpawn(opts: { captureCarriesDims?: boolean } = {}) {
   const children: FakeChild[] = [];
   const spawn = ((_bin: string, args: string[]) => {
     const child = new FakeChild();
-    if (opts.captureCarriesViewport === false)
-      child.captureCarriesViewport = false;
+    child.captureCarriesDims = opts.captureCarriesDims !== false;
     children.push(child);
-    if (args[0] === "run") {
+    const a = args;
+    if (a[0] === "run") {
       queueMicrotask(() => {
         child.stdout.emit("data", Buffer.from("container-abc123\n"));
         child.emit("exit", 0, null);
       });
-    }
-    if (args[0] === "rm") {
+    } else if (a[0] === "rm" || a[0] === "ps") {
       queueMicrotask(() => child.emit("exit", 0, null));
+    } else if (a[0] === "exec") {
+      let i = 1;
+      while (i < a.length) {
+        if (a[i] === "-i") i += 1;
+        else if (a[i] === "-u" || a[i] === "-e") i += 2;
+        else break;
+      }
+      const cmd = a[i + 1];
+      if (cmd === "base64") {
+        queueMicrotask(() => {
+          child.stdout.emit("data", Buffer.from(FAKE_PNG_B64));
+          child.emit("exit", 0, null);
+        });
+      } else if (cmd === "rm" || cmd === "sh") {
+        // "sh" = the waitForXReady probe; always "ready" under test.
+        queueMicrotask(() => child.emit("exit", 0, null));
+      }
+      // cmd === "cua-driver" → the long-lived MCP child, driven via stdin
     }
     return child;
   }) as unknown as typeof import("node:child_process").spawn;
   return { spawn, children };
 }
 
-test("observe() starts a container, handshakes, and returns a bounded snapshot", async () => {
+test("observe() starts a container, handshakes, pulls a bounded snapshot", async () => {
   const { spawn, children } = fakeSpawn();
   const rt = new ComputerRuntime(undefined, { label: "chat-1", spawn });
 
   const result = await rt.observe();
 
   assert.match(result.content, /viewport 1024x768/);
-  assert.equal(result.snapshotId, "drv-1");
+  assert.match(result.snapshotId, /^snap-\d+$/);
+  assert.match(
+    result.content,
+    /"title":"term"/,
+    "window inventory is included",
+  );
   assert.ok(result.snapshot, "a snapshot is produced");
   assert.equal(result.snapshot?.computerId, rt.computerId);
   assert.equal(result.snapshot?.viewport.width, 1024);
   assert.equal(result.snapshot?.screenshot.mediaType, "image/png");
+  assert.equal(result.snapshot?.screenshot.data, FAKE_PNG_B64);
   assert.ok((result.snapshot?.revision ?? 0) > 0);
 
   assert.ok(children[0], "a docker child was spawned");
@@ -248,8 +289,8 @@ test("observe() starts a container, handshakes, and returns a bounded snapshot",
   assert.equal(rt.isClosed, true);
 });
 
-test("observe() falls back to get_screen_size when the capture carries no viewport", async () => {
-  const { spawn } = fakeSpawn({ captureCarriesViewport: false });
+test("observe() falls back to get_screen_size when the capture carries no dims", async () => {
+  const { spawn } = fakeSpawn({ captureCarriesDims: false });
   const rt = new ComputerRuntime(undefined, { label: "chat-vp", spawn });
 
   const result = await rt.observe();

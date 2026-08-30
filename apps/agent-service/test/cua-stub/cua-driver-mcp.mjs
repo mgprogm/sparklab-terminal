@@ -14,42 +14,54 @@ function send(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
-function toolResult(id, name) {
-  if (name === "get_desktop_state" || name === "screenshot") {
+function toolResult(id, name, args) {
+  if (name === "get_desktop_state") {
+    // 0.22.2: writes the PNG to a container file, returns dims + the path.
+    const path = (args && args.screenshot_out_file) || "/tmp/cua-stub-shot.png";
     return {
       id,
       result: {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ viewport: { width: 800, height: 600 } }),
+            text: `Desktop screenshot 800x600 written to ${path}`,
           },
-          { type: "image", mimeType: "image/png", data: PNG_1X1 },
         ],
+        structuredContent: {
+          display: "primary",
+          platform: "linux",
+          scale_factor: 1,
+          screen_width: 800,
+          screen_height: 600,
+          screenshot_file_path: path,
+          screenshot_mime_type: "image/png",
+          screenshot_width: 800,
+          screenshot_height: 600,
+        },
       },
     };
   }
-  if (name === "get_accessibility_tree") {
+  if (name === "list_windows") {
     return {
       id,
       result: {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              snapshot_id: "drv-e2e-1",
-              elements: [
-                {
-                  index: 0,
-                  role: "button",
-                  name: "OK",
-                  bounds: { x: 10, y: 20, width: 60, height: 24 },
-                },
-                { index: 1, role: "field", name: "Name" },
-              ],
-            }),
-          },
-        ],
+        content: [{ type: "text", text: "Found 1 window" }],
+        structuredContent: {
+          windows: [
+            {
+              window_id: 111,
+              pid: 77,
+              title: "xfce4-panel",
+              app_name: "Xfce4-panel",
+              x: 0,
+              y: 0,
+              width: 800,
+              height: 27,
+              is_on_screen: true,
+              z_index: 1,
+            },
+          ],
+        },
       },
     };
   }
@@ -57,9 +69,8 @@ function toolResult(id, name) {
     return {
       id,
       result: {
-        content: [
-          { type: "text", text: JSON.stringify({ width: 800, height: 600 }) },
-        ],
+        content: [{ type: "text", text: "Main display: 800x600 points @ 1x" }],
+        structuredContent: { width: 800, height: 600, scale_factor: 1 },
       },
     };
   }
@@ -114,7 +125,7 @@ rl.on("line", (line) => {
     return;
   }
   if (msg.method === "tools/call") {
-    send(toolResult(msg.id, msg.params?.name));
+    send(toolResult(msg.id, msg.params?.name, msg.params?.arguments));
     return;
   }
   send({ id: msg.id, result: { content: [], isError: true } });

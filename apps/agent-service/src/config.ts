@@ -137,6 +137,13 @@ export const config = {
     enabled: optional("CUA_ENABLED", "false") === "true",
     dockerBin: optional("CUA_DOCKER_BIN", "docker"),
     image: optional("CUA_IMAGE", "trycua/xfce-cua:latest"),
+    // The CUA desktop image runs XFCE as an unprivileged user on an Xvnc
+    // display; the driver must join that session. `docker exec` gets
+    // `-u <driverUser>` (when set) plus `-e HOME` / `-e DISPLAY`.
+    driverUser: optionalValue("CUA_DRIVER_USER"), // e.g. "cua"; empty = image default
+    driverHome: optional("CUA_DRIVER_HOME", "/home/cua"),
+    display: optional("CUA_DISPLAY", ":1"),
+    driverCmd: optional("CUA_DRIVER_CMD", "cua-driver"), // or an absolute path
     // Isolated docker network whose only egress route is the agent-service
     // proxy (enforced at the network layer, not via app proxy env). Empty =
     // spike default network; MUST be set for any shared deployment.
@@ -152,10 +159,12 @@ export const config = {
     // no-new-privileges` is untested against the full XFCE image and can break
     // a sudo/gosu privilege-drop entrypoint; off until verified on first run.
     harden: optional("CUA_HARDEN", "false") === "true",
-    // TODO(spike): unverified against the pinned driver in the image. The 0.15
-    // action catalog names full-display capture `get_desktop_state`; older
-    // LINUX.md still says `screenshot`. Override once confirmed.
-    captureTool: optional("CUA_CAPTURE_TOOL", "get_desktop_state"),
+    // In-container directory get_desktop_state writes screenshots to before the
+    // runtime pulls the bytes out with `docker exec … base64` and deletes them.
+    screenshotDir: optional("CUA_SCREENSHOT_DIR", "/tmp"),
+    // noVNC port inside the desktop image — polled for X-session readiness
+    // before the driver is spawned (trycua/xfce-cua default 6901).
+    novncPort: positiveInt("CUA_NOVNC_PORT", 6901, 65_535),
     startTimeoutMs: positiveInt("CUA_START_TIMEOUT_MS", 90_000, 300_000),
   },
   handoff: {

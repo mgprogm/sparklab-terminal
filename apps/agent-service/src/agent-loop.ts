@@ -736,20 +736,22 @@ function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
     };
   }
   if (
-    typeof args.window_id === "string" &&
-    args.window_id.length > 0 &&
     Number.isInteger(args.x) &&
     (args.x ?? -1) >= 0 &&
     Number.isInteger(args.y) &&
     (args.y ?? -1) >= 0
   ) {
+    // v1: screen-absolute point (desktop scope). window_id is accepted but
+    // currently ignored (reserved for the P1 per-window element path).
     return {
-      windowId: args.window_id,
       x: args.x as number,
       y: args.y as number,
+      ...(typeof args.window_id === "string" && args.window_id.length > 0
+        ? { windowId: args.window_id }
+        : {}),
     };
   }
-  return "target requires element_index + snapshot_id (from computer_observe), or window_id + x + y";
+  return "target requires element_index + snapshot_id (from computer_observe), or screen x + y";
 }
 
 function parseComputerAction(args: ToolArgs): ComputerAction | string {

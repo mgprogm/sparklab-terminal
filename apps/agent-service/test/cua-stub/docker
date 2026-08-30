@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 /**
- * Stub `docker` for the Virtual Computer end-to-end test. Emulates just the
- * four invocations ComputerRuntime makes:
+ * Stub `docker` for the Virtual Computer end-to-end test. Emulates the calls
+ * ComputerRuntime makes:
  *
- *   docker run -d --rm --name <n> --label sparklab-cua=1 ... <image>
- *   docker exec -i <container> cua-driver mcp --direct
- *   docker rm -f <names...>
- *   docker ps -aq --filter label=sparklab-cua
+ *   docker run  -d --rm --name <n> --label sparklab-cua=1 ... <image>
+ *   docker exec -i <c> [-u ...] [-e ...] cua-driver mcp --direct   -> stub MCP
+ *   docker exec <c> base64 -w0 <path>                              -> 1x1 PNG b64
+ *   docker exec <c> rm -f <path>                                   -> ok
+ *   docker rm   -f <names...>
+ *   docker ps   -aq --filter label=sparklab-cua
  *
- * Every call's argv is appended (one JSON array per line) to $CUA_STUB_LOG so
- * the test can assert teardown and orphan-sweep happened.
+ * Every call's argv is appended (one JSON array per line) to $CUA_STUB_LOG.
  */
 import { appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -26,28 +27,53 @@ if (log) {
   }
 }
 
+// A real 1x1 PNG, matching cua-driver-mcp.mjs.
+const PNG_1X1 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg==";
+
 const sub = argv[0];
 
 if (sub === "run") {
-  // A detached container id on stdout, like the real CLI.
   process.stdout.write("ctr_e2e_" + Date.now().toString(36) + "\n");
   process.exit(0);
 }
 
 if (sub === "exec") {
-  // ... <container> cua-driver mcp --direct  -> hand our pipes to the stub MCP.
-  const here = dirname(fileURLToPath(import.meta.url));
-  const mcp = join(here, "cua-driver-mcp.mjs");
-  const res = spawnSync(process.execPath, [mcp], { stdio: "inherit" });
-  process.exit(res.status ?? 0);
+  // Strip `exec` + any `-i` / `-u X` / `-e X` flags to find the command.
+  let i = 1;
+  while (i < argv.length) {
+    if (argv[i] === "-i") i += 1;
+    else if (argv[i] === "-u" || argv[i] === "-e") i += 2;
+    else break;
+  }
+  const container = argv[i]; // eslint-disable-line no-unused-vars
+  const cmd = argv[i + 1];
+  const rest = argv.slice(i + 2);
+
+  if (cmd === "cua-driver") {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const mcp = join(here, "cua-driver-mcp.mjs");
+    const res = spawnSync(process.execPath, [mcp], { stdio: "inherit" });
+    process.exit(res.status ?? 0);
+  }
+  if (cmd === "base64") {
+    // `base64 -w0 <path>` — the runtime pulls the screenshot bytes out.
+    process.stdout.write(PNG_1X1);
+    process.exit(0);
+  }
+  if (cmd === "rm") {
+    void rest;
+    process.exit(0);
+  }
+  if (cmd === "sh") {
+    // waitForXReady probe (`sh -lc "curl … /vnc.html"`) — X is always "ready".
+    process.exit(0);
+  }
+  process.stderr.write(`stub docker exec: unhandled command ${cmd}\n`);
+  process.exit(1);
 }
 
-if (sub === "rm") {
-  process.exit(0);
-}
-
-if (sub === "ps") {
-  // No orphan containers in the test environment.
+if (sub === "rm" || sub === "ps") {
   process.exit(0);
 }
 

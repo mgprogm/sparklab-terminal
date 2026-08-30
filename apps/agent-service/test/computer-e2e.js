@@ -1,21 +1,27 @@
 /**
  * Virtual Computer (CUA) end-to-end test.
  *
- * Drives the REAL `ComputerRuntime` — real `spawn`, real stdio pipes, real
- * newline-delimited JSON-RPC — against a stub `docker` + stub `cua-driver mcp`
- * (test/cua-stub/). A live `trycua/xfce-cua` image is not needed here; this
- * covers the whole path that image would exercise: container start →
- * `docker exec -i` → MCP handshake → observe/act → bounded `computer_view`
- * frame (schema-validated) → teardown → orphan sweep.
+ * Default (stub) mode: drives the REAL `ComputerRuntime` — real `spawn`, real
+ * stdio pipes, real newline-delimited JSON-RPC — against a stub `docker` + stub
+ * `cua-driver mcp` (test/cua-stub/). No image needed.
  *
- * Run:  pnpm --filter @sparklab/agent-service test:computer-e2e
+ *   pnpm --filter @sparklab/agent-service test:computer-e2e
+ *
+ * Real mode (`CUA_E2E_REAL=1`): same runtime, same assertions, but against a
+ * real desktop container. Needs Docker + the image built from
+ * test/cua-real/Dockerfile:
+ *
+ *   docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real
+ *   CUA_E2E_REAL=1 pnpm --filter @sparklab/agent-service test:computer-e2e
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const REAL = !!process.env.CUA_E2E_REAL;
 const here = dirname(fileURLToPath(import.meta.url));
 const stubDir = join(here, "cua-stub");
 const workdir = mkdtempSync(join(tmpdir(), "cua-e2e-"));
@@ -26,10 +32,19 @@ process.env.AZURE_OPENAI_ENDPOINT = "https://test.openai.azure.com";
 process.env.AZURE_OPENAI_API_KEY = "test-key";
 process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 process.env.CUA_ENABLED = "true";
-process.env.CUA_DOCKER_BIN = join(stubDir, "docker");
-process.env.CUA_STUB_LOG = stubLog;
 delete process.env.CUA_HARDEN;
 delete process.env.CUA_EGRESS_NETWORK;
+
+if (REAL) {
+  process.env.CUA_IMAGE ??= "sparklab/cua-desktop:0.22.2";
+  process.env.CUA_DRIVER_USER ??= "cua";
+  process.env.CUA_START_TIMEOUT_MS ??= "180000";
+  process.env.CUA_SCREENSHOT_DIR ??= "/tmp";
+  delete process.env.CUA_DOCKER_BIN; // real docker
+} else {
+  process.env.CUA_DOCKER_BIN = join(stubDir, "docker");
+  process.env.CUA_STUB_LOG = stubLog;
+}
 
 const { ComputerRuntime } = await import("../src/computer-runtime.js");
 const { AgentComputerViewSchema } = await import("@sparklab/shared-types");
@@ -44,7 +59,7 @@ const check = (name, fn) =>
     })
     .catch((error) => {
       results.push([false, name]);
-      console.log(`FAIL  ${name}\n      ${error.message}`);
+      console.log(`FAIL  ${name}\n      ${error.stack || error.message}`);
     });
 
 const readLog = () =>
@@ -53,29 +68,46 @@ const readLog = () =>
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 
+console.log(
+  `mode: ${REAL ? "REAL (" + process.env.CUA_IMAGE + ")" : "stub"}\n`,
+);
+
 const rt = new ComputerRuntime(undefined, { label: "e2e-chat" });
-let observeSnapshotRevision = 0;
+let lastRevision = 0;
 
 try {
   await check(
-    "observe() starts the desktop and returns a bounded snapshot",
+    "observe() starts the desktop and pulls a bounded snapshot",
     async () => {
       const result = await rt.observe();
       assert.ok(result.snapshot, "a snapshot is produced");
       assert.equal(result.snapshot.computerId, rt.computerId);
       assert.ok(result.snapshot.revision > 0);
-      assert.deepEqual(result.snapshot.viewport, { width: 800, height: 600 });
-      assert.equal(result.snapshot.screenshot.mediaType, "image/png");
-      assert.ok(result.snapshot.screenshot.data.length > 0);
-      assert.equal(
-        result.snapshotId,
-        "drv-e2e-1",
-        "driver snapshot_id is threaded through",
+      const { width, height } = result.snapshot.viewport;
+      assert.ok(
+        width > 0 && width <= 4096 && height > 0 && height <= 4096,
+        `viewport ${width}x${height}`,
       );
-      assert.match(result.content, /viewport 800x600/);
-      assert.match(result.content, /snapshotId drv-e2e-1/);
-      assert.match(result.content, /"role":"button"/);
-      observeSnapshotRevision = result.snapshot.revision;
+      assert.equal(result.snapshot.screenshot.mediaType, "image/png");
+      const bytes = Buffer.from(
+        result.snapshot.screenshot.data,
+        "base64",
+      ).length;
+      assert.ok(
+        bytes > (REAL ? 1000 : 0),
+        `screenshot decoded to ${bytes} bytes`,
+      );
+      assert.match(result.snapshotId, /^snap-\d+$/);
+      assert.match(
+        result.content,
+        new RegExp(`snapshotId ${result.snapshotId}`),
+      );
+      assert.match(
+        result.content,
+        /xfce4-panel/,
+        "window inventory is included",
+      );
+      lastRevision = result.snapshot.revision;
     },
   );
 
@@ -83,106 +115,124 @@ try {
     "the emitted computer_view frame validates against the shared schema",
     async () => {
       const result = await rt.observe();
-      const frame = { type: "computer_view", ...result.snapshot };
-      AgentComputerViewSchema.parse(frame); // throws on any contract violation
-      observeSnapshotRevision = result.snapshot.revision;
+      AgentComputerViewSchema.parse({
+        type: "computer_view",
+        ...result.snapshot,
+      });
+      lastRevision = result.snapshot.revision;
     },
   );
 
   await check(
-    "act(click) reaches the driver and relays a confirmed ActionResult",
+    "act(click) reaches the driver and relays an ActionResult (not refused)",
     async () => {
       const result = await rt.act({
         kind: "click",
-        target: { elementIndex: 0, snapshotId: "drv-e2e-1" },
+        target: { x: 100, y: 100 },
       });
-      assert.match(result.content, /effect=confirmed/);
-      assert.match(result.content, /delivery=background/);
       assert.match(
         result.content,
-        /viewport 800x600/,
-        "carries a fresh observation",
+        /effect=(confirmed|partial|unverifiable)/,
+        result.content,
       );
+      assert.doesNotMatch(result.content, /effect=refused/);
       assert.ok(result.snapshot, "a fresh snapshot is published");
-      assert.ok(result.snapshot.revision > observeSnapshotRevision);
+      assert.ok(result.snapshot.revision > lastRevision);
+      lastRevision = result.snapshot.revision;
     },
   );
 
   await check(
     "act() rejects a stale snapshotId locally, without a driver round-trip",
     async () => {
-      const before = readLog().length;
+      const before = REAL ? 0 : readLog().length;
       const result = await rt.act({
         kind: "click",
         target: { elementIndex: 0, snapshotId: "stale" },
       });
       assert.match(result.content, /^error: stale snapshotId/);
-      assert.equal(readLog().length, before, "no new docker/driver activity");
+      if (!REAL)
+        assert.equal(readLog().length, before, "no new docker/driver activity");
     },
   );
 
   await check("act(type_text) never echoes the typed text", async () => {
     const result = await rt.act({
       kind: "type_text",
-      target: { windowId: "w1", x: 5, y: 5 },
+      target: { x: 5, y: 5 },
       text: "sup3r-s3cret",
     });
     assert.match(result.content, /^typed \[redacted\]/);
     assert.doesNotMatch(result.content, /sup3r-s3cret/);
   });
 
-  await check(
-    "stop() tears the container down (docker rm -f) and is idempotent",
-    async () => {
-      const lastRevision = observeSnapshotRevision;
-      const revision = await rt.stop();
-      assert.ok(
-        revision > lastRevision,
-        "close revision advances past the last snapshot",
+  await check("stop() tears the container down and is idempotent", async () => {
+    const revision = await rt.stop();
+    assert.ok(
+      revision > lastRevision,
+      "close revision advances past the last snapshot",
+    );
+    assert.equal(rt.isClosed, true);
+    await rt.stop(); // must not throw
+    if (REAL) {
+      // The --rm container must be gone.
+      const ps = execFileSync(
+        "docker",
+        [
+          "ps",
+          "-a",
+          "--filter",
+          "label=sparklab-cua",
+          "--format",
+          "{{.Names}}",
+        ],
+        { encoding: "utf8" },
       );
-      assert.equal(rt.isClosed, true);
-      await rt.stop(); // second call must not throw
-      const rm = readLog().find((argv) => argv[0] === "rm" && argv[1] === "-f");
-      assert.ok(rm, "docker rm -f was issued");
+      assert.equal(ps.trim(), "", "no sparklab-cua container survives stop()");
+    } else {
+      const rm = readLog().find((a) => a[0] === "rm" && a[1] === "-f");
       assert.ok(
-        rm.some((token) => token.startsWith("sparklab-cua-e2e-chat-")),
-        "it targeted this runtime's container",
+        rm && rm.some((t) => t.startsWith("sparklab-cua-e2e-chat-")),
+        "docker rm -f targeted this container",
       );
-    },
-  );
+    }
+  });
 
-  await check(
-    "the driver was reached via `docker exec -i … cua-driver mcp --direct`",
-    () => {
-      const exec = readLog().find((argv) => argv[0] === "exec");
-      assert.ok(exec, "a docker exec happened");
-      assert.deepEqual(exec.slice(-3), ["cua-driver", "mcp", "--direct"]);
-    },
-  );
-
-  await check(
-    "`docker run` used the sweep label and NO hardening flags by default",
-    () => {
-      const run = readLog().find((argv) => argv[0] === "run");
-      assert.ok(run, "a docker run happened");
-      assert.ok(run.includes("--label") && run.includes("sparklab-cua=1"));
-      assert.ok(
-        !run.includes("--cap-drop"),
-        "CUA_HARDEN unset → no --cap-drop",
-      );
-      assert.ok(!run.includes("no-new-privileges"));
-    },
-  );
-
-  await check(
-    "sweepOrphans() lists containers by the sweep label",
-    async () => {
-      await ComputerRuntime.sweepOrphans();
-      const ps = readLog().find((argv) => argv[0] === "ps");
-      assert.ok(ps, "docker ps was issued");
-      assert.deepEqual(ps, ["ps", "-aq", "--filter", "label=sparklab-cua"]);
-    },
-  );
+  if (!REAL) {
+    await check(
+      "the driver was reached via `docker exec -i … cua-driver mcp --direct`",
+      () => {
+        const exec = readLog().find(
+          (a) => a[0] === "exec" && a.includes("cua-driver"),
+        );
+        assert.ok(exec, "a docker exec for cua-driver happened");
+        assert.deepEqual(exec.slice(-3), ["cua-driver", "mcp", "--direct"]);
+        // The X-readiness probe ran first.
+        assert.ok(
+          readLog().some((a) => a[0] === "exec" && a.includes("sh")),
+          "waitForXReady probed the container before spawning the driver",
+        );
+      },
+    );
+    await check(
+      "`docker run` used the sweep label and NO hardening flags by default",
+      () => {
+        const run = readLog().find((a) => a[0] === "run");
+        assert.ok(run.includes("--label") && run.includes("sparklab-cua=1"));
+        assert.ok(
+          !run.includes("--cap-drop") && !run.includes("no-new-privileges"),
+        );
+      },
+    );
+    await check(
+      "sweepOrphans() lists containers by the sweep label",
+      async () => {
+        await ComputerRuntime.sweepOrphans();
+        const ps = readLog().find((a) => a[0] === "ps");
+        assert.deepEqual(ps, ["ps", "-aq", "--filter", "label=sparklab-cua"]);
+      },
+    );
+  }
 } finally {
   await rt.stop().catch(() => {});
   rmSync(workdir, { recursive: true, force: true });
