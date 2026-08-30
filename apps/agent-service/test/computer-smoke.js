@@ -133,21 +133,20 @@ async function main() {
     );
   };
 
+  // Per-turn frames ride inside `agent_event` seq-envelopes (run-recovery
+  // broadcaster). Mirror the frontend AgentConnection: track the snapshot seq
+  // and unwrap events past it.
+  let snapshotSeq = -1;
+  let deliveredSeq = -1;
+
   await new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`conversation timed out (${CONVO_TIMEOUT_MS}ms)`)),
       CONVO_TIMEOUT_MS,
     );
-    // Send after chat_started (dodges the WS message-drop race), with an
-    // on-open fallback in case chat_started was already replayed.
     ws.on("open", () => setTimeout(sendPrompt, 1500));
-    ws.on("message", (data) => {
-      let f;
-      try {
-        f = JSON.parse(data.toString());
-      } catch {
-        return;
-      }
+
+    const onFrame = (f) => {
       frames.push(f);
       if (f.type === "tool_use")
         console.log(`  → tool_use ${f.tool} :: ${f.summary}`);
@@ -188,11 +187,31 @@ async function main() {
           }),
         );
       }
-      // End only once the turn has actually run and returned to idle.
       if (f.type === "status" && f.state === "idle" && sent && sawWork) {
         clearTimeout(timer);
         setTimeout(resolve, 300);
       }
+    };
+
+    ws.on("message", (data) => {
+      let raw;
+      try {
+        raw = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (raw.type === "agent_snapshot") {
+        snapshotSeq = raw.seq;
+        deliveredSeq = Math.max(deliveredSeq, raw.seq);
+        return;
+      }
+      if (raw.type === "agent_event") {
+        if (raw.seq <= snapshotSeq || raw.seq <= deliveredSeq) return;
+        deliveredSeq = raw.seq;
+        if (raw.frame && raw.frame.type) onFrame(raw.frame);
+        return;
+      }
+      onFrame(raw);
     });
     ws.on("error", reject);
   });
