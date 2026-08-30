@@ -28,8 +28,12 @@ schema-valid `computer_view` → desktop-scope click/type not refused →
 `computer_*` in `agent-loop.test.ts` / `tools.test.ts`), agent-service 142/142,
 terminal 327/327.
 
-The real run changed the design in three places from the initial spike — see
-"What the 0.22.2 run resolved" below. Not wired into a release build.
+The real run changed the design in three places from the initial spike, and
+egress isolation (`CUA_EGRESS_NETWORK` on an `--internal` docker network) is
+verified 7/7 — see "What the 0.22.2 run resolved" below. A live drive through
+the model (`test:computer-smoke`, DeepSeek V4 Pro / BytePlus) also passes:
+the agent calls `computer_observe` and accurately describes the real XFCE
+windows. Not wired into a release build.
 
 ## Context
 
@@ -161,15 +165,18 @@ layer, keeping Browser Use's public-only ruleset._
 - `computer_view` / `computer_closed` server→client frames; a read-only
   `features/computer-view/` overlay above xterm with monotonic revisions and
   close tombstones.
-- Container network isolated to the egress proxy only; public-only ruleset
-  (when `CUA_EGRESS_NETWORK` is set — required for any shared deployment).
+- Container network isolated when `CUA_EGRESS_NETWORK` names an `--internal`
+  docker network — verified: no route off-box, loopback intact (required for
+  any shared deployment). A proxied-browsing variant is future work.
 - Total teardown on Stop / disconnect / shutdown — no orphan container or exec
   on a graceful path. A hard crash (SIGKILL) of agent-service can leave a
   detached container running; `ComputerRuntime.sweepOrphans()` removes anything
   still carrying the `sparklab-cua` label at the next boot.
-- `--cap-drop ALL --security-opt no-new-privileges` is **opt-in** (`CUA_HARDEN`)
-  — still untested against the real image (the 0.22.2 run left it off), where it
-  can break a sudo/gosu privilege-drop entrypoint. Verify, then default it on.
+- `--cap-drop ALL --security-opt no-new-privileges` (`CUA_HARDEN`, **opt-in**)
+  is **confirmed to break `trycua/xfce-cua`** — its supervisor's setuid
+  root→`cua` drop hits `no-new-privileges` and dbus/vnc/novnc loop on exit 127.
+  Off by default; a scoped cap set is future work. `--internal` network
+  isolation (above) is the containment that actually holds.
 - `/health` counters for the runtime, label-free (no coordinates, URLs, input,
   tokens, or image bodies), mirroring `browser-performance-metrics.ts`.
 
@@ -317,20 +324,38 @@ screenshot_file_path}`; `observe()` pulls the bytes with
    `-u cua -e HOME=/home/cua -e DISPLAY=:1`, and driver config rides `-e`
    flags (host env is not forwarded into the container).
 
-Not yet exercised against a real image: `CUA_HARDEN` (`--cap-drop ALL
---security-opt no-new-privileges` — may break the entrypoint), `bounded`
-permission mode + a capability manifest, and `CUA_EGRESS_NETWORK` isolation.
+**Egress isolation — verified.**
+`CUA_E2E_REAL=1 CUA_EGRESS_NETWORK=<net> test:computer-e2e` (7/7) with `<net>`
+an `--internal` docker bridge: the desktop is attached to that network, noVNC
+loopback still works (X readiness intact), and `curl https://example.com` from
+inside the container **fails** — no route off-box. Set-up (operator, once):
+`docker network create --internal sparklab-cua-egress`. Trade-off: `--internal`
+means the desktop also cannot browse the web at all (Firefox loads nothing) —
+which is the safe v1 default. A proxied "controlled browsing" mode (the
+container reaches only the agent-service egress proxy) is future work.
+
+**`CUA_HARDEN` — confirmed incompatible with `trycua/xfce-cua` as-is.**
+`--cap-drop ALL --security-opt no-new-privileges` makes the image's supervisor
+programs (`dbus`, `vncserver`, `novnc`) exit 127 in a restart loop — the
+entrypoint drops root→`cua` via a setuid helper that `no-new-privileges`
+blocks. Stays **off by default**. A scoped fix (keep `CAP_SETUID`/`CAP_SETGID`,
+drop `no-new-privileges`) or a no-drop image rebuild is future work; `--internal`
+network isolation above is the load-bearing containment.
+
+Not yet exercised: `bounded` permission mode + a capability manifest.
 
 ## Open items
 
 - P1: per-window element indexing (`get_window_state` → `elements[]` +
   `snapshot_id` + `element_token`) so `computer_act` can target by role/name
   rather than raw pixels.
+- Proxied browsing: a container network that reaches only the agent-service
+  egress proxy (not fully `--internal`), so the desktop can browse allowed
+  public HTTP(S) but nothing else.
+- Scoped `CUA_HARDEN` compatible with the image (or a no-privilege-drop image).
 - Per-chat `docker run` cold start is ~seconds for X readiness on top of image
   layer unpack; measure under load, and consider a slimmer image.
 - A `browserResources`-style per-service concurrent-desktop limiter before CUA
   is enabled for more than one operator.
-- One shared egress-proxy process vs. a second instance bound to a
-  container-visible address; verify `CUA_EGRESS_NETWORK` end to end.
 - The desktop's real screen is 1280x900 (image default) — expose a resolution
   knob if the overlay needs a specific aspect.

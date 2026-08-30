@@ -32,8 +32,9 @@ process.env.AZURE_OPENAI_ENDPOINT = "https://test.openai.azure.com";
 process.env.AZURE_OPENAI_API_KEY = "test-key";
 process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 process.env.CUA_ENABLED = "true";
-delete process.env.CUA_HARDEN;
-delete process.env.CUA_EGRESS_NETWORK;
+
+const EGRESS_NET = REAL ? process.env.CUA_EGRESS_NETWORK || "" : "";
+const HARDENED = REAL && process.env.CUA_HARDEN === "true";
 
 if (REAL) {
   process.env.CUA_IMAGE ??= "sparklab/cua-desktop:0.22.2";
@@ -41,7 +42,10 @@ if (REAL) {
   process.env.CUA_START_TIMEOUT_MS ??= "180000";
   process.env.CUA_SCREENSHOT_DIR ??= "/tmp";
   delete process.env.CUA_DOCKER_BIN; // real docker
+  // CUA_EGRESS_NETWORK / CUA_HARDEN pass through from the caller.
 } else {
+  delete process.env.CUA_HARDEN;
+  delete process.env.CUA_EGRESS_NETWORK;
   process.env.CUA_DOCKER_BIN = join(stubDir, "docker");
   process.env.CUA_STUB_LOG = stubLog;
 }
@@ -69,7 +73,8 @@ const readLog = () =>
     .map((line) => JSON.parse(line));
 
 console.log(
-  `mode: ${REAL ? "REAL (" + process.env.CUA_IMAGE + ")" : "stub"}\n`,
+  `mode: ${REAL ? "REAL (" + process.env.CUA_IMAGE + ")" : "stub"}` +
+    `${EGRESS_NET ? " egress=" + EGRESS_NET : ""}${HARDENED ? " hardened" : ""}\n`,
 );
 
 const rt = new ComputerRuntime(undefined, { label: "e2e-chat" });
@@ -110,6 +115,64 @@ try {
       lastRevision = result.snapshot.revision;
     },
   );
+
+  if (EGRESS_NET) {
+    await check(
+      `the desktop container has NO route off-box (CUA_EGRESS_NETWORK=${EGRESS_NET})`,
+      () => {
+        const name = execFileSync(
+          "docker",
+          ["ps", "--filter", "label=sparklab-cua", "--format", "{{.Names}}"],
+          { encoding: "utf8" },
+        )
+          .trim()
+          .split("\n")
+          .filter(Boolean)[0];
+        assert.ok(name, "the runtime's container is running");
+        // It is attached to the named network...
+        const nets = execFileSync(
+          "docker",
+          ["inspect", name, "--format", "{{json .NetworkSettings.Networks}}"],
+          { encoding: "utf8" },
+        );
+        assert.match(
+          nets,
+          new RegExp(EGRESS_NET.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        );
+        // ...loopback still works (X-readiness relies on it)...
+        execFileSync("docker", [
+          "exec",
+          name,
+          "sh",
+          "-lc",
+          "curl -fsS -m 5 http://127.0.0.1:6901/vnc.html >/dev/null",
+        ]);
+        // ...and the public internet is unreachable.
+        let reached = false;
+        try {
+          execFileSync(
+            "docker",
+            [
+              "exec",
+              name,
+              "sh",
+              "-lc",
+              "curl -sS -m 6 -o /dev/null https://example.com",
+            ],
+            { stdio: "pipe" },
+          );
+          reached = true;
+        } catch {
+          // expected: no NAT on an --internal network
+        }
+        assert.equal(
+          reached,
+          false,
+          "container reached the public internet — egress is NOT isolated",
+        );
+      },
+    );
+  }
 
   await check(
     "the emitted computer_view frame validates against the shared schema",
