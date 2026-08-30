@@ -6,6 +6,8 @@
  * gateway password) are read here and never logged.
  */
 
+import { hostname } from "node:os";
+
 function required(name: string): string {
   const v = process.env[name];
   if (!v || !v.trim()) {
@@ -59,6 +61,35 @@ if (turnUrls.length > 0 && !turnSecret)
   throw new Error(
     "BROWSER_HANDOFF_TURN_SECRET is required when TURN URLs are configured",
   );
+// Virtual Computer (CUA) — a few values need derivation before the config
+// object literal.
+const cuaPermissionMode = optional("CUA_DRIVER_PERMISSION_MODE", "standard");
+if (cuaPermissionMode !== "standard" && cuaPermissionMode !== "bounded")
+  throw new Error(
+    `CUA_DRIVER_PERMISSION_MODE must be "standard" or "bounded" (got "${cuaPermissionMode}")`,
+  );
+// Fixed in-container path the manifest is COPYed to by test/cua-real/Dockerfile
+// (M2.1). The host->container bind-mount that the earlier wiring assumed never
+// existed, so the manifest is baked into the image instead.
+const CUA_BAKED_MANIFEST_PATH = "/etc/cua/capability-manifest.yaml";
+// In `bounded` mode a manifest is mandatory (the driver fails every call closed
+// without one). Default to the image-baked path so a per-operator
+// `CUA_DRIVER_PERMISSION_MODE=bounded` needs no second env var; an explicit
+// CUA_CAPABILITY_MANIFEST_FILE still wins. `standard` mode leaves it unset.
+const cuaCapabilityManifestFile =
+  optionalValue("CUA_CAPABILITY_MANIFEST_FILE") ??
+  (cuaPermissionMode === "bounded" ? CUA_BAKED_MANIFEST_PATH : undefined);
+// Instance id so sweepOrphans() only removes THIS instance's containers (M2.3).
+// MUST be stable across restarts for boot-time crash-orphan cleanup to work
+// (a fresh random each boot would never match a crashed process's labels).
+// Defaults to the host name; set CUA_INSTANCE_ID explicitly — to a stable,
+// per-instance value — when running more than one agent-service on a host or
+// when the host name itself is ephemeral (e.g. a containerised agent-service).
+const cuaInstanceId =
+  (optionalValue("CUA_INSTANCE_ID") ??
+    (hostname() || "default").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 48)) ||
+  "default";
+
 const gatewayAuthUser = process.env.GATEWAY_AUTH_USER?.trim() || "";
 const gatewayAuthPassword = process.env.GATEWAY_AUTH_PASSWORD?.trim() || "";
 const allowMissingOrigin =
@@ -152,13 +183,26 @@ export const config = {
     // proxy (enforced at the network layer, not via app proxy env). Empty =
     // spike default network; MUST be set for any shared deployment.
     egressNetwork: optionalValue("CUA_EGRESS_NETWORK"),
-    // Default `standard` for the spike: `bounded` admits ONLY what a reviewed
-    // capability manifest lists, so bounded-with-no-manifest fails every call
-    // closed. Set both CUA_DRIVER_PERMISSION_MODE=bounded and
-    // CUA_CAPABILITY_MANIFEST_FILE together (docs/VIRTUAL-COMPUTER.md D6 — the
-    // manifest is a follow-up, required before any shared deployment).
-    driverPermissionMode: optional("CUA_DRIVER_PERMISSION_MODE", "standard"),
-    capabilityManifestFile: optionalValue("CUA_CAPABILITY_MANIFEST_FILE"),
+    // Default `standard` (= allow). `bounded` admits ONLY what the reviewed
+    // capability manifest lists; bounded-with-no-manifest fails every call
+    // closed, so `capabilityManifestFile` below defaults to the image-baked
+    // manifest whenever this is `bounded` (docs/VIRTUAL-COMPUTER.md D6 / M2.1).
+    driverPermissionMode: cuaPermissionMode,
+    // In-container path to the bounded-mode capability manifest. Auto-defaults
+    // to the image-baked /etc/cua/capability-manifest.yaml under `bounded`;
+    // unset under `standard`. computer-runtime.ts refuses to start `bounded`
+    // with this unresolved.
+    capabilityManifestFile: cuaCapabilityManifestFile,
+    // Per-agent-service-instance id. sweepOrphans() filters on
+    // `label=sparklab-cua-instance=<id>` so a 2nd instance (or a boot while
+    // another instance has a live desktop) never `docker rm -f`s a container it
+    // does not own (M2.3).
+    instanceId: cuaInstanceId,
+    // Process-wide caps, mirroring browser.maxSessions / maxConcurrentLaunches
+    // (M2.2). N concurrent cold desktop starts on one Docker daemon is the
+    // pathology maxLaunches exists for.
+    maxDesktops: positiveInt("MAX_CUA_DESKTOPS", 3, 16),
+    maxLaunches: positiveInt("MAX_CUA_LAUNCHES", 1, 8),
     // Opt-in container hardening. `--cap-drop ALL --security-opt
     // no-new-privileges` is untested against the full XFCE image and can break
     // a sudo/gosu privilege-drop entrypoint; off until verified on first run.

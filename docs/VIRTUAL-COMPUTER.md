@@ -23,10 +23,12 @@ over `trycua/xfce-cua`): `CUA_E2E_REAL=1 pnpm --filter @sparklab/agent-service
 test:computer-e2e` — 6/6 (container start → X-readiness poll → `docker exec`
 driver → MCP handshake → real screenshot pulled from the container →
 schema-valid `computer_view` → desktop-scope click/type not refused →
-`docker rm -f` teardown). Also: stub-mode `test:computer-e2e` (9/9), unit
-(`computer-runtime.test.ts`, `computer-view/__tests__/store.test.ts`,
-`computer_*` in `agent-loop.test.ts` / `tools.test.ts`), agent-service 140/140,
-terminal 327/327.
+`docker rm -f` teardown). Also: stub-mode `test:computer-e2e` (10/10 after
+M2.2/M2.3 — adds the desktop-limiter refusal case, scopes the sweep checks to
+the per-instance label), unit (`computer-runtime.test.ts`,
+`computer-resource-limiter.test.ts`, `computer-performance-metrics.test.ts`,
+`computer-view/__tests__/store.test.ts`, `computer_*` in `agent-loop.test.ts` /
+`tools.test.ts`), terminal 327/327.
 
 The real run changed the design in three places from the initial spike, and
 egress isolation (`CUA_EGRESS_NETWORK` on an `--internal` docker network) is
@@ -192,9 +194,10 @@ layer, keeping Browser Use's public-only ruleset._
 - macOS / Windows / Lume / CUA cloud sandbox (D5).
 - Persistent desktops, multiple desktops per chat, same-desktop sharing across
   chats.
-- A per-service cap on concurrent desktops (no `browserResources`-style
-  limiter in the spike — CUA is off by default; add one before enabling it for
-  more than one operator).
+- A per-service cap on concurrent desktops was out of scope for the spike;
+  **landed in M2.2** — `computer-resource-limiter.ts` (`computerResources`,
+  mirroring `browserResources`): `MAX_CUA_DESKTOPS` hard cap
+  (`cua_desktop_limit_reached`) + `MAX_CUA_LAUNCHES` cold-start queue.
 - Any gateway change. The runtime is a gateway REST client for exactly one
   seam, and only once `computer_capture` lands.
 
@@ -343,7 +346,69 @@ blocks. Stays **off by default**. A scoped fix (keep `CAP_SETUID`/`CAP_SETGID`,
 drop `no-new-privileges`) or a no-drop image rebuild is future work; `--internal`
 network isolation above is the load-bearing containment.
 
-Not yet exercised: `bounded` permission mode + a capability manifest.
+**`bounded` permission mode + capability manifest — wired, image-baked, and
+verified against a real `cua-driver` 0.22.2 container (M2.1, 2026-08-30).** The
+earlier wiring passed `CUA_DRIVER_CAPABILITY_MANIFEST_FILE` as a _host_ path
+into a container with no bind mount, so the file never existed inside. Now
+`apps/agent-service/test/cua-real/capability-manifest.yaml` is `COPY`ed into the
+image at `/etc/cua/capability-manifest.yaml`; `config.ts` defaults
+`capabilityManifestFile` to that path whenever
+`CUA_DRIVER_PERMISSION_MODE=bounded`, and `computer-runtime.ts` refuses to start
+`bounded` with the path unresolved. The manifest is YAML schema version 3
+(pulled from `cua/libs/cua-driver/.../session_manifest.rs` +
+`authorization.rs`, not invented): `expires_after`/`idle_timeout` `8h` (both
+required under bounded; the idle lease is terminal, so it is set to the session
+outer bound rather than something that trips between one-time approvals),
+`resources.desktop.display: true` (v1's whole interaction surface), and an
+`allow.tools` list of exactly the 14 observe/desktop-input tools v1 + M3 call.
+The **negative-deny probe**
+(`CUA_DRIVER_PERMISSION_MODE=bounded node apps/agent-service/test/cua-real/probe.mjs`,
+after `docker build`) confirmed against the real driver: the `yaml` feature is
+compiled in; admission keys on tool names; `launch_app` / `kill_app` /
+`bring_to_front` are explicitly denied (`capability manifest denies tool …`);
+undeclared tools fail closed (`… outside the capability manifest`); the 14
+allowlisted tools are admitted (`get_screen_size`, `list_windows`, `list_apps`,
+`click`, `get_desktop_state` all reached execution).
+
+## Enabling CUA for one operator
+
+CUA is off unless `CUA_ENABLED=true` and inert otherwise. To turn it on for a
+single operator with the safe v1 defaults:
+
+1. **Build the desktop image** (one-time; re-run after any manifest change):
+   ```
+   docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real
+   ```
+2. **Create the isolated egress network** (one-time):
+   ```
+   docker network create --internal sparklab-cua-egress
+   ```
+   `--internal` means the desktop has **no route off-box at all** — it cannot
+   browse the web (Firefox loads nothing). That is the safe v1 default; a
+   proxied-browsing mode is future work.
+3. **Set in `apps/agent-service/.env`:**
+   ```
+   CUA_ENABLED=true
+   CUA_IMAGE=sparklab/cua-desktop:0.22.2
+   CUA_DRIVER_USER=cua
+   CUA_EGRESS_NETWORK=sparklab-cua-egress
+   CUA_DRIVER_PERMISSION_MODE=bounded
+   ```
+   With `bounded`, `CUA_CAPABILITY_MANIFEST_FILE` defaults to the image-baked
+   `/etc/cua/capability-manifest.yaml` — no need to set it. Leaving
+   `CUA_DRIVER_PERMISSION_MODE` at `standard` skips the manifest (allow-all);
+   leaving `CUA_EGRESS_NETWORK` unset logs a startup **warning** (not a failure
+   — offline dev needs the default bridge) that the desktop has unrestricted
+   egress.
+4. Concurrency caps default to `MAX_CUA_DESKTOPS=3` / `MAX_CUA_LAUNCHES=1`;
+   `/health` exposes `computerResources` + `computerPerformance`.
+5. **`CUA_INSTANCE_ID`** defaults to the host name. `sweepOrphans()` removes
+   only containers labelled with this instance's id at boot, so a crash that
+   leaks a ~2 GB desktop is only reaped on the next start if the id is **stable
+   across restarts**. The host-name default is stable on a bare host; set
+   `CUA_INSTANCE_ID` explicitly to a fixed per-instance string if the
+   agent-service host name is ephemeral (containerised) or you run more than
+   one agent-service on a host.
 
 ## Open items
 
@@ -355,8 +420,7 @@ Not yet exercised: `bounded` permission mode + a capability manifest.
   public HTTP(S) but nothing else.
 - Scoped `CUA_HARDEN` compatible with the image (or a no-privilege-drop image).
 - Per-chat `docker run` cold start is ~seconds for X readiness on top of image
-  layer unpack; measure under load, and consider a slimmer image.
-- A `browserResources`-style per-service concurrent-desktop limiter before CUA
-  is enabled for more than one operator.
+  layer unpack; measure under load (M2.2 bounds concurrency, not latency), and
+  consider a slimmer image.
 - The desktop's real screen is 1280x900 (image default) — expose a resolution
   knob if the overlay needs a specific aspect.

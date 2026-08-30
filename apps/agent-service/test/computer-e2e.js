@@ -32,6 +32,8 @@ process.env.AZURE_OPENAI_ENDPOINT = "https://test.openai.azure.com";
 process.env.AZURE_OPENAI_API_KEY = "test-key";
 process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 process.env.CUA_ENABLED = "true";
+// Deterministic per-instance sweep id (M2.3).
+process.env.CUA_INSTANCE_ID = "e2e-instance";
 
 const EGRESS_NET = REAL ? process.env.CUA_EGRESS_NETWORK || "" : "";
 const HARDENED = REAL && process.env.CUA_HARDEN === "true";
@@ -48,6 +50,9 @@ if (REAL) {
   delete process.env.CUA_EGRESS_NETWORK;
   process.env.CUA_DOCKER_BIN = join(stubDir, "docker");
   process.env.CUA_STUB_LOG = stubLog;
+  // Force a low desktop cap so the limiter check needs only 2 extra runtimes
+  // (M2.2). Independent of the config default.
+  process.env.MAX_CUA_DESKTOPS = "2";
 }
 
 const { ComputerRuntime } = await import("../src/computer-runtime.js");
@@ -231,6 +236,37 @@ try {
     assert.doesNotMatch(result.content, /sup3r-s3cret/);
   });
 
+  if (!REAL) {
+    await check(
+      "a 3rd concurrent desktop is refused by the limiter with no container spawned",
+      async () => {
+        // `rt` already holds desktop slot 1 (reserved on its first observe(),
+        // released only in the finally). MAX_CUA_DESKTOPS=2, so extra1 takes
+        // slot 2 and extra2's observe() must reject before any `docker run`.
+        const runsBefore = readLog().filter((a) => a[0] === "run").length;
+        const extra1 = new ComputerRuntime(undefined, { label: "limiter-a" });
+        const extra2 = new ComputerRuntime(undefined, { label: "limiter-b" });
+        try {
+          await extra1.observe();
+          await assert.rejects(
+            () => extra2.observe(),
+            /cua_desktop_limit_reached/,
+            "the 3rd concurrent desktop is refused",
+          );
+          const runsAfter = readLog().filter((a) => a[0] === "run").length;
+          assert.equal(
+            runsAfter - runsBefore,
+            1,
+            "only extra1 spawned a container; the refused desktop spawned none",
+          );
+        } finally {
+          await extra1.stop().catch(() => {});
+          await extra2.stop().catch(() => {});
+        }
+      },
+    );
+  }
+
   await check("stop() tears the container down and is idempotent", async () => {
     const revision = await rt.stop();
     assert.ok(
@@ -255,11 +291,15 @@ try {
       );
       assert.equal(ps.trim(), "", "no sparklab-cua container survives stop()");
     } else {
-      const rm = readLog().find((a) => a[0] === "rm" && a[1] === "-f");
-      assert.ok(
-        rm && rm.some((t) => t.startsWith("sparklab-cua-e2e-chat-")),
-        "docker rm -f targeted this container",
+      // The limiter check above also stops its own throwaway runtimes, so match
+      // the rm -f for THIS runtime's container specifically.
+      const rm = readLog().find(
+        (a) =>
+          a[0] === "rm" &&
+          a[1] === "-f" &&
+          a.some((t) => t.startsWith("sparklab-cua-e2e-chat-")),
       );
+      assert.ok(rm, "docker rm -f targeted this container");
     }
   });
 
@@ -280,21 +320,30 @@ try {
       },
     );
     await check(
-      "`docker run` used the sweep label and NO hardening flags by default",
+      "`docker run` used both sweep labels and NO hardening flags by default",
       () => {
         const run = readLog().find((a) => a[0] === "run");
         assert.ok(run.includes("--label") && run.includes("sparklab-cua=1"));
+        assert.ok(
+          run.includes("sparklab-cua-instance=e2e-instance"),
+          "the per-instance sweep label is applied (M2.3)",
+        );
         assert.ok(
           !run.includes("--cap-drop") && !run.includes("no-new-privileges"),
         );
       },
     );
     await check(
-      "sweepOrphans() lists containers by the sweep label",
+      "sweepOrphans() lists containers scoped to this instance's sweep label",
       async () => {
         await ComputerRuntime.sweepOrphans();
         const ps = readLog().find((a) => a[0] === "ps");
-        assert.deepEqual(ps, ["ps", "-aq", "--filter", "label=sparklab-cua"]);
+        assert.deepEqual(ps, [
+          "ps",
+          "-aq",
+          "--filter",
+          "label=sparklab-cua-instance=e2e-instance",
+        ]);
       },
     );
   }

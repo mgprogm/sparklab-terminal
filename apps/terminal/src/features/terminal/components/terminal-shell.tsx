@@ -35,6 +35,7 @@ import {
   FolderTree,
   Globe2,
   Menu,
+  Monitor,
   NotebookText,
   SquareGanttChart,
   SquareKanban,
@@ -91,7 +92,10 @@ import {
   BrowserViewOverlay,
   useBrowserViewStore,
 } from "@/features/browser-view";
-import { ComputerViewOverlay } from "@/features/computer-view";
+import {
+  ComputerViewOverlay,
+  useComputerViewStore,
+} from "@/features/computer-view";
 
 export function TerminalShell() {
   const queryClient = useQueryClient();
@@ -135,6 +139,9 @@ export function TerminalShell() {
   const browserView = useBrowserViewStore((s) => s.view);
   const browserVisible = useBrowserViewStore((s) => s.visible);
   const showBrowser = useBrowserViewStore((s) => s.show);
+  const computerView = useComputerViewStore((s) => s.view);
+  const computerVisible = useComputerViewStore((s) => s.visible);
+  const showComputer = useComputerViewStore((s) => s.show);
 
   const {
     data: sessions = [],
@@ -662,6 +669,26 @@ export function TerminalShell() {
                 </Button>
               </TooltipTrigger>
               <TooltipContent>Reopen browser view</TooltipContent>
+            </Tooltip>
+          )}
+          {/* Same reopen affordance for the agent's virtual computer (CUA)
+              desktop: shown only when a current view exists but the user has
+              sent it "Back to terminal". Later computer_view frames keep the
+              hidden view fresh; this button brings it back. */}
+          {computerView && !computerVisible && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-chart-2 size-7 shrink-0"
+                  aria-label="Reopen computer view"
+                  onClick={showComputer}
+                >
+                  <Monitor className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reopen computer view</TooltipContent>
             </Tooltip>
           )}
           <span className="ml-auto flex shrink-0 items-center gap-1.5">

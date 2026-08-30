@@ -1,0 +1,80 @@
+# CUA bounded-mode capability manifest.
+#
+# Baked into sparklab/cua-desktop:0.22.2 at /etc/cua/capability-manifest.yaml
+# by this directory's Dockerfile (M2.1). NO bind mount: the manifest is
+# versioned with the image. cua-driver reads it only when started with
+#   CUA_DRIVER_PERMISSION_MODE=bounded
+#   CUA_DRIVER_CAPABILITY_MANIFEST_FILE=/etc/cua/capability-manifest.yaml
+#   CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED=1
+# agent-service sets all three (see computer-runtime.ts spawnDriverAndHandshake).
+# It is inert in the default `standard` permission mode.
+#
+# Schema pulled from the cua checkout, NOT invented:
+#   libs/cua-driver/rust/crates/cua-driver-core/src/session_manifest.rs  (RawManifest / load_manifest / validate_for_mode)
+#   libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs     (advertised_risk_for — the tool risk table)
+#   libs/cua-driver/docs/computer-history-agent-integration-rfc.md       (a v3 manifest example)
+# The parser is serde_yaml_ng with `deny_unknown_fields` — keep every key exact.
+
+# version 3: `mode` is NOT declared here (CUA_DRIVER_PERMISSION_MODE carries it);
+# `ask` is unsupported. `expires_after` + `idle_timeout` are REQUIRED under
+# bounded mode (SessionManifest::validate_for_mode). They are set equal and
+# generous on purpose: the desktop sits idle between one-time HUMAN approvals of
+# each `computer_act` (approvalTimeoutMs 120s apiece, plus think time), and the
+# idle lease is TERMINAL once it trips — a short value would kill a live desktop
+# mid-chat with a confusing error. 8h is the practical single-session outer
+# bound; the driver's own hard ceiling is 24h.
+version: 3
+expires_after: 8h
+idle_timeout: 8h
+
+# Resource scope. v1's entire interaction model is display-scope observe +
+# display-scope screen-x,y input, so the manifest grants exactly that. Without
+# `desktop.display: true` the migrated `private_observation` / `desktop_input`
+# adapters refuse every display-scoped call and the allowlist below is inert.
+resources:
+  desktop:
+    display: true
+
+# The ONLY tools the bounded desktop may run — v1 plus the M3 action family.
+# Every entry is a classified tool in authorization.rs::advertised_risk_for
+# (R0-R3); anything not listed is Undeclared and fails closed. Deliberately
+# omitted: launch_app, kill_app, bring_to_front, page, browser_*, *_recording,
+# set_config, escalate_session, move_cursor, and the low-level mouse_* tools.
+allow:
+  tools:
+    - get_desktop_state
+    - get_window_state
+    - get_screen_size
+    - list_windows
+    - list_apps
+    - get_cursor_position
+    - click
+    - double_click
+    - right_click
+    - drag
+    - scroll
+    - type_text
+    - press_key
+    - hotkey
+
+# Explicit denial of the desktop-mutating tools the negative-deny probe checks
+# (probe.mjs bounded mode). Undeclared already fails closed; naming them makes
+# the intent legible and the probe result unambiguous.
+deny:
+  tools:
+    - launch_app
+    - kill_app
+    - bring_to_front
+
+# Verified against a real cua-driver 0.22.2 container (2026-08-30, M2.1 QA):
+#   - the shipped binary IS built with the `yaml` feature (manifest loaded, no
+#     "capability manifest support requires the yaml feature" on driver stderr).
+#   - bounded admission keys on these tool NAMES; the `desktop.display` grant
+#     is sufficient — get_desktop_state / list_windows / list_apps /
+#     get_screen_size / click all reached execution under bounded.
+#   - launch_app / kill_app / bring_to_front return
+#     "capability manifest denies tool '<name>'"; undeclared tools return
+#     "<name> is outside the capability manifest".
+# Re-run the probe after any manifest or driver-version change:
+#   docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real
+#   CUA_DRIVER_PERMISSION_MODE=bounded node apps/agent-service/test/cua-real/probe.mjs

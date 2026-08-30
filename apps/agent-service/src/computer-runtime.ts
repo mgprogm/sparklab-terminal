@@ -31,6 +31,11 @@ import {
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { config, CAPS } from "./config.js";
+import { computerResources } from "./computer-resource-limiter.js";
+import {
+  computerPerformanceMetrics,
+  type ComputerErrorClass,
+} from "./computer-performance-metrics.js";
 
 export type SpawnFn = typeof nodeSpawn;
 
@@ -100,6 +105,11 @@ const MAX_ELEMENTS = 200;
 const MAX_ELEMENT_NAME = 200;
 const START_ATTEMPTS = 8;
 const ORPHAN_LABEL = "sparklab-cua";
+// Per-instance sweep label (M2.3). sweepOrphans() filters on THIS so a second
+// agent-service instance — or a boot while another instance holds a live
+// desktop — never removes a container it does not own. The bare ORPHAN_LABEL is
+// still applied for the human-facing `docker ps --filter label=sparklab-cua`.
+const ORPHAN_INSTANCE_LABEL = "sparklab-cua-instance";
 
 /** cua-driver desktop-input family (verified against 0.22.2). */
 const ACTION_TOOL: Record<ComputerAction["kind"], string> = {
@@ -113,6 +123,7 @@ export class ComputerRuntime {
   readonly computerId = randomUUID();
   private child: ChildProcessWithoutNullStreams | null = null;
   private containerName: string | null = null;
+  private releaseSession: (() => void) | null = null;
   private nextId = 1;
   private revision = 0;
   private snapshotSeq = 0;
@@ -163,7 +174,14 @@ export class ComputerRuntime {
           resolve("");
         }
       });
-    const ids = (await run(["ps", "-aq", "--filter", `label=${ORPHAN_LABEL}`]))
+    const ids = (
+      await run([
+        "ps",
+        "-aq",
+        "--filter",
+        `label=${ORPHAN_INSTANCE_LABEL}=${config.cua.instanceId}`,
+      ])
+    )
       .split("\n")
       .map((s) => s.trim())
       .filter(Boolean);
@@ -231,11 +249,17 @@ export class ComputerRuntime {
     } catch {
       // keep default
     }
+    if (windowsText !== "windows unavailable") {
+      const elementBytes = Buffer.byteLength(windowsText);
+      this.counters.elementBytes = elementBytes;
+      computerPerformanceMetrics.computerElements(elementBytes);
+    }
 
     const snapshotId = `snap-${++this.snapshotSeq}`;
 
     let snapshot: ComputerSnapshot | undefined;
     const bytes = data ? Buffer.byteLength(data, "base64") : 0;
+    if (bytes > 0) computerPerformanceMetrics.computerScreenshot(bytes);
     if (data && bytes > 0 && bytes <= MAX_SCREENSHOT_BYTES && width && height) {
       this.counters.screenshotBytes = bytes;
       snapshot = {
@@ -354,6 +378,12 @@ export class ComputerRuntime {
     if (container) {
       await this.dockerCapture(["rm", "-f", container]).catch(() => undefined);
     }
+    // Release the desktop reservation only after the container is actually gone,
+    // so a fast-cycling caller can't reserve slot N+1 while container N is still
+    // being removed (mirrors browser-runtime.ts). No-op guard covers the case
+    // where reserveSession() itself threw and start() never got a slot.
+    this.releaseSession?.();
+    this.releaseSession = null;
     return revision;
   }
 
@@ -373,7 +403,22 @@ export class ComputerRuntime {
     this.assertOpen();
     if (!config.cua.enabled)
       throw new Error("computer tools are disabled: set CUA_ENABLED=true");
+    // `bounded` admits ONLY what the capability manifest lists and fails every
+    // call closed without one. config.ts defaults the path to the image-baked
+    // manifest under bounded mode; if it is still unresolved, refuse to start
+    // before any `docker run`.
+    if (
+      config.cua.driverPermissionMode === "bounded" &&
+      !config.cua.capabilityManifestFile
+    )
+      throw new Error(
+        "CUA_DRIVER_PERMISSION_MODE=bounded requires a capability manifest",
+      );
     const startedAt = Date.now();
+    // Hard cap on concurrent desktops (M2.2). Throws `cua_desktop_limit_reached`
+    // BEFORE any `docker run`; the ensureStarted().catch -> dispose() path then
+    // releases nothing (guarded) so no half-started state leaks.
+    this.releaseSession = computerResources.reserveSession();
     const name = `sparklab-cua-${sanitizeLabel(this.opts.label)}-${randomUUID().slice(0, 8)}`;
     const runArgs = [
       "run",
@@ -386,6 +431,10 @@ export class ComputerRuntime {
       // removes anything still carrying this label at the next boot.
       "--label",
       `${ORPHAN_LABEL}=1`,
+      // Per-instance sweep scope (M2.3): sweepOrphans() only removes containers
+      // carrying THIS instance's id.
+      "--label",
+      `${ORPHAN_INSTANCE_LABEL}=${config.cua.instanceId}`,
       // Opt-in only: these can break a sudo/gosu privilege-drop entrypoint in a
       // full desktop image; unverified against trycua/xfce-cua.
       ...(config.cua.harden
@@ -396,33 +445,61 @@ export class ComputerRuntime {
         : []),
       config.cua.image,
     ];
-    await this.dockerCapture(runArgs);
-    this.containerName = name;
-    this.assertOpen();
-
-    // The desktop image's supervisor brings up Xtigervnc + XFCE + noVNC
-    // asynchronously. The driver connects to X at startup and fails closed if
-    // the display isn't listening yet, so wait for X BEFORE spawning it. The
-    // image's own HEALTHCHECK polls the same noVNC endpoint.
-    await this.waitForXReady(name, config.cua.startTimeoutMs);
-    this.assertOpen();
-
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
-      this.assertOpen();
+    // One bounded-concurrency slot for the whole cold-start sequence — the
+    // `docker run`, the X-readiness poll, and every driver-spawn retry (M2.2).
+    const releaseLaunch = await computerResources.acquireLaunch();
+    try {
+      const desktopStartedAt = Date.now();
+      let desktopReady = false;
       try {
-        await this.spawnDriverAndHandshake(name);
-        this.counters.startMs = Date.now() - startedAt;
-        this.counters.ready = true;
-        return;
-      } catch (error) {
-        lastError = error;
-        await this.teardownChild();
-        await delay(1_000);
+        await this.dockerCapture(runArgs);
+        this.containerName = name;
+        this.assertOpen();
+
+        // The desktop image's supervisor brings up Xtigervnc + XFCE + noVNC
+        // asynchronously. The driver connects to X at startup and fails closed
+        // if the display isn't listening yet, so wait for X BEFORE spawning it.
+        // The image's own HEALTHCHECK polls the same noVNC endpoint.
+        await this.waitForXReady(name, config.cua.startTimeoutMs);
+        this.assertOpen();
+        desktopReady = true;
+      } finally {
+        computerPerformanceMetrics.desktopReady(
+          Date.now() - desktopStartedAt,
+          desktopReady,
+        );
       }
+
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
+        this.assertOpen();
+        // Recorded per attempt: `failures` counts failed cold-start attempts,
+        // not desktops.
+        const driverStartedAt = Date.now();
+        try {
+          await this.spawnDriverAndHandshake(name);
+          computerPerformanceMetrics.driverReady(
+            Date.now() - driverStartedAt,
+            true,
+          );
+          this.counters.startMs = Date.now() - startedAt;
+          this.counters.ready = true;
+          return;
+        } catch (error) {
+          computerPerformanceMetrics.driverReady(
+            Date.now() - driverStartedAt,
+            false,
+          );
+          lastError = error;
+          await this.teardownChild();
+          await delay(1_000);
+        }
+      }
+      this.counters.startMs = Date.now() - startedAt;
+      throw new Error(`cua-driver did not become ready: ${errMsg(lastError)}`);
+    } finally {
+      releaseLaunch();
     }
-    this.counters.startMs = Date.now() - startedAt;
-    throw new Error(`cua-driver did not become ready: ${errMsg(lastError)}`);
   }
 
   private async waitForXReady(
@@ -549,42 +626,62 @@ export class ComputerRuntime {
   ): Promise<McpContent[]> {
     await this.ensureStarted();
     this.counters.calls++;
-    let response: McpResponse;
+    const callStartedAt = Date.now();
+    let ok = false;
     try {
-      response = await withAbortAndTimeout(
-        this.request("tools/call", { name, arguments: args }),
-        signal,
-        CAPS.computerActionTimeoutMs,
-      );
-    } catch (error) {
-      this.counters.callErrors++;
-      await this.dispose();
-      throw error;
+      let response: McpResponse;
+      try {
+        response = await withAbortAndTimeout(
+          this.request("tools/call", { name, arguments: args }),
+          signal,
+          CAPS.computerActionTimeoutMs,
+        );
+      } catch (error) {
+        this.recordCallError(error);
+        await this.dispose();
+        throw error;
+      }
+      if (response.error) {
+        const error = new Error(
+          response.error.message || "cua-driver MCP error",
+        );
+        this.recordCallError(error);
+        throw error;
+      }
+      const result = response.result;
+      if (
+        !result ||
+        (!result.content && result.structuredContent === undefined)
+      ) {
+        const error = new Error("cua-driver returned a malformed result");
+        this.recordCallError(error);
+        throw error;
+      }
+      if (result.isError) {
+        const error = new Error(
+          extractText(result.content ?? []) || "cua-driver error",
+        );
+        this.recordCallError(error);
+        throw error;
+      }
+      const content = result.content ?? [];
+      if (result.structuredContent !== undefined) {
+        content.push({
+          type: "structured",
+          text: JSON.stringify(result.structuredContent),
+        });
+      }
+      ok = true;
+      return content;
+    } finally {
+      computerPerformanceMetrics.computerCall(Date.now() - callStartedAt, ok);
     }
-    if (response.error) {
-      this.counters.callErrors++;
-      throw new Error(response.error.message || "cua-driver MCP error");
-    }
-    const result = response.result;
-    if (
-      !result ||
-      (!result.content && result.structuredContent === undefined)
-    ) {
-      this.counters.callErrors++;
-      throw new Error("cua-driver returned a malformed result");
-    }
-    if (result.isError) {
-      this.counters.callErrors++;
-      throw new Error(extractText(result.content ?? []) || "cua-driver error");
-    }
-    const content = result.content ?? [];
-    if (result.structuredContent !== undefined) {
-      content.push({
-        type: "structured",
-        text: JSON.stringify(result.structuredContent),
-      });
-    }
-    return content;
+  }
+
+  /** Per-instance counter + label-free coarse class into the /health singleton. */
+  private recordCallError(error: unknown): void {
+    this.counters.callErrors++;
+    computerPerformanceMetrics.computerError(classifyError(error));
   }
 
   private request(method: string, params: unknown): Promise<McpResponse> {
@@ -777,6 +874,22 @@ function sanitizeLabel(label: string | undefined): string {
 
 function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Coarse, label-free bucket for the /health error counters (M2.4). */
+function classifyError(error: unknown): ComputerErrorClass {
+  if (error instanceof DOMException && error.name === "AbortError")
+    return "aborted";
+  const m = errMsg(error).toLowerCase();
+  if (m.includes("abort")) return "aborted";
+  if (m.includes("timed out") || m.includes("timeout")) return "timeout";
+  if (
+    m.includes("malformed") ||
+    m.includes("mcp error") ||
+    m.includes("cua-driver error")
+  )
+    return "protocol";
+  return "transport";
 }
 
 function delay(ms: number): Promise<void> {

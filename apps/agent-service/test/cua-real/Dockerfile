@@ -10,6 +10,13 @@
 # Use:    CUA_IMAGE=sparklab/cua-desktop:0.22.2 CUA_DRIVER_USER=cua CUA_ENABLED=true
 FROM trycua/xfce-cua:latest
 
+# Bake the bounded-mode capability manifest into the image (M2.1). No bind
+# mounts: the manifest is versioned with the image, adds no runtime step. The
+# driver reads it only under CUA_DRIVER_PERMISSION_MODE=bounded (agent-service
+# passes -e CUA_DRIVER_CAPABILITY_MANIFEST_FILE=/etc/cua/capability-manifest.yaml
+# + _APPROVED=1); it is inert in the default `standard` mode.
+COPY capability-manifest.yaml /etc/cua/capability-manifest.yaml
+
 RUN /opt/venv/bin/python -m pip install --no-cache-dir --upgrade "cua-driver==0.22.2" \
  && chown cua:cua "$(/opt/venv/bin/python -c 'from cua_driver import get_binary_path; print(get_binary_path())')" \
  && su -s /bin/bash -c "HOME=/home/cua /opt/venv/bin/cua-driver --version" cua

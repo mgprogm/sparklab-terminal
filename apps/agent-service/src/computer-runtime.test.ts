@@ -6,9 +6,11 @@ process.env.AZURE_OPENAI_ENDPOINT ??= "https://test.openai.azure.com";
 process.env.AZURE_OPENAI_API_KEY ??= "test-key";
 process.env.GPT56SOL_DEPLOYMENT ??= "test-deployment";
 process.env.CUA_ENABLED = "true";
+process.env.CUA_INSTANCE_ID = "testinst";
 
 const { ComputerRuntime, driverArgs, summarizeActionResult } =
   await import("./computer-runtime.js");
+const { config } = await import("./config.js");
 
 // ---- pure helpers -------------------------------------------------------
 
@@ -266,6 +268,55 @@ test("act() rejects a malformed target (no x,y) locally, without a driver round-
     "no new docker/driver child was spawned",
   );
   await rt.stop();
+});
+
+test("sweepOrphans() scopes the ps filter to this instance and rm -f's only its ids", async () => {
+  assert.equal(config.cua.instanceId, "testinst");
+  const calls: string[][] = [];
+  const spawn = ((_bin: string, args: string[]) => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    calls.push(args);
+    queueMicrotask(() => {
+      if (args[0] === "ps") {
+        // Emulate `docker ps --filter` server-side filtering: only when the
+        // instance-scoped label is asked for do we return this instance's ids.
+        const scoped = args.includes(
+          `label=sparklab-cua-instance=${config.cua.instanceId}`,
+        );
+        child.stdout.emit(
+          "data",
+          Buffer.from(
+            scoped ? "mine-1\nmine-2\n" : "mine-1\nmine-2\nother-1\n",
+          ),
+        );
+        child.emit("exit", 0);
+      } else {
+        child.emit("exit", 0);
+      }
+    });
+    return child;
+  }) as unknown as typeof import("node:child_process").spawn;
+
+  await ComputerRuntime.sweepOrphans(spawn);
+
+  const ps = calls.find((a) => a[0] === "ps");
+  assert.deepEqual(ps, [
+    "ps",
+    "-aq",
+    "--filter",
+    "label=sparklab-cua-instance=testinst",
+  ]);
+  const rm = calls.find((a) => a[0] === "rm");
+  assert.deepEqual(
+    rm,
+    ["rm", "-f", "mine-1", "mine-2"],
+    "only this instance's containers are removed",
+  );
 });
 
 test("stop() is idempotent and issues docker rm -f", async () => {
