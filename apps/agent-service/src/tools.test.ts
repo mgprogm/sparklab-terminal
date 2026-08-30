@@ -117,11 +117,11 @@ test("virtual-computer tools are hidden from TOOLS unless CUA_ENABLED, but their
   assert.equal(
     describeCall("computer_act", {
       kind: "type_text",
-      element_index: 2,
-      snapshot_id: "s1",
+      x: 40,
+      y: 80,
       text: "hunter2",
     }),
-    "type into computer element 2: [redacted]",
+    "type into computer @ 40,80: [redacted]",
   );
 });
 

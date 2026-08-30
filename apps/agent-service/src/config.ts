@@ -136,7 +136,11 @@ export const config = {
   cua: {
     enabled: optional("CUA_ENABLED", "false") === "true",
     dockerBin: optional("CUA_DOCKER_BIN", "docker"),
-    image: optional("CUA_IMAGE", "trycua/xfce-cua:latest"),
+    // Must carry cua-driver >= 0.22 (for `mcp --direct`). The stock
+    // trycua/xfce-cua:latest pins 0.12.4 and has no `mcp --direct`, so the
+    // default is the one-layer bump built from test/cua-real/:
+    //   docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real
+    image: optional("CUA_IMAGE", "sparklab/cua-desktop:0.22.2"),
     // The CUA desktop image runs XFCE as an unprivileged user on an Xvnc
     // display; the driver must join that session. `docker exec` gets
     // `-u <driverUser>` (when set) plus `-e HOME` / `-e DISPLAY`.

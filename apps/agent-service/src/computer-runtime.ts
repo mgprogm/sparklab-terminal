@@ -15,10 +15,11 @@
  *     back with `docker exec … base64 -w0` and the file deleted. Screen dims
  *     come from that response (fallback `get_screen_size`). `list_windows`
  *     gives the model a window inventory.
- *   - act: pixel targets use `scope:"desktop"` screen coordinates with
+ *   - act: targets use `scope:"desktop"` screen coordinates with
  *     `delivery_mode:"background"` (XTEST / XInput2 master pointer, no focus
- *     steal). Per-window element indexing (get_window_state → elements[] +
- *     snapshot_id) is a P1 refinement and not wired here.
+ *     steal). Screen-absolute x,y is the ONLY targeting mode in v1; per-window
+ *     element indexing (get_window_state → elements[] + snapshot_id) is an
+ *     M3.1 refinement and not wired here.
  *
  * Everything container-specific lives behind the private `docker*` helpers so
  * the tool layer and the frontend stay backend-agnostic and a later VM/cloud
@@ -50,13 +51,6 @@ interface McpResponse {
   error?: { message?: string };
 }
 
-export interface IndexedElement {
-  index: number;
-  role: string;
-  name: string;
-  bounds?: { x: number; y: number; width: number; height: number };
-}
-
 export interface ComputerSnapshot {
   computerId: string;
   revision: number;
@@ -65,11 +59,10 @@ export interface ComputerSnapshot {
   status: string;
 }
 
-export type ComputerTarget =
-  | { elementIndex: number; snapshotId: string }
-  // v1: screen-absolute point (desktop scope). `windowId` is reserved for the
-  // P1 per-window element path and currently ignored.
-  | { x: number; y: number; windowId?: string };
+// v1: screen-absolute point (desktop scope) is the ONLY targeting mode.
+// `windowId` is reserved for the M3.1 per-window element path (see
+// docs/VIRTUAL-COMPUTER-REMAINING.md) and is currently ignored.
+export type ComputerTarget = { x: number; y: number; windowId?: string };
 
 export type ComputerAction =
   | { kind: "click"; target: ComputerTarget }
@@ -83,7 +76,7 @@ export type ComputerAction =
     };
 
 export interface ComputerObserveResult {
-  /** Model-facing text: viewport, indexed elements, current snapshotId. */
+  /** Model-facing text: viewport, current snapshotId, window inventory. */
   content: string;
   snapshot?: ComputerSnapshot;
   snapshotId: string;
@@ -96,8 +89,13 @@ export interface ComputerActResult {
 }
 
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
+// Upper bound on the base64 TEXT for a MAX_SCREENSHOT_BYTES payload
+// (4 chars per 3 bytes, rounded up, plus a little slack). The base64 read is
+// capped at this so `docker exec … base64` output can't accumulate unbounded.
+const MAX_SCREENSHOT_B64_BYTES = Math.ceil(MAX_SCREENSHOT_BYTES / 3) * 4 + 4;
 const MAX_VIEWPORT_EDGE = 4096;
 const MAX_MCP_LINE_BYTES = 8 * 1024 * 1024;
+// Applied to the window inventory `list_windows` returns for the model.
 const MAX_ELEMENTS = 200;
 const MAX_ELEMENT_NAME = 200;
 const START_ATTEMPTS = 8;
@@ -118,8 +116,6 @@ export class ComputerRuntime {
   private nextId = 1;
   private revision = 0;
   private snapshotSeq = 0;
-  private lastSnapshotId = "";
-  private lastElements = new Map<number, IndexedElement>();
   private pending = new Map<
     number,
     { resolve: (r: McpResponse) => void; reject: (e: Error) => void }
@@ -221,8 +217,8 @@ export class ComputerRuntime {
     }
 
     // Window inventory for the model. Per-window element indexing
-    // (get_window_state → elements[] + snapshot_id) is a P1 refinement; v1
-    // targets by desktop x,y.
+    // (get_window_state → elements[] + snapshot_id) is an M3.1 refinement; v1
+    // targets by desktop x,y only.
     let windowsText = "windows unavailable";
     try {
       const wins = asRecord(
@@ -237,8 +233,6 @@ export class ComputerRuntime {
     }
 
     const snapshotId = `snap-${++this.snapshotSeq}`;
-    this.lastSnapshotId = snapshotId;
-    this.lastElements.clear();
 
     let snapshot: ComputerSnapshot | undefined;
     const bytes = data ? Buffer.byteLength(data, "base64") : 0;
@@ -258,19 +252,24 @@ export class ComputerRuntime {
         : `viewport ${width || "?"}x${height || "?"} (no screenshot bytes)`,
       `snapshotId ${snapshotId}`,
       windowsText,
-      "elements [] (per-window element indexing not wired in v1 — target by desktop x,y)",
+      "target computer_act by screen-absolute x,y from the screenshot",
     ];
     return { content: lines.join("\n"), snapshot, snapshotId };
   }
 
-  private execInContainer(cmd: string[]): Promise<string> {
+  private execInContainer(cmd: string[], maxBytes?: number): Promise<string> {
     if (!this.containerName)
       return Promise.reject(new Error("computer runtime has no container"));
-    return this.dockerCapture(["exec", this.containerName, ...cmd]);
+    return this.dockerCapture(["exec", this.containerName, ...cmd], maxBytes);
   }
 
   private async readContainerFileBase64(path: string): Promise<string> {
-    const out = await this.execInContainer(["base64", "-w0", path]);
+    // Cap the accumulated base64 stdout so an oversized screenshot file can't
+    // grow the buffer without bound before observe()'s decoded-bytes check.
+    const out = await this.execInContainer(
+      ["base64", "-w0", path],
+      MAX_SCREENSHOT_B64_BYTES,
+    );
     const b64 = out.replace(/\s+/g, "");
     if (!b64) throw new Error("empty screenshot file");
     return b64;
@@ -281,18 +280,15 @@ export class ComputerRuntime {
     signal?: AbortSignal,
   ): Promise<ComputerActResult> {
     const target = action.target;
-    if ("elementIndex" in target) {
-      if (target.snapshotId !== this.lastSnapshotId) {
-        return {
-          content:
-            "error: stale snapshotId — call computer_observe again and use the new snapshotId",
-        };
-      }
-      if (!this.lastElements.has(target.elementIndex)) {
-        return {
-          content: `error: element ${target.elementIndex} is not in the latest observation`,
-        };
-      }
+    if (
+      typeof target?.x !== "number" ||
+      typeof target?.y !== "number" ||
+      Number.isNaN(target.x) ||
+      Number.isNaN(target.y)
+    ) {
+      // v1 targets by screen-absolute x,y only — reject a malformed target
+      // locally, before any driver round-trip.
+      return { content: "error: target requires screen x + y" };
     }
     const args = driverArgs(action);
     const actionContent = await this.call(
@@ -318,7 +314,7 @@ export class ComputerRuntime {
     const actionText =
       action.kind === "type_text"
         ? "typed [redacted]"
-        : `${action.kind} ${describeTarget(target)}`;
+        : `${action.kind} desktop @ ${target.x},${target.y}`;
     return {
       content: `${actionText}\n${resultText}\n${observation}`,
       snapshot,
@@ -355,7 +351,6 @@ export class ComputerRuntime {
       await waitForExit(child, 2_000);
     }
     this.rejectPending(new Error("computer runtime closed"));
-    this.lastElements.clear();
     if (container) {
       await this.dockerCapture(["rm", "-f", container]).catch(() => undefined);
     }
@@ -634,7 +629,7 @@ export class ComputerRuntime {
     this.pending.clear();
   }
 
-  private dockerCapture(args: string[]): Promise<string> {
+  private dockerCapture(args: string[], maxBytes?: number): Promise<string> {
     const spawnFn = this.opts.spawn ?? nodeSpawn;
     return new Promise((resolve, reject) => {
       const child = spawnFn(config.cua.dockerBin, args, {
@@ -642,14 +637,30 @@ export class ComputerRuntime {
       });
       let out = "";
       let err = "";
+      let overflowed = false;
       child.stdout?.on("data", (c: Buffer) => {
+        if (overflowed) return;
         out += c.toString("utf8");
+        if (maxBytes !== undefined && out.length > maxBytes) {
+          overflowed = true;
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // already gone
+          }
+          reject(
+            new Error(`docker ${args[0]} output exceeded ${maxBytes} bytes`),
+          );
+        }
       });
       child.stderr?.on("data", (c: Buffer) => {
         err += c.toString("utf8");
       });
-      child.once("error", reject);
+      child.once("error", (e) => {
+        if (!overflowed) reject(e);
+      });
       child.once("exit", (code) => {
+        if (overflowed) return;
         if (code === 0) resolve(out.trim());
         else
           reject(
@@ -664,21 +675,15 @@ export class ComputerRuntime {
 
 /**
  * Map a structured ComputerAction to 0.22.2 driver-tool arguments.
- * v1 pixel targeting is desktop-scope (`scope:"desktop"`, screen-absolute
- * x,y); background delivery is via XTEST / XInput2 master pointer (no focus
- * steal — verified against 0.22.2). Element-index targeting
- * (element_index + snapshot_id from get_window_state) is passed through for
- * the P1 path but not produced by observe() yet.
+ * v1 targeting is desktop-scope only (`scope:"desktop"`, screen-absolute x,y);
+ * background delivery is via XTEST / XInput2 master pointer (no focus steal —
+ * verified against 0.22.2). Per-window element targeting is an M3.1 refinement
+ * (docs/VIRTUAL-COMPUTER-REMAINING.md) and is not wired here.
  */
 export function driverArgs(action: ComputerAction): Record<string, unknown> {
   const t = action.target;
-  const byElement = "elementIndex" in t;
-  const point = byElement
-    ? { element_index: t.elementIndex, snapshot_id: t.snapshotId }
-    : { scope: "desktop", x: t.x, y: t.y };
-  const focusScope = byElement
-    ? { element_index: t.elementIndex, snapshot_id: t.snapshotId }
-    : { scope: "desktop" };
+  const point = { scope: "desktop", x: t.x, y: t.y };
+  const focusScope = { scope: "desktop" };
   const delivery = { delivery_mode: "background" as const };
   switch (action.kind) {
     case "click":
@@ -738,89 +743,9 @@ export function summarizeActionResult(result: unknown): string {
   return parts.join(" ");
 }
 
-/**
- * TODO(spike): the real `get_accessibility_tree` response shape is unverified.
- * This accepts the two most likely forms — a bare array of nodes, or
- * `{ snapshot_id, elements: [...] }` — and ignores anything it cannot map.
- */
-export function parseAxTree(text: string): {
-  snapshotId: string;
-  elements: IndexedElement[];
-} {
-  const json = tryJson(text);
-  if (!json) return { snapshotId: "", elements: [] };
-  const container = json as Record<string, unknown>;
-  const rawList = Array.isArray(json)
-    ? json
-    : Array.isArray(container.elements)
-      ? (container.elements as unknown[])
-      : Array.isArray(container.nodes)
-        ? (container.nodes as unknown[])
-        : [];
-  const snapshotId =
-    typeof container.snapshot_id === "string"
-      ? container.snapshot_id
-      : typeof container.snapshotId === "string"
-        ? container.snapshotId
-        : "";
-  const elements: IndexedElement[] = [];
-  rawList.forEach((entry, i) => {
-    if (!entry || typeof entry !== "object") return;
-    const node = entry as Record<string, unknown>;
-    const index =
-      typeof node.index === "number"
-        ? node.index
-        : typeof node.element_index === "number"
-          ? node.element_index
-          : i;
-    const role = pickString(node, ["role", "type", "class"]) || "unknown";
-    const name = (
-      pickString(node, ["name", "label", "title", "text"]) || ""
-    ).slice(0, MAX_ELEMENT_NAME);
-    const bounds = parseBounds(node.bounds ?? node.rect ?? node.bbox);
-    elements.push(
-      bounds ? { index, role, name, bounds } : { index, role, name },
-    );
-  });
-  return { snapshotId, elements };
-}
-
-function parseBounds(value: unknown): IndexedElement["bounds"] | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const b = value as Record<string, unknown>;
-  const num = (k: string): number =>
-    typeof b[k] === "number" ? (b[k] as number) : NaN;
-  const x = num("x");
-  const y = num("y");
-  const width = num("width");
-  const height = num("height");
-  if ([x, y, width, height].some((n) => Number.isNaN(n))) return undefined;
-  return { x, y, width, height };
-}
-
-export function parseViewport(
-  text: string,
-): { width: unknown; height: unknown } | undefined {
-  const json = tryJson(text);
-  if (!json || typeof json !== "object") return undefined;
-  const obj = json as Record<string, unknown>;
-  const vp = (obj.viewport ?? obj.screen ?? obj.size) as
-    Record<string, unknown> | undefined;
-  if (vp && (vp.width !== undefined || vp.height !== undefined))
-    return { width: vp.width, height: vp.height };
-  if (obj.width !== undefined || obj.height !== undefined)
-    return { width: obj.width, height: obj.height };
-  return undefined;
-}
-
 function pickStructured(content: McpContent[]): unknown {
   const structured = content.find((c) => c.type === "structured");
   return structured?.text ? tryJson(structured.text) : undefined;
-}
-
-function pickString(obj: Record<string, unknown>, keys: string[]): string {
-  for (const k of keys) if (typeof obj[k] === "string") return obj[k] as string;
-  return "";
 }
 
 function tryJson(text: string): unknown {
@@ -837,12 +762,6 @@ function extractText(content: McpContent[]): string {
     .map((c) => c.text)
     .join("\n")
     .slice(0, 200_000);
-}
-
-function describeTarget(target: ComputerTarget): string {
-  return "elementIndex" in target
-    ? `element ${target.elementIndex}`
-    : `desktop @ ${target.x},${target.y}`;
 }
 
 function boundedDimension(value: unknown): number {

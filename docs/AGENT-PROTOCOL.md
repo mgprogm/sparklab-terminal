@@ -84,21 +84,23 @@ is reserved for the terminal's `/attach`). Schemas live in
 
 ### Server → client
 
-| type                | fields                                                                  | meaning                                                   |
-| ------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------- |
-| `chat_started`      | `chatId`, `terminalSessionId`                                           | identifies the chat and its owning terminal               |
-| `chat_history`      | `chatId`, `entries[]`                                                   | resumed transcript (user/assistant/tool); client REPLACES |
-| `chat_list`         | `chats[]` (`id`,`title`,`updatedAt`,`messageCount`,`terminalSessionId`) | terminal-scoped past-chat list                            |
-| `assistant_delta`   | `text`                                                                  | streamed token chunk                                      |
-| `assistant_message` | `text`                                                                  | finalized assistant segment                               |
-| `tool_use`          | `callId`, `tool`, `sessionId?`, `summary`, `input`                      | a tool is being invoked                                   |
-| `tool_result`       | `callId`, `tool`, `ok`, `summary?`                                      | tool finished                                             |
-| `approval_request`  | `requestId`, `tool`, `sessionId?`, `summary`, `input`                   | a write awaits approval                                   |
-| `status`            | `state` (`idle`/`thinking`/`acting`/`awaiting_approval`)                | coarse activity                                           |
-| `error`             | `message`                                                               | channel error                                             |
-| `pong`              | —                                                                       | heartbeat reply                                           |
-| `browser_view`      | `browserId`, `revision`, `url`, `title`, `viewport`, `screenshot`       | bounded ephemeral browser snapshot                        |
-| `browser_closed`    | `browserId`, `revision`                                                 | discard the matching browser view                         |
+| type                | fields                                                                  | meaning                                                    |
+| ------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `chat_started`      | `chatId`, `terminalSessionId`                                           | identifies the chat and its owning terminal                |
+| `chat_history`      | `chatId`, `entries[]`                                                   | resumed transcript (user/assistant/tool); client REPLACES  |
+| `chat_list`         | `chats[]` (`id`,`title`,`updatedAt`,`messageCount`,`terminalSessionId`) | terminal-scoped past-chat list                             |
+| `assistant_delta`   | `text`                                                                  | streamed token chunk                                       |
+| `assistant_message` | `text`                                                                  | finalized assistant segment                                |
+| `tool_use`          | `callId`, `tool`, `sessionId?`, `summary`, `input`                      | a tool is being invoked                                    |
+| `tool_result`       | `callId`, `tool`, `ok`, `summary?`                                      | tool finished                                              |
+| `approval_request`  | `requestId`, `tool`, `sessionId?`, `summary`, `input`                   | a write awaits approval                                    |
+| `status`            | `state` (`idle`/`thinking`/`acting`/`awaiting_approval`)                | coarse activity                                            |
+| `error`             | `message`                                                               | channel error                                              |
+| `pong`              | —                                                                       | heartbeat reply                                            |
+| `browser_view`      | `browserId`, `revision`, `url`, `title`, `viewport`, `screenshot`       | bounded ephemeral browser snapshot                         |
+| `browser_closed`    | `browserId`, `revision`                                                 | discard the matching browser view                          |
+| `computer_view`     | `computerId`, `revision`, `viewport`, `status`, `screenshot`            | bounded ephemeral desktop snapshot (never in chat history) |
+| `computer_closed`   | `computerId`, `revision`                                                | close tombstone; a later `computer_view` cannot reopen     |
 
 ## Tools
 
@@ -125,6 +127,8 @@ immediately; writes pause the loop at the approval gate.
 | `browser_act`                       | **write** | one structured navigate/click/type/scroll/tab action                              |
 | `browser_capture`                   | **write** | capture viewport + save through session-scoped gateway `fs/upload`                |
 | `browser_request_handoff`           | **write** | offer the live isolated browser for private human authentication                  |
+| `computer_observe`                  | read      | disposable-desktop viewport + `snapshotId` + window inventory + bounded snapshot  |
+| `computer_act`                      | **write** | one desktop input action (`click`/`type_text`/`press_key`/`scroll`) at screen x,y |
 | `kanban_list`                       | read      | `GET /api/kanban/boards`                                                          |
 | `kanban_get`                        | read      | `GET /api/kanban/boards/:id`                                                      |
 | `kanban_create`                     | **write** | `POST /api/kanban/boards`                                                         |
@@ -259,6 +263,31 @@ alone. See [`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md).
 
 There is no `kill_session` — destroying a session stays a human-only action in
 the UI (the gateway's single `DELETE` call site).
+
+### Virtual Computer
+
+`computer_observe` / `computer_act` are added to the tool set **only when
+`CUA_ENABLED=true`** (mirroring browser tools gated by `BROWSER_USE_PROJECT`);
+with CUA unset the model never sees them, no computer frames are emitted, and
+nothing else changes. They drive one per-chat disposable Linux (XFCE) desktop
+container the agent owns (design + decisions:
+[`VIRTUAL-COMPUTER.md`](./VIRTUAL-COMPUTER.md), plan:
+[`VIRTUAL-COMPUTER-REMAINING.md`](./VIRTUAL-COMPUTER-REMAINING.md)). Approval
+tiers match `browser_observe` / `browser_act`: `computer_observe` is an
+auto-approved read that returns the viewport, the current `snapshotId`, and a
+window inventory (`window_id`, `pid`, `title`, `app`, bounds); `computer_act`
+is a write in `ONE_TIME_TOOLS`, re-approved on **every** call (no
+`allow_always`, a forged one is coerced to a single allow). It performs exactly
+one input — `click` / `type_text` / `press_key` / `scroll` — targeted by
+screen-absolute `x,y` only (v1 has no element targeting), delivered in the
+background (no window is raised or focused). `describeCall` redacts `type_text`
+content on the approval card. Each `computer_observe`, and each successful
+`computer_act`, publishes a `computer_view` frame (bounded screenshot,
+monotonically increasing `revision`, later revisions replace earlier ones) to
+the read-only `features/computer-view/` overlay; screenshots are **never**
+written to chat JSONL history. `computer_closed` records a close tombstone at
+its `revision` so a late `computer_view` cannot reopen the view. Teardown is
+total on Stop / disconnect / shutdown.
 
 ## Safety
 

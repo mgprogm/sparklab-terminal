@@ -2,9 +2,20 @@
 
 ## Status
 
-Proposed (2026-08-30). Not implemented. Decision record for wiring **CUA**
-(`trycua/cua`, checkout at `/home/sparklab/workspaces/sparklab/cua`) into the SP
-agent (`apps/agent-service`) as a desktop-control skill, mirroring the Virtual
+Original design/phasing pass (2026-08-30). **Superseded** — the authoritative
+records are now [`VIRTUAL-COMPUTER.md`](./VIRTUAL-COMPUTER.md) (locked v1
+decisions D1–D5) and
+[`VIRTUAL-COMPUTER-REMAINING.md`](./VIRTUAL-COMPUTER-REMAINING.md) (the M1–M3
+plan). The v1 runtime **shipped** on branch `feat/virtual-computer-cua-spike`
+(`computer-runtime.ts`, `computer_observe` / `computer_act` gated on
+`CUA_ENABLED`, the `computer_view` / `computer_closed` frames, the
+`features/computer-view/` overlay), verified end to end against a real
+`cua-driver` 0.22.2 desktop; it is inert unless `CUA_ENABLED=true`. Where this
+document and `VIRTUAL-COMPUTER.md` disagree, `VIRTUAL-COMPUTER.md` wins.
+
+Decision record for wiring **CUA** (`trycua/cua`, checkout at
+`/home/sparklab/workspaces/sparklab/cua`) into the SP agent
+(`apps/agent-service`) as a desktop-control skill, mirroring the Virtual
 Browser integration (`docs/VIRTUAL-BROWSER-PLAN.md`, `docs/VIRTUAL-BROWSER.md`).
 
 CUA becomes to the desktop what Browser Use is to the browser: a per-chat,
@@ -247,9 +258,15 @@ Frontend `apps/terminal/src/features/computer-view/` mirrors
 - **D6 — Driver launched in `bounded` permission mode** with the checked-in
   capability manifest listed above. `foreground` delivery and `move_cursor`
   desktop scope are unreachable.
+  _(**Superseded by the spike — see VIRTUAL-COMPUTER.md**: v1 ships `standard`
+  permission mode by default; `bounded` + a checked-in manifest is M2 follow-up
+  work.)_
 - **D7 — `delivery_mode` fixed to `background`; element-index targeting
   preferred over pixel; screen-absolute desktop-scope coordinates never used.**
   Follows `LINUX.md`. `background_unavailable` is surfaced, not worked around.
+  _(**Superseded by the spike — see VIRTUAL-COMPUTER.md**: `background` delivery
+  holds, but v1 has **no** element targeting — screen-absolute desktop-scope
+  x,y is the only path; per-window element indexing is M3.1.)_
 - **D8 — Linux-only v1.** macOS needs `CuaDriver.app` for TCC attribution;
   deferred with Lume. Windows deferred.
 - **D9 — Egress enforced at the container network layer** (isolated docker

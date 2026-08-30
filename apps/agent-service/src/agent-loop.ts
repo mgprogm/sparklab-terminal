@@ -677,9 +677,9 @@ export function sanitizePersistedToolResult(
 ): string {
   if (tool.startsWith("browser_"))
     return "[browser result omitted from durable history]";
-  // computer_observe carries the AX element slice (roles, names, window
-  // titles) and computer_act echoes a fresh observation — never persisted
-  // (docs/VIRTUAL-COMPUTER.md: desktop/AX state is ephemeral in chat).
+  // computer_observe carries the window inventory (titles, geometry) + a
+  // screenshot, and computer_act echoes a fresh observation — never persisted
+  // (docs/VIRTUAL-COMPUTER.md: desktop state is ephemeral in chat).
   if (tool.startsWith("computer_"))
     return "[computer result omitted from durable history]";
   return content;
@@ -724,34 +724,16 @@ function parseBrowserAction(args: ToolArgs): BrowserAction | string {
 }
 
 function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
-  if (
-    Number.isInteger(args.element_index) &&
-    (args.element_index ?? -1) >= 0 &&
-    typeof args.snapshot_id === "string" &&
-    args.snapshot_id.length > 0
-  ) {
-    return {
-      elementIndex: args.element_index as number,
-      snapshotId: args.snapshot_id,
-    };
-  }
+  // v1: screen-absolute point (desktop scope) is the only targeting mode.
   if (
     Number.isInteger(args.x) &&
     (args.x ?? -1) >= 0 &&
     Number.isInteger(args.y) &&
     (args.y ?? -1) >= 0
   ) {
-    // v1: screen-absolute point (desktop scope). window_id is accepted but
-    // currently ignored (reserved for the P1 per-window element path).
-    return {
-      x: args.x as number,
-      y: args.y as number,
-      ...(typeof args.window_id === "string" && args.window_id.length > 0
-        ? { windowId: args.window_id }
-        : {}),
-    };
+    return { x: args.x as number, y: args.y as number };
   }
-  return "target requires element_index + snapshot_id (from computer_observe), or screen x + y";
+  return "target requires screen x + y";
 }
 
 function parseComputerAction(args: ToolArgs): ComputerAction | string {

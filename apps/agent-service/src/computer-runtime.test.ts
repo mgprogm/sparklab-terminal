@@ -7,25 +7,12 @@ process.env.AZURE_OPENAI_API_KEY ??= "test-key";
 process.env.GPT56SOL_DEPLOYMENT ??= "test-deployment";
 process.env.CUA_ENABLED = "true";
 
-const {
-  ComputerRuntime,
-  driverArgs,
-  summarizeActionResult,
-  parseAxTree,
-  parseViewport,
-} = await import("./computer-runtime.js");
+const { ComputerRuntime, driverArgs, summarizeActionResult } =
+  await import("./computer-runtime.js");
 
 // ---- pure helpers -------------------------------------------------------
 
 test("driverArgs fixes background delivery and maps targets (0.22.2)", () => {
-  const byElement = driverArgs({
-    kind: "click",
-    target: { elementIndex: 3, snapshotId: "snap-1" },
-  });
-  assert.equal(byElement.delivery_mode, "background");
-  assert.equal(byElement.element_index, 3);
-  assert.equal(byElement.snapshot_id, "snap-1");
-
   // Pixel click → desktop-scope screen coordinates.
   const pixelClick = driverArgs({ kind: "click", target: { x: 10, y: 20 } });
   assert.equal(pixelClick.delivery_mode, "background");
@@ -71,47 +58,6 @@ test("summarizeActionResult surfaces effect, route, delivery, and refusal reason
     "effect=refused code=background_unavailable reason=route_unavailable",
   );
   assert.match(summarizeActionResult(null), /effect=unknown/);
-});
-
-test("parseAxTree accepts a bare array or an {elements} envelope and bounds names", () => {
-  const bare = parseAxTree(
-    JSON.stringify([
-      { index: 0, role: "button", name: "OK" },
-      { role: "text", label: "x".repeat(500) },
-    ]),
-  );
-  assert.equal(bare.elements.length, 2);
-  const [first, second] = bare.elements;
-  assert.equal(first?.name, "OK");
-  assert.equal(second?.index, 1); // falls back to position
-  assert.ok((second?.name.length ?? 0) <= 200);
-
-  const enveloped = parseAxTree(
-    JSON.stringify({
-      snapshot_id: "drv-7",
-      elements: [{ element_index: 4, role: "field", title: "Email" }],
-    }),
-  );
-  assert.equal(enveloped.snapshotId, "drv-7");
-  assert.deepEqual(enveloped.elements[0], {
-    index: 4,
-    role: "field",
-    name: "Email",
-  });
-
-  assert.deepEqual(parseAxTree("not json"), { snapshotId: "", elements: [] });
-});
-
-test("parseViewport reads nested or flat width/height", () => {
-  assert.deepEqual(parseViewport('{"viewport":{"width":1024,"height":768}}'), {
-    width: 1024,
-    height: 768,
-  });
-  assert.deepEqual(parseViewport('{"width":800,"height":600}'), {
-    width: 800,
-    height: 600,
-  });
-  assert.equal(parseViewport("{}"), undefined);
 });
 
 // ---- lifecycle with an injected spawn seam ----------------------------
@@ -302,16 +248,23 @@ test("observe() falls back to get_screen_size when the capture carries no dims",
   await rt.stop();
 });
 
-test("act() rejects a stale snapshotId without touching the driver", async () => {
-  const { spawn } = fakeSpawn();
+test("act() rejects a malformed target (no x,y) locally, without a driver round-trip", async () => {
+  const { spawn, children } = fakeSpawn();
   const rt = new ComputerRuntime(undefined, { label: "chat-2", spawn });
   await rt.observe();
+  const spawnCountAfterObserve = children.length;
 
-  const stale = await rt.act({
+  const bad = await rt.act({
     kind: "click",
-    target: { elementIndex: 0, snapshotId: "not-the-current-one" },
+    // v1 has no element targeting — a target with no x,y is invalid.
+    target: {} as unknown as { x: number; y: number },
   });
-  assert.match(stale.content, /stale snapshotId/);
+  assert.match(bad.content, /^error: target requires screen x \+ y/);
+  assert.equal(
+    children.length,
+    spawnCountAfterObserve,
+    "no new docker/driver child was spawned",
+  );
   await rt.stop();
 });
 

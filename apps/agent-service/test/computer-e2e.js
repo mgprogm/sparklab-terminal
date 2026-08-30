@@ -206,14 +206,16 @@ try {
   );
 
   await check(
-    "act() rejects a stale snapshotId locally, without a driver round-trip",
+    "act() rejects a malformed target (no x,y) locally, without a driver round-trip",
     async () => {
       const before = REAL ? 0 : readLog().length;
       const result = await rt.act({
         kind: "click",
-        target: { elementIndex: 0, snapshotId: "stale" },
+        // v1 has no element targeting; a target with no x,y is invalid and
+        // must be refused by the runtime before any docker/driver call.
+        target: {},
       });
-      assert.match(result.content, /^error: stale snapshotId/);
+      assert.match(result.content, /^error: target requires screen x \+ y/);
       if (!REAL)
         assert.equal(readLog().length, before, "no new docker/driver activity");
     },

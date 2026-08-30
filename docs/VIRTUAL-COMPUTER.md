@@ -25,7 +25,7 @@ driver → MCP handshake → real screenshot pulled from the container →
 schema-valid `computer_view` → desktop-scope click/type not refused →
 `docker rm -f` teardown). Also: stub-mode `test:computer-e2e` (9/9), unit
 (`computer-runtime.test.ts`, `computer-view/__tests__/store.test.ts`,
-`computer_*` in `agent-loop.test.ts` / `tools.test.ts`), agent-service 142/142,
+`computer_*` in `agent-loop.test.ts` / `tools.test.ts`), agent-service 140/140,
 terminal 327/327.
 
 The real run changed the design in three places from the initial spike, and
@@ -230,10 +230,11 @@ type ComputerAction =
       amount?: "line" | "page";
     };
 
-type Target =
-  | { x: number; y: number; windowId?: string } // v1: desktop-scope screen point; windowId reserved for P1
-  | { elementIndex: number; snapshotId: string }; // P1: from get_window_state — currently rejected cleanly
+type Target = { x: number; y: number; windowId?: string }; // v1: desktop-scope screen point only
 ```
+
+Element targeting (`get_window_state` → `elements[]` + `snapshot_id` /
+`element_token`) is M3.1 — not in v1; `windowId` on `Target` is reserved for it.
 
 `drag`, `double_click`, `right_click`, `hotkey` are deferred but use the same
 `Target` and `act()` entry point.

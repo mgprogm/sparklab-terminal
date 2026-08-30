@@ -1,0 +1,320 @@
+# Virtual Computer (CUA) — remaining work
+
+Implementation plan for the work left after the spike + real `cua-driver` 0.22.2
+verification. Companion to [`VIRTUAL-COMPUTER.md`](./VIRTUAL-COMPUTER.md)
+(decision record, D1–D5) and [`VIRTUAL-COMPUTER-PLAN.md`](./VIRTUAL-COMPUTER-PLAN.md)
+(design/phasing). Produced 2026-08-30 as an SA planning pass over branch
+`feat/virtual-computer-cua-spike` (pushed, not merged, inert unless
+`CUA_ENABLED=true`).
+
+Decisions D1–D5 are unchanged by everything below.
+
+## Pre-merge changes to the existing spike
+
+Defects / misleading artifacts in the branch as pushed. Fold into M1; none
+expand scope.
+
+1. **`computer_observe` tool description is false.** `tools.ts` tells the model
+   it returns "indexed on-screen elements (role, name, bounds, index)… pass it
+   back with an element index," but `observe()` returns literally `elements []`
+   and `computer_act`'s own description says element targeting is unavailable in
+   v1. A model will try element targeting, spend a one-time approval, and hit
+   `error: element N is not in the latest observation` from `act()`. Rewrite the
+   description to match reality: viewport, `snapshotId`, window inventory
+   (id/pid/title/app/bounds), screenshot; target `computer_act` by
+   screen-absolute x,y.
+2. **The element-targeting branch is half-live and mis-prioritised.**
+   `parseComputerTarget` checks `element_index`/`snapshot_id` _first_, so a model
+   sending both an element index and valid x,y is routed to the always-failing
+   branch. For v1: drop `element_index`/`snapshot_id`/`window_id` from the
+   `computer_act` schema and delete the element branch of `parseComputerTarget`
+   / the `elementIndex` arm of `ComputerTarget` (M3 rebuilds this against
+   `element_token`). Alternative: fall through to x,y when the element list is
+   empty. Recommendation: remove it.
+3. **Delete `parseAxTree` and `parseViewport` from `computer-runtime.ts`.**
+   `parseAxTree` carries a `TODO(spike)` guessing a `get_accessibility_tree`
+   shape the 0.22.2 run disproved. Neither is called by `observe()`. Exported +
+   unit-tested, so removal touches `computer-runtime.test.ts`.
+4. **`CUA_IMAGE` default is broken.** `config.ts` defaults to
+   `trycua/xfce-cua:latest` = `cua-driver` 0.12.4 (no `mcp --direct`).
+   `CUA_ENABLED=true` with nothing else set burns the X-readiness poll + 8
+   driver retries, then fails. Change the default to
+   `sparklab/cua-desktop:0.22.2`, or fail fast with a clear message on the
+   known-bad tag. Document the one-time
+   `docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real`.
+5. **Docs stale / self-contradicting.** `VIRTUAL-COMPUTER-PLAN.md` still says
+   "Status: Proposed. Not implemented"; its D6 (bounded default) and D7
+   ("desktop-scope coordinates never used") contradict what shipped. Add
+   supersede banners + flip the status line. `docs/AGENT-PROTOCOL.md` needs a
+   `computer_*` tools + approval-tier section (observe auto, act one-time).
+6. **`system-prompt.ts` focus caveat.** `type_text`/`press_key` go to
+   `{scope:"desktop"}` with no coordinates, so text lands wherever X focus
+   happens to be, and v1 has no focus-setting primitive. Add: "Before typing,
+   click the target field first."
+7. **(S, optional) Screenshot-byte bound is checked after unbounded
+   accumulation.** `dockerCapture` concatenates all `base64` stdout with no cap;
+   `MAX_SCREENSHOT_BYTES` is checked afterward. `head -c` in the exec, or a
+   running cap in the base64 read path.
+
+**Merge invariant:** with `CUA_ENABLED` unset, no behavior changes. Gate =
+agent-service 142/142, terminal 327/327 unchanged, stub `test:computer-e2e`
+9/9.
+
+---
+
+## M1 — "Mergeable"
+
+Land the branch with the pre-merge fixes; no new capability.
+
+- **M1.1 Apply fixes 1–7.** Files: `tools.ts`, `agent-loop.ts`,
+  `computer-runtime.ts`, `computer-runtime.test.ts`, `config.ts`,
+  `system-prompt.ts`, `tools.test.ts`, `agent-loop.test.ts`. Keep
+  `ComputerTarget` x,y-only for v1. Verify: stub e2e 9/9; unit suites updated;
+  full `lint && typecheck && test && build`. Effort S. Risk: grep
+  `parseAxTree|parseViewport` for test ripple.
+- **M1.2 Docs + protocol.** `VIRTUAL-COMPUTER.md`, `VIRTUAL-COMPUTER-PLAN.md`
+  (status + D6/D7 supersede), `AGENT-PROTOCOL.md` (new section). Effort S.
+- **M1.3 Open the PR.** Body: what shipped, inert-unless-`CUA_ENABLED`, the
+  one-time image build, links to M2/M3, the "no behavior change when disabled"
+  claim + test evidence. Request the security reviewer. Effort S.
+
+**M1 exit:** merged, dormant, docs consistent, protocol documented.
+
+---
+
+## M2 — "Safe to enable for one operator"
+
+### M2.1 `bounded` permission mode + checked-in capability manifest
+
+- New `apps/agent-service/test/cua-real/capability-manifest.yaml` + a `COPY`
+  line in the Dockerfile placing it at a fixed in-container path (e.g.
+  `/etc/cua/capability-manifest.yaml`). **The current wiring is broken** — it
+  passes a _host_ path into a container with _no bind mount_, so the file never
+  exists inside. Baking it into the image keeps "no bind mounts", versions the
+  manifest with the image, adds no runtime step.
+- `config.ts` — default `capabilityManifestFile` to that container path when
+  `driverPermissionMode==="bounded"`; default mode stays `standard` (per-operator
+  opt-in). `computer-runtime.ts` — startup assertion: `bounded` with no manifest
+  path → refuse to start with a clear error.
+- Allowlist = PLAN doc's list trimmed to what v1 + M3 calls:
+  `get_desktop_state, get_window_state, get_screen_size, list_windows,
+list_apps, get_cursor_position, click, double_click, right_click, drag,
+scroll, type_text, press_key, hotkey`. **Pull the exact YAML schema from the
+  checkout** (`rust/crates/cua-driver-core/src/session_manifest.rs`,
+  `libs/cua-driver/contract/`) — do not invent it.
+- Verify: `CUA_E2E_REAL=1 CUA_DRIVER_PERMISSION_MODE=bounded test:computer-e2e`
+  admits every `computer_*` path. **Negative check (required):** extend
+  `probe.mjs` to dump `tools/list` policy under bounded and assert a
+  non-manifest tool (`launch_app`/`kill_app`/`bring_to_front`) is **denied** — a
+  silent fallback-to-allow otherwise reads as a pass.
+- Effort M. Risks: manifest schema drift per driver version; admission may key
+  on resource classes not tool names; `element_token` vs `element_index` may be
+  separate capabilities.
+
+### M2.2 Per-service concurrent-desktop limiter
+
+- New `computer-resource-limiter.ts` — near-verbatim copy of
+  `browser-resource-limiter.ts`: `reserveSession()` (hard cap, throws
+  `cua_desktop_limit_reached`) + `acquireLaunch()` (bounded concurrency queue).
+  `computerResources` singleton.
+- `config.ts` — `MAX_CUA_DESKTOPS` (2–4), `MAX_CUA_LAUNCHES` (1–2).
+- `computer-runtime.ts` `start()` — `reserveSession()` before `docker run`,
+  `acquireLaunch()` around `docker run` + `waitForXReady` + driver spawn;
+  release both in `doDispose()` (keep the `released` guard).
+- Rationale: N concurrent cold starts on one Docker daemon is exactly the
+  pathology `maxConcurrentLaunches` exists for — mirror **both** methods.
+- Verify: new `computer-resource-limiter.test.ts`; stub e2e case that a 3rd
+  concurrent `ensureStarted()` rejects and leaks no container. Effort M.
+
+### M2.3 `sweepOrphans()` multi-instance safety
+
+- Today it `docker rm -f`s **every** `label=sparklab-cua` container host-wide —
+  two agent-service instances (or a restart while another has a live desktop)
+  and boot kills a running desktop. Add a per-instance label component
+  (`sparklab-cua-instance=<id>`, id from `CUA_INSTANCE_ID` or a boot random) and
+  filter `sweepOrphans()` on it. Graceful teardown (by name) is unaffected.
+- Verify: unit test with stubbed `docker ps` across two instance labels removes
+  only the current one. Effort S.
+
+### M2.4 `/health` metrics wiring
+
+- New `computer-performance-metrics.ts` — mirror `browser-performance-metrics.ts`
+  exactly. Counters: `desktopReadiness` (run→X ready), `driverReadiness`
+  (spawn→initialize), `computerCalls` (per `tools/call` timing + failure),
+  `screenshotBytes`, `elementBytes` (M3), launch-queue depth.
+- `computer-runtime.ts` reports into the singleton at the same seams
+  `browser-runtime.ts` uses; keep the per-instance `counters` for unit tests.
+- `index.ts` — add `computerResources` + `computerPerformance` snapshots to
+  `/health` JSON.
+- Rationale: `ComputerRuntime.metrics()` is per-instance and **nothing reads
+  it** — `/health` only exposes process-wide singletons. Design gap, not a
+  "confirm it's wired" item. Label-free by construction.
+- Verify: metrics-module unit test; `/health` contains the two new keys with
+  zeroed summaries when CUA is enabled-but-unused. Effort M.
+
+### M2.5 Frontend verification + missing reopen affordance
+
+- **Add the `computerView && !computerVisible` header button** calling
+  `useComputerViewStore(s => s.show)` in `terminal-shell.tsx`, mirroring the
+  browser block (lucide `Monitor`, `text-chart-2`). **It does not exist today**
+  — nothing calls `show()`, so "Back to terminal" is one-way, contradicting the
+  doc.
+- New `computer-view/__tests__/computer-view-overlay.test.tsx` mirroring
+  `browser-view/__tests__/browser-view-overlay.test.tsx` (only `store.test.ts`
+  exists): renders on `computer_view`, "Back to terminal" hides, later revision
+  replaces the image, `computer_closed` at R tombstones so `computer_view` at
+  R−1 can't reopen.
+- Manual pass with a real desktop behind `CUA_ENABLED=true`: overlay renders at
+  correct aspect, xterm stays mounted/!resized beneath, focus → Back button,
+  header `Monitor` reopens the same revision, Stop mid-session emits
+  `computer_closed` and clears the overlay.
+- Effort M. Risk: 1280x900 desktop in the default split — check `object-contain`
+  doesn't letterbox badly; if so, note the resolution knob for M3.
+
+### M2.6 Egress default guidance
+
+- Runbook in `VIRTUAL-COMPUTER.md` + `.env.example`: `docker network create
+--internal sparklab-cua-egress`, set `CUA_EGRESS_NETWORK`,
+  `CUA_DRIVER_PERMISSION_MODE=bounded`, build the image. State the `--internal`
+  trade-off plainly (no browsing). Startup **warning** (not hard failure — keep
+  offline dev) when `CUA_ENABLED=true` and no egress network. Effort S.
+
+**M2 exit:** one operator, one instance, `bounded` + image-pinned manifest
+(with a negative-deny test), `--internal` egress, desktop/launch caps,
+`/health` counters, verified overlay with a working reopen affordance.
+
+---
+
+## M3 — "Feature-complete v1"
+
+Ordering: **M3.1 before M3.2** (the extra actions re-plumb `ComputerTarget` /
+`act()`).
+
+### M3.1 P1 per-window element targeting — L
+
+- `observe()` gains a second phase: for the top N on-screen windows from
+  `list_windows`, call `get_window_state({pid, window_id,
+include_screenshot:false})`, collect `elements[]` + per-window `snapshot_id` +
+  `element_token`s. Merge into one indexed list with a synthetic `snapshotId`
+  mapping back to `(window_id → driver snapshot_id, element_token)`.
+- `ComputerTarget` regains `{ elementIndex, snapshotId }` (or `{ elementToken }`
+  — prefer tokens, stable across the driver's snapshot churn). `driverArgs`
+  emits `element_token` or `element_index+snapshot_id`. `act()`'s existing
+  staleness/membership checks become live. New `parseWindowElements()` replaces
+  the deleted `parseAxTree`.
+- `tools.ts` — restore element params in `computer_act`; element targeting
+  becomes preferred, x,y the fallback. `computer_observe` advertises the indexed
+  list again (now true). `agent-loop.ts` `parseComputerTarget` — element first,
+  x,y fallback, coherent when both supplied. `system-prompt.ts` updated.
+- New `MAX_WINDOWS` (~12) distinct from `MAX_ELEMENTS` (today `MAX_ELEMENTS=200`
+  is wrongly applied to the window list). New `elementBytes` counter.
+- Bound everything: cap windows, elements/window, name length; skip
+  `is_on_screen:false`. Keep `delivery_mode:"background"`.
+- Verify: stub `cua-driver-mcp.mjs` answers `get_window_state` with
+  `elements[] + snapshot_id + element_token`; new e2e cases; `CUA_E2E_REAL=1`
+  clicks a real element by token and re-observes the effect;
+  `test:computer-smoke` live click-by-element; unit `parseWindowElements`
+  against recorded real JSON.
+- Risks: token/snapshot lifetime vs re-observe cadence (tokens mitigate);
+  GTK/Qt-under-Xtigervnc AX fidelity unmeasured; slice size vs model context;
+  `get_window_state` returns an inline screenshot unless
+  `include_screenshot:false` — must pass that or blow the byte bound.
+
+### M3.2 `drag` / `double_click` / `right_click` / `hotkey` — M
+
+- `ComputerAction` union, `ACTION_TOOL` map, `driverArgs` cases (`drag` needs a
+  second point/target; `hotkey` a chord array). `tools.ts` `kind` enum + params
+  (`to_x`/`to_y` or `to` target, `keys`). `agent-loop.ts` `parseComputerAction`
+  cases; `redactToolArgs` (only `type_text` is secret). `describeCall` cards.
+  `system-prompt.ts`.
+- All reuse `ComputerTarget` + `act()`; still `ONE_TIME_TOOLS`, one per
+  approval. Stub e2e already accepts these tool names — add per-kind cases;
+  `CUA_E2E_REAL=1` exercises `right_click` + `hotkey`.
+- Risk: `drag` background-delivery on X11 is the shakiest per the action-support
+  ledger — ensure `background_unavailable`/`unverifiable` surfaces as
+  not-confirmed (the `summarizeActionResult` path already does).
+
+### M3.3 `computer_list_windows` — S
+
+- New read tool (no args, not in `WRITE_TOOLS`); `agent-loop.ts` `execute()`
+  branch → `this.computer.listWindows(signal)`; `computer-runtime.ts`
+  `listWindows()` = `list_windows` (+ optional `list_apps`), bounded, no
+  screenshot. Direct analog of `browser_list_tabs`. Auto-approved, no frame.
+
+### M3.4 `computer_capture` — S (independent; could ship in M2)
+
+- New tool; `WRITE_TOOLS` + `ONE_TIME_TOOLS`; params `session_id`, `path`;
+  `describeCall` shows exact destination. `agent-loop.ts` `execute()` branch =
+  near-verbatim copy of `browser_capture`: validate absolute path ≤4096,
+  `this.computer.observe()`, take `snapshot.screenshot`,
+  `gateway.uploadSessionFile(session_id, path, bytes, mediaType)`, return
+  `{saved,path,size,mediaType}`. Never persisted (the `computer_*` result
+  sanitizer already blanks it).
+
+### M3.5 Proxied browsing — L, explicitly weaker guarantee
+
+- New `computer-egress-proxy.ts` (or a bind-address option on
+  `SafeBrowserProxy`), reuse `browser-security.ts` public-only ruleset;
+  `config.ts` `CUA_PROXY_BROWSING` + `CUA_PROXY_BIND`; `computer-runtime.ts`
+  `start()` attaches a non-`--internal` bridge + injects `http_proxy`/Firefox
+  policy at a container-visible proxy address.
+- **Three blockers make full "network-layer enforcement" (D9) unachievable in
+  v1:** (1) `SafeBrowserProxy` hardcodes `listen(0, "127.0.0.1")` — a container
+  can't reach loopback; needs a bind param + docker-visible address. (2) A
+  non-`--internal` network gives a default route off-box, so the proxy is an
+  _option_ apps must honor, not _enforcement_ — real enforcement needs host
+  firewall rules on the container's netns. (3) XFCE apps have no global
+  `--proxy-server`; only proxy-env-aware apps route through it.
+- **Recommendation:** keep `--internal` as the default and the only mode with a
+  hard guarantee. Put proxied browsing behind `CUA_PROXY_BROWSING=true` with a
+  documented weaker guarantee ("Firefox to public HTTP(S) via the proxy; not a
+  containment boundary unless paired with host firewall rules"). Full
+  enforcement (netns iptables) is a follow-up beyond v1.
+- Verify: `CUA_E2E_REAL=1` with the flag — Firefox reaches `example.com`, a
+  private/metadata request is 403'd by the proxy, raw-IP curl bypassing proxy
+  env still works (documents the gap).
+
+**M3 exit:** element targeting, full action family, window listing, bounded
+capture; proxied browsing opt-in with a documented weaker guarantee. Matches
+the PLAN's v1 acceptance criteria.
+
+---
+
+## P3 — Interactive "Take control" (scope only; separate doc)
+
+New **`docs/COMPUTER-HANDOFF-DESIGN.md`** (sibling of
+`BROWSER-HANDOFF-DESIGN.md`), per D4: a dedicated `/computer-handoff`
+WebSocket, its own control-lease module, a `features/computer-handoff/`
+frontend feature — **not** a `target:` param on the browser protocol.
+
+Required reading first: `BROWSER-HANDOFF-DESIGN.md`,
+`BROWSER-HANDOFF-OPERATIONS.md` incident log (the silent-drop regression D4
+cites), `ADR-BROWSER-HANDOFF-WEBRTC.md`.
+
+Four unknowns the doc must resolve: (1) frame source — Xtigervnc stream vs
+`get_desktop_state` polling vs WebRTC; (2) control-lease shape + interaction
+with `ComputerRuntime` mid-`act()`; (3) input primitives — X11
+pointer/keyboard + geometry; `move_cursor({scope:"desktop"})` (real-pointer
+warp, currently structurally unreachable) becomes reachable here under a human
+lease only; (4) transport — bounded JPEG now vs WebRTC later. Shared helpers
+extracted from both implementations _afterward_, not generalized up front.
+
+---
+
+## Cross-cutting risks
+
+- **Cold start under load** — `docker run` + layer unpack + seconds of X
+  readiness per chat. M2.2 bounds concurrency, not latency. Measure once M2 is
+  on; a slimmer image (Openbox) changes the AX surface M3.1 depends on.
+- **Manifest schema drift** — `bounded` YAML is version-coupled to
+  `cua-driver`; pin with the image, re-verify the deny probe on any bump.
+- **AX-tree fidelity** — GTK/Qt-under-Xtigervnc element quality for M3.1 is
+  unmeasured; if poor, x,y stays primary and M3.1 degrades to "nice when
+  available."
+- **`element_token`/`snapshot_id` lifetime** vs re-observe cadence — prefer
+  tokens; expect `unverifiable`, keep the "not confirmed" path under test.
+- **Resolution** — real desktop 1280x900; if the overlay aspect is wrong in the
+  default split, expose `CUA_SCREEN_SIZE` (small; do it in M3.1 if M2.5 flags
+  it).
+- **Docker daemon as shared dependency** — M2.3 fixes the label; one-daemon-
+  per-host assumption stands.

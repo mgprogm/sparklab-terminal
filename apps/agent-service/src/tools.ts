@@ -1451,7 +1451,7 @@ if (config.cua.enabled) {
       function: {
         name: "computer_observe",
         description:
-          "Observe the disposable Linux desktop owned by this chat: viewport size, indexed on-screen elements (role, name, bounds, index), and a screenshot. Starts the desktop lazily. Call before every computer_act and re-observe after each one. Returns a snapshotId; pass it back with an element index to target that element.",
+          "Observe the disposable Linux desktop owned by this chat. Returns the viewport size, the current snapshotId, a window inventory (window_id, pid, title, app, bounds), and a screenshot. Starts the desktop lazily. Call before every computer_act and re-observe after each one. computer_act targets by screen-absolute x,y read from the screenshot — there is no element index in v1.",
         parameters: {
           type: "object",
           properties: {},
@@ -1464,7 +1464,7 @@ if (config.cua.enabled) {
       function: {
         name: "computer_act",
         description:
-          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. Target by screen-absolute x,y from the latest screenshot (element_index + snapshot_id targeting is not available in v1). Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
+          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. Targeting is by screen-absolute x,y only (read from the latest screenshot). Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
         parameters: {
           type: "object",
           properties: {
@@ -1472,9 +1472,6 @@ if (config.cua.enabled) {
               type: "string",
               enum: ["click", "type_text", "press_key", "scroll"],
             },
-            element_index: { type: "integer", minimum: 0, maximum: 100000 },
-            snapshot_id: { type: "string", minLength: 1, maxLength: 128 },
-            window_id: { type: "string", minLength: 1, maxLength: 128 },
             x: { type: "integer", minimum: 0, maximum: 100000 },
             y: { type: "integer", minimum: 0, maximum: 100000 },
             text: { type: "string", maxLength: 10000 },
@@ -1562,11 +1559,8 @@ export interface ToolArgs {
   markdown?: string;
   to_section_id?: string;
   to_parent_id?: string;
-  // Virtual Computer (CUA)
+  // Virtual Computer (CUA) — v1 targets by screen-absolute x,y only.
   kind?: string;
-  element_index?: number;
-  snapshot_id?: string;
-  window_id?: string;
   x?: number;
   y?: number;
   key?: string;
@@ -1639,11 +1633,9 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return "observe computer desktop";
     case "computer_act": {
       const where =
-        typeof args.element_index === "number"
-          ? `element ${args.element_index}`
-          : typeof args.x === "number" && typeof args.y === "number"
-            ? `@ ${args.x},${args.y}`
-            : "target ?";
+        typeof args.x === "number" && typeof args.y === "number"
+          ? `@ ${args.x},${args.y}`
+          : "target ?";
       if (args.kind === "type_text")
         return `type into computer ${where}: [redacted]`;
       if (args.kind === "press_key")

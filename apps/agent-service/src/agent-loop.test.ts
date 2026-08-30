@@ -64,8 +64,8 @@ test("browser capture results omit saved-file metadata from durable history", ()
 test("computer_act redacts typed text from durable history", () => {
   const sanitized = sanitizePersistedToolArgs("computer_act", {
     kind: "type_text",
-    element_index: 3,
-    snapshot_id: "snap-1",
+    x: 12,
+    y: 34,
     text: "CANARY_DESKTOP_SECRET",
   });
   assert.equal(sanitized.text, "[redacted]");
