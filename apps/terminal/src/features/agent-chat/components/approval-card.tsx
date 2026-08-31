@@ -24,6 +24,33 @@ interface Input {
   index?: number;
   path?: string;
   execute_at?: string;
+  kind?: string;
+}
+
+/** Verb phrase for a `computer_act` kind — used in place of the generic
+ * "type into" label, which is wrong for every kind except `type_text`. */
+function computerActionLabel(tool: string, kind?: string): string {
+  if (tool === "computer_capture") return "save a computer screenshot";
+  switch (kind) {
+    case "type_text":
+      return "type into the computer";
+    case "click":
+      return "click on the computer";
+    case "double_click":
+      return "double-click on the computer";
+    case "right_click":
+      return "right-click on the computer";
+    case "drag":
+      return "drag on the computer";
+    case "scroll":
+      return "scroll the computer";
+    case "hotkey":
+      return "send a hotkey to the computer";
+    case "press_key":
+      return "press a key on the computer";
+    default:
+      return "act on the computer";
+  }
 }
 
 function keystrokeParts(tool: string, input: Input): string[] {
@@ -73,8 +100,12 @@ export function ApprovalCard({
     "browser_request_handoff",
   ].includes(entry.tool);
   const browserCapture = entry.tool === "browser_capture";
+  const computerAction =
+    entry.tool === "computer_act" || entry.tool === "computer_capture";
   const oneTimeAction =
-    browserAction || entry.tool === "schedule_terminal_action";
+    browserAction ||
+    computerAction ||
+    entry.tool === "schedule_terminal_action";
 
   const parts = keystrokeParts(entry.tool, input);
   const hints = riskHints(entry.tool, input);
@@ -106,7 +137,13 @@ export function ApprovalCard({
       ref={ref}
       tabIndex={-1}
       role="group"
-      aria-label={browserAction ? "Browser approval needed" : "Approval needed"}
+      aria-label={
+        browserAction
+          ? "Browser approval needed"
+          : computerAction
+            ? "Computer approval needed"
+            : "Approval needed"
+      }
       onKeyDown={(e) => {
         if (e.key === "Enter" && armed) {
           e.preventDefault();
@@ -124,7 +161,11 @@ export function ApprovalCard({
         ) : (
           <Keyboard className="size-3.5" />
         )}
-        {browserAction ? "Browser approval needed" : "Approval needed"}
+        {browserAction
+          ? "Browser approval needed"
+          : computerAction
+            ? "Computer approval needed"
+            : "Approval needed"}
       </div>
 
       <div className="text-body flex items-center gap-1.5 text-xs">
@@ -132,20 +173,24 @@ export function ApprovalCard({
           ? browserCapture
             ? "Save the current browser screen"
             : `Allow this browser action${input.action ? `: ${input.action}` : ""}`
-          : entry.tool === "schedule_terminal_action"
-            ? "schedule in"
-            : entry.tool === "create_session"
-              ? "create"
-              : "type into"}
-        {(!browserAction || browserCapture) && sessionName && (
-          <span className="bg-secondary text-foreground rounded-xs flex items-center gap-1 px-1.5 py-0.5">
-            <span className="bg-chart-1 size-[5px] rounded-full" />
-            {sessionName}
-          </span>
-        )}
+          : computerAction
+            ? computerActionLabel(entry.tool, input.kind)
+            : entry.tool === "schedule_terminal_action"
+              ? "schedule in"
+              : entry.tool === "create_session"
+                ? "create"
+                : "type into"}
+        {(!browserAction || browserCapture) &&
+          entry.tool !== "computer_act" &&
+          sessionName && (
+            <span className="bg-secondary text-foreground rounded-xs flex items-center gap-1 px-1.5 py-0.5">
+              <span className="bg-chart-1 size-[5px] rounded-full" />
+              {sessionName}
+            </span>
+          )}
       </div>
 
-      {browserAction && (
+      {(browserAction || computerAction) && (
         <div className="bg-secondary/60 rounded-sm px-2 py-1.5 text-xs leading-relaxed">
           <div className="text-foreground">{entry.summary}</div>
           {input.url && (
@@ -156,14 +201,15 @@ export function ApprovalCard({
               {input.url}
             </div>
           )}
-          {browserCapture && input.path && (
-            <div
-              className="text-muted-foreground mt-1 break-all font-mono text-[11px]"
-              title={input.path}
-            >
-              {input.path}
-            </div>
-          )}
+          {(browserCapture || entry.tool === "computer_capture") &&
+            input.path && (
+              <div
+                className="text-muted-foreground mt-1 break-all font-mono text-[11px]"
+                title={input.path}
+              >
+                {input.path}
+              </div>
+            )}
           {typeof input.index === "number" && (
             <div className="text-muted-foreground mt-1 text-[11px]">
               Page element {String(input.index)}
@@ -172,7 +218,7 @@ export function ApprovalCard({
         </div>
       )}
 
-      {!browserAction && parts.length > 0 && (
+      {!browserAction && !computerAction && parts.length > 0 && (
         <div className="bg-secondary/60 rounded-sm px-2 py-1.5 font-mono text-xs leading-relaxed">
           {parts.map((p, i) => (
             <span key={i}>
@@ -218,7 +264,7 @@ export function ApprovalCard({
           onClick={approve}
           className="h-7 text-xs"
         >
-          {browserAction ? "Approve once ⏎" : "Approve ⏎"}
+          {oneTimeAction ? "Approve once ⏎" : "Approve ⏎"}
         </Button>
         <Button
           size="sm"
@@ -234,9 +280,13 @@ export function ApprovalCard({
         <p className="text-muted-foreground text-[11px]">
           {entry.tool === "schedule_terminal_action"
             ? "Scheduled terminal actions are approved one at a time."
-            : browserCapture
+            : entry.tool === "computer_capture"
               ? "This writes or overwrites the file once. The captured image is not saved in chat history."
-              : "Browser actions are approved one at a time. The page is read-only here."}
+              : entry.tool === "computer_act"
+                ? "Computer actions are approved one at a time."
+                : browserCapture
+                  ? "This writes or overwrites the file once. The captured image is not saved in chat history."
+                  : "Browser actions are approved one at a time. The page is read-only here."}
         </p>
       ) : (
         <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-[11px]">
