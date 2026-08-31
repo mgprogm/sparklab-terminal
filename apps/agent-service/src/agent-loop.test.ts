@@ -141,3 +141,78 @@ test("parseComputerAction: element target preferred, x,y fallback, element rejec
     /element_index \+ snapshot_id.*or screen x \+ y/,
   );
 });
+
+test("parseComputerAction: double_click / right_click take element or x,y (M3.2)", () => {
+  assert.deepEqual(
+    parseComputerAction({
+      kind: "double_click",
+      element_index: 4,
+      snapshot_id: "snap-9",
+    }),
+    { kind: "double_click", target: { elementIndex: 4, snapshotId: "snap-9" } },
+  );
+  assert.deepEqual(parseComputerAction({ kind: "right_click", x: 12, y: 34 }), {
+    kind: "right_click",
+    target: { x: 12, y: 34 },
+  });
+});
+
+test("parseComputerAction: drag needs integer to_x/to_y and rejects an element target (M3.2)", () => {
+  assert.deepEqual(
+    parseComputerAction({ kind: "drag", x: 10, y: 20, to_x: 90, to_y: 120 }),
+    { kind: "drag", target: { x: 10, y: 20 }, to: { x: 90, y: 120 } },
+  );
+  // Missing / negative end point.
+  assert.match(
+    parseComputerAction({ kind: "drag", x: 10, y: 20 }) as string,
+    /drag requires integer to_x and to_y/,
+  );
+  assert.match(
+    parseComputerAction({
+      kind: "drag",
+      x: 10,
+      y: 20,
+      to_x: -1,
+      to_y: 5,
+    }) as string,
+    /drag requires integer to_x and to_y/,
+  );
+  // An element target for drag is rejected locally.
+  assert.match(
+    parseComputerAction({
+      kind: "drag",
+      element_index: 0,
+      snapshot_id: "snap-9",
+      to_x: 90,
+      to_y: 120,
+    }) as string,
+    /drag cannot target an element_index/,
+  );
+});
+
+test("parseComputerAction: hotkey needs a 2-8 key chord and no target (M3.2)", () => {
+  assert.deepEqual(
+    parseComputerAction({ kind: "hotkey", keys: ["ctrl", "l"] }),
+    {
+      kind: "hotkey",
+      keys: ["ctrl", "l"],
+    },
+  );
+  // A single key is a guaranteed driver rejection — refused at the parse layer.
+  assert.match(
+    parseComputerAction({ kind: "hotkey", keys: ["Escape"] }) as string,
+    /chord of 2 to 8 keys/,
+  );
+  assert.match(
+    parseComputerAction({ kind: "hotkey", keys: [] }) as string,
+    /chord of 2 to 8 keys/,
+  );
+  // Over-long key name.
+  assert.match(
+    parseComputerAction({
+      kind: "hotkey",
+      keys: ["ctrl", "x".repeat(20)],
+    }) as string,
+    /short key name/,
+  );
+});

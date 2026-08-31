@@ -107,35 +107,37 @@ is reserved for the terminal's `/attach`). Schemas live in
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                                | Kind      | Backing                                                                           |
-| ----------------------------------- | --------- | --------------------------------------------------------------------------------- |
-| `list_sessions`                     | read      | `GET /api/sessions`                                                               |
-| `read_screen`                       | read      | `GET /api/sessions/:id/screen`                                                    |
-| `wait_idle`                         | read      | polls `/screen` until a shell prompt / quiescence                                 |
-| `type_text`                         | **write** | `POST /api/sessions/:id/keys {text}` — never executes                             |
-| `press_keys`                        | **write** | `POST …/keys {keys}` (whitelist)                                                  |
-| `schedule_terminal_action`          | **write** | `POST /api/terminal-actions` — one-time persisted named-key action                |
-| `schedule_terminal_input`           | **write** | `POST /api/terminal-actions` — one-time encrypted literal text + named-key action |
-| `start_autonomous_terminal_monitor` | **write** | persisted deterministic screen-triggered text/key/command automation              |
-| `list_scheduled_terminal_actions`   | read      | `GET /api/terminal-actions`                                                       |
-| `cancel_scheduled_terminal_action`  | **write** | `DELETE /api/terminal-actions/:id`                                                |
-| `run_command`                       | **write** | type + Enter + `wait_idle` (one approval)                                         |
-| `create_session`                    | **write** | `POST /api/sessions`                                                              |
-| `run_codex`                         | **write** | `POST …/codex` — `codex exec` in the session cwd                                  |
-| `browser_observe`                   | read      | Browser Use MCP page state + bounded snapshot                                     |
-| `browser_list_tabs`                 | read      | Browser Use MCP tab list                                                          |
-| `browser_act`                       | **write** | one structured navigate/click/type/scroll/tab action                              |
-| `browser_capture`                   | **write** | capture viewport + save through session-scoped gateway `fs/upload`                |
-| `browser_request_handoff`           | **write** | offer the live isolated browser for private human authentication                  |
-| `computer_observe`                  | read      | disposable-desktop viewport + `snapshotId` + window inventory + bounded snapshot  |
-| `computer_act`                      | **write** | one desktop input action (`click`/`type_text`/`press_key`/`scroll`) at screen x,y |
-| `kanban_list`                       | read      | `GET /api/kanban/boards`                                                          |
-| `kanban_get`                        | read      | `GET /api/kanban/boards/:id`                                                      |
-| `kanban_create`                     | **write** | `POST /api/kanban/boards`                                                         |
-| `kanban_add_card`                   | **write** | `POST /api/kanban/boards/:id/cards`                                               |
-| `kanban_update_card`                | **write** | `PATCH /api/kanban/cards/:id`                                                     |
-| `kanban_move`                       | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409)               |
-| `kanban_delete`                     | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)                |
+| Tool                                | Kind      | Backing                                                                                                                                   |
+| ----------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_sessions`                     | read      | `GET /api/sessions`                                                                                                                       |
+| `read_screen`                       | read      | `GET /api/sessions/:id/screen`                                                                                                            |
+| `wait_idle`                         | read      | polls `/screen` until a shell prompt / quiescence                                                                                         |
+| `type_text`                         | **write** | `POST /api/sessions/:id/keys {text}` — never executes                                                                                     |
+| `press_keys`                        | **write** | `POST …/keys {keys}` (whitelist)                                                                                                          |
+| `schedule_terminal_action`          | **write** | `POST /api/terminal-actions` — one-time persisted named-key action                                                                        |
+| `schedule_terminal_input`           | **write** | `POST /api/terminal-actions` — one-time encrypted literal text + named-key action                                                         |
+| `start_autonomous_terminal_monitor` | **write** | persisted deterministic screen-triggered text/key/command automation                                                                      |
+| `list_scheduled_terminal_actions`   | read      | `GET /api/terminal-actions`                                                                                                               |
+| `cancel_scheduled_terminal_action`  | **write** | `DELETE /api/terminal-actions/:id`                                                                                                        |
+| `run_command`                       | **write** | type + Enter + `wait_idle` (one approval)                                                                                                 |
+| `create_session`                    | **write** | `POST /api/sessions`                                                                                                                      |
+| `run_codex`                         | **write** | `POST …/codex` — `codex exec` in the session cwd                                                                                          |
+| `browser_observe`                   | read      | Browser Use MCP page state + bounded snapshot                                                                                             |
+| `browser_list_tabs`                 | read      | Browser Use MCP tab list                                                                                                                  |
+| `browser_act`                       | **write** | one structured navigate/click/type/scroll/tab action                                                                                      |
+| `browser_capture`                   | **write** | capture viewport + save through session-scoped gateway `fs/upload`                                                                        |
+| `browser_request_handoff`           | **write** | offer the live isolated browser for private human authentication                                                                          |
+| `computer_observe`                  | read      | disposable-desktop viewport + `snapshotId` + window inventory + indexed element list + bounded snapshot                                   |
+| `computer_list_windows`             | read      | disposable-desktop window inventory + running apps, no screenshot                                                                         |
+| `computer_act`                      | **write** | one desktop input action (`click`/`double_click`/`right_click`/`drag`/`type_text`/`press_key`/`scroll`/`hotkey`) by element or screen x,y |
+| `computer_capture`                  | **write** | capture desktop screenshot + save through session-scoped gateway `fs/upload`                                                              |
+| `kanban_list`                       | read      | `GET /api/kanban/boards`                                                                                                                  |
+| `kanban_get`                        | read      | `GET /api/kanban/boards/:id`                                                                                                              |
+| `kanban_create`                     | **write** | `POST /api/kanban/boards`                                                                                                                 |
+| `kanban_add_card`                   | **write** | `POST /api/kanban/boards/:id/cards`                                                                                                       |
+| `kanban_update_card`                | **write** | `PATCH /api/kanban/cards/:id`                                                                                                             |
+| `kanban_move`                       | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409)                                                                       |
+| `kanban_delete`                     | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)                                                                        |
 
 Kanban tools drive the gateway's `/api/kanban/*` board API (design:
 [`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). Approval tiers (D9): reads run
@@ -266,22 +268,30 @@ the UI (the gateway's single `DELETE` call site).
 
 ### Virtual Computer
 
-`computer_observe` / `computer_act` are added to the tool set **only when
-`CUA_ENABLED=true`** (mirroring browser tools gated by `BROWSER_USE_PROJECT`);
-with CUA unset the model never sees them, no computer frames are emitted, and
-nothing else changes. They drive one per-chat disposable Linux (XFCE) desktop
-container the agent owns (design + decisions:
-[`VIRTUAL-COMPUTER.md`](./VIRTUAL-COMPUTER.md), plan:
+`computer_observe` / `computer_act` / `computer_list_windows` /
+`computer_capture` are added to the tool set **only when `CUA_ENABLED=true`**
+(mirroring browser tools gated by `BROWSER_USE_PROJECT`); with CUA unset the
+model never sees them, no computer frames are emitted, and nothing else changes.
+They drive one per-chat disposable Linux (XFCE) desktop container the agent owns
+(design + decisions: [`VIRTUAL-COMPUTER.md`](./VIRTUAL-COMPUTER.md), plan:
 [`VIRTUAL-COMPUTER-REMAINING.md`](./VIRTUAL-COMPUTER-REMAINING.md)). Approval
-tiers match `browser_observe` / `browser_act`: `computer_observe` is an
-auto-approved read that returns the viewport, the current `snapshotId`, and a
-window inventory (`window_id`, `pid`, `title`, `app`, bounds); `computer_act`
-is a write in `ONE_TIME_TOOLS`, re-approved on **every** call (no
-`allow_always`, a forged one is coerced to a single allow). It performs exactly
-one input — `click` / `type_text` / `press_key` / `scroll` — targeted by
-screen-absolute `x,y` only (v1 has no element targeting), delivered in the
-background (no window is raised or focused). `describeCall` redacts `type_text`
-content on the approval card. Each `computer_observe`, and each successful
+tiers match `browser_observe` / `browser_act`: `computer_observe` and
+`computer_list_windows` are auto-approved reads (`computer_observe` returns the
+viewport, `snapshotId`, window inventory, an indexed AT-SPI element list, and a
+bounded screenshot; `computer_list_windows` returns the window inventory +
+running apps as text, no screenshot); `computer_act` and `computer_capture` are
+writes in `ONE_TIME_TOOLS`, re-approved on **every** call (no `allow_always`, a
+forged one is coerced to a single allow). `computer_act` performs exactly one
+input — `click` / `double_click` / `right_click` / `drag` / `type_text` /
+`press_key` / `scroll` / `hotkey` — targeted by an element (`element_index` +
+`snapshot_id` from the latest observation; `click` / `double_click` /
+`right_click` / `type_text`) or by screen-absolute `x,y`. Delivery is in the
+background (no window raised or focused) **except** `double_click` /
+`right_click`, which briefly activate the target window and restore the prior
+one (the only mode the driver offers for those two on X11). `computer_capture`
+writes the current desktop screenshot to `session_id` + `path` through the
+existing session-scoped gateway `fs/upload` route. `describeCall` redacts
+`type_text` content on the approval card. Each `computer_observe`, and each successful
 `computer_act`, publishes a `computer_view` frame (bounded screenshot,
 monotonically increasing `revision`, later revisions replace earlier ones) to
 the read-only `features/computer-view/` overlay; screenshots are **never**

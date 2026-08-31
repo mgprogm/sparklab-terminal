@@ -153,6 +153,22 @@ function toolResult(id, name, args) {
       },
     };
   }
+  if (name === "list_apps") {
+    // M3.3: listWindows() folds running apps in beside the window inventory.
+    return {
+      id,
+      result: {
+        content: [{ type: "text", text: "Found 3 app(s): 2 running" }],
+        structuredContent: {
+          apps: [
+            { name: "Thunar", pid: 88, running: true },
+            { name: "xfce4-panel", pid: 77, running: true },
+            { name: "About Xfce", pid: 0, running: false },
+          ],
+        },
+      },
+    };
+  }
   if (name === "get_screen_size") {
     return {
       id,

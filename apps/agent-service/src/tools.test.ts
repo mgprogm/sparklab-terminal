@@ -102,17 +102,43 @@ test("browser handoff is an explicit one-time approved tool", () => {
 
 test("virtual-computer tools are hidden from TOOLS unless CUA_ENABLED, but their approval tiers are always keyed", () => {
   // This suite runs without CUA_ENABLED, so the model never sees the tools.
-  assert.equal(toolNames().includes("computer_observe"), false);
-  assert.equal(toolNames().includes("computer_act"), false);
+  for (const t of [
+    "computer_observe",
+    "computer_act",
+    "computer_list_windows",
+    "computer_capture",
+  ])
+    assert.equal(
+      toolNames().includes(t),
+      false,
+      `${t} hidden without CUA_ENABLED`,
+    );
   // Membership is by name and unconditional: if the tool ever is offered, it
   // is a one-time-approved write (no allow-always), like browser_act.
   assert.equal(WRITE_TOOLS.has("computer_act"), true);
   assert.equal(ONE_TIME_TOOLS.has("computer_act"), true);
   assert.equal(WRITE_TOOLS.has("computer_observe"), false);
-  // describeCall stays defined for both regardless of gating.
+  // M3.3: computer_list_windows is a read — never a write tool.
+  assert.equal(WRITE_TOOLS.has("computer_list_windows"), false);
+  assert.equal(ONE_TIME_TOOLS.has("computer_list_windows"), false);
+  // M3.4: computer_capture is a one-time-approved file write, like browser_capture.
+  assert.equal(WRITE_TOOLS.has("computer_capture"), true);
+  assert.equal(ONE_TIME_TOOLS.has("computer_capture"), true);
+  // describeCall stays defined regardless of gating.
   assert.equal(
     describeCall("computer_observe", {}),
     "observe computer desktop",
+  );
+  assert.equal(
+    describeCall("computer_list_windows", {}),
+    "list computer windows",
+  );
+  assert.equal(
+    describeCall("computer_capture", {
+      session_id: "web-x",
+      path: "/tmp/desktop.png",
+    }),
+    "capture computer screen to /tmp/desktop.png",
   );
   assert.equal(
     describeCall("computer_act", {
@@ -140,6 +166,33 @@ test("virtual-computer tools are hidden from TOOLS unless CUA_ENABLED, but their
       text: "hunter2",
     }),
     "type into computer element 2: [redacted]",
+  );
+  // M3.2: new kinds render on the approval card.
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "double_click",
+      element_index: 5,
+      snapshot_id: "snap-3",
+    }),
+    "double_click computer element 5",
+  );
+  assert.equal(
+    describeCall("computer_act", { kind: "right_click", x: 12, y: 34 }),
+    "right_click computer @ 12,34",
+  );
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "drag",
+      x: 10,
+      y: 20,
+      to_x: 30,
+      to_y: 40,
+    }),
+    "drag computer @ 10,20 → 30,40",
+  );
+  assert.equal(
+    describeCall("computer_act", { kind: "hotkey", keys: ["ctrl", "l"] }),
+    "hotkey computer ctrl+l",
   );
 });
 

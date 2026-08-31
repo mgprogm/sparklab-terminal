@@ -240,36 +240,78 @@ observation`, both local, no driver round-trip).
 driver calls because the trailing re-observe re-walks every window;
 `test:computer-smoke` was not extended (out of scope — no live-model change).
 
-### M3.2 `drag` / `double_click` / `right_click` / `hotkey` — M
+### M3.2 `drag` / `double_click` / `right_click` / `hotkey` — M — ✅ DONE (2026-08-31)
 
-- `ComputerAction` union, `ACTION_TOOL` map, `driverArgs` cases (`drag` needs a
-  second point/target; `hotkey` a chord array). `tools.ts` `kind` enum + params
-  (`to_x`/`to_y` or `to` target, `keys`). `agent-loop.ts` `parseComputerAction`
-  cases; `redactToolArgs` (only `type_text` is secret). `describeCall` cards.
-  `system-prompt.ts`.
-- All reuse `ComputerTarget` + `act()`; still `ONE_TIME_TOOLS`, one per
-  approval. Stub e2e already accepts these tool names — add per-kind cases;
-  `CUA_E2E_REAL=1` exercises `right_click` + `hotkey`.
-- Risk: `drag` background-delivery on X11 is the shakiest per the action-support
-  ledger — ensure `background_unavailable`/`unverifiable` surfaces as
-  not-confirmed (the `summarizeActionResult` path already does).
+**Shipped as planned:** `ComputerAction` union + `ACTION_TOOL` map + `driverArgs`
+cases; `tools.ts` `kind` enum + `to_x`/`to_y` + `keys` (`maxItems:8`, item
+`maxLength:16`); `agent-loop.ts` `parseComputerAction` cases; `describeCall`
+cards (`"double_click computer element N"` / `"right_click computer @ x,y"` /
+`"drag computer @ x,y → x,y"` / `"hotkey computer ctrl+l"`); `system-prompt.ts`
+one-liner. `redactToolArgs` unchanged (only `type_text` carries a secret; the
+new kinds carry none). Still `WRITE_TOOLS` ∩ `ONE_TIME_TOOLS`, one per approval.
+Stub `cua-driver-mcp.mjs` already answered the four tool names generically. Six
+new stub e2e cases (19/19); `CUA_E2E_REAL=1` adds a real `right_click`-by-x,y
+case (17/17).
 
-### M3.3 `computer_list_windows` — S
+**Deviated from the plan (probe-driven — `test/cua-real/probe.mjs` round 1–3
+against real 0.22.2):**
 
-- New read tool (no args, not in `WRITE_TOOLS`); `agent-loop.ts` `execute()`
-  branch → `this.computer.listWindows(signal)`; `computer-runtime.ts`
-  `listWindows()` = `list_windows` (+ optional `list_apps`), bounded, no
-  screenshot. Direct analog of `browser_list_tabs`. Auto-approved, no frame.
+- **`double_click` / `right_click` use `delivery_mode:"foreground"`, not
+  background.** Their driver schemas have **no `scope` param** and a
+  **required `pid`**; under `delivery_mode:"background"` both return
+  `background_unavailable` for **every** target form (element_token AND
+  x,y+pid+window_id) on this X11 image. `foreground` (a brief window activate,
+  then the prior foreground is restored) is the only mode that works and
+  returns `effect=unverifiable route=global_input`. The M3.1 "delivery is
+  always background / never escalates to foreground" invariant is amended for
+  exactly these two verbs — it was a no-focus-shift fidelity guarantee, not a
+  containment boundary (the desktop is a human-less disposable container).
+- **A screen-`x,y` `double_click` / `right_click` resolves `pid` + `window_id`
+  locally** from `windowAtPoint(x,y)` — the front-most window (largest
+  `z_index`, ties → smaller area) in the last `observe()` that contains the
+  point — because the driver requires a window and has no desktop-scope form
+  for these two. Refused locally if no observed window contains the point.
+  `observe()` now stashes `this.lastWindows` (cleared at the top of every
+  `observe()` so a stale point fails closed).
+- **`hotkey` is rejected below 2 keys at the parse layer.** The driver requires
+  "modifier(s) + one non-modifier key" (probe: `["Escape"]` →
+  `invalid_arguments` "must contain at least two keys"); `parseComputerAction`
+  / `act()` enforce `2 ≤ keys.length ≤ 8` up front so a one-key chord never
+  spends a one-time approval — same principle M3.1 applied to element-targeted
+  `press_key` / `scroll`. Deliberate tightening of the task's stated
+  "non-empty" rule.
+- **`drag` is `scope:"desktop"` with no `pid`/`window_id`.** Probe: `{from_x,
+from_y, to_x, to_y, scope:"desktop", delivery_mode:"background"}` works
+  (`effect=unverifiable route=global_input`); adding `pid`/`window_id` →
+  `invalid_action_target` "desktop scope cannot be combined with pid or
+  window_id". `to` is x,y-only (no element end) as the task allowed for v1.
+  `driverArgs` param names are `from_x/from_y/to_x/to_y` (probed).
+- **All four M3.2 kinds return `effect=unverifiable` on this image, never
+  `confirmed`** — so none can self-report success; the model must re-observe.
 
-### M3.4 `computer_capture` — S (independent; could ship in M2)
+### M3.3 `computer_list_windows` — S — ✅ DONE (2026-08-31)
 
-- New tool; `WRITE_TOOLS` + `ONE_TIME_TOOLS`; params `session_id`, `path`;
-  `describeCall` shows exact destination. `agent-loop.ts` `execute()` branch =
-  near-verbatim copy of `browser_capture`: validate absolute path ≤4096,
-  `this.computer.observe()`, take `snapshot.screenshot`,
-  `gateway.uploadSessionFile(session_id, path, bytes, mediaType)`, return
-  `{saved,path,size,mediaType}`. Never persisted (the `computer_*` result
-  sanitizer already blanks it).
+New read tool (no args, **not** in `WRITE_TOOLS`), gated on `config.cua.enabled`;
+`agent-loop.ts` `execute()` branch → `this.computer.listWindows(signal)` (a
+plain string, auto-approved, no `computer_view` frame). `ComputerRuntime.listWindows()`
+= `list_windows` + `list_apps`, bounded (`MAX_WINDOWS` windows via
+`summarizeWindow`; `MAX_APPS` = 40 running apps as `{name, pid}`), no screenshot.
+`describeCall` → `"list computer windows"`. `list_apps` structuredContent shape
+(probed): `{apps:[{name, pid, running, active, bundle_id, kind, ...}]}` — only
+`name` + `pid` of `running !== false` entries are surfaced. Stub + FakeChild
+gained a `list_apps` handler.
+
+### M3.4 `computer_capture` — S — ✅ DONE (2026-08-31)
+
+New tool, `WRITE_TOOLS` ∩ `ONE_TIME_TOOLS`, gated on `config.cua.enabled`;
+params `session_id` + `path` (both required). `agent-loop.ts` `execute()` branch
+is a near-verbatim copy of `browser_capture`: validate `path` absolute and
+≤ 4096, `this.computer.observe(signal)`, `"error: computer did not return a
+screenshot"` when there is no snapshot, emit the `computer_view` frame, then
+`gateway.uploadSessionFile(session_id, path, bytes, mediaType)` (the **existing**
+`fs/upload` route — no gateway change), return `{saved, path, size, mediaType,
+viewport}`. `sanitizePersistedToolResult`'s `computer_*` rule already blanks it
+from durable history. `describeCall` → `"capture computer screen to <path>"`.
 
 ### M3.5 Proxied browsing — L, explicitly weaker guarantee
 
@@ -294,9 +336,10 @@ driver calls because the trailing re-observe re-walks every window;
   private/metadata request is 403'd by the proxy, raw-IP curl bypassing proxy
   env still works (documents the gap).
 
-**M3 exit:** element targeting, full action family, window listing, bounded
-capture; proxied browsing opt-in with a documented weaker guarantee. Matches
-the PLAN's v1 acceptance criteria.
+**M3 exit:** element targeting (M3.1 ✅), full action family (M3.2 ✅), window
+listing (M3.3 ✅), bounded capture (M3.4 ✅) — all landed 2026-08-31; **M3.5
+proxied browsing** is the only remaining M3 slice (opt-in, documented weaker
+guarantee). With M3.5 the milestone matches the PLAN's v1 acceptance criteria.
 
 ---
 

@@ -508,6 +508,36 @@ export class AgentLoop {
           this.send({ type: "computer_view", ...result.snapshot });
         return result.content;
       }
+      if (tool === "computer_list_windows")
+        return await this.computer.listWindows(signal);
+      if (tool === "computer_capture") {
+        if (!args.session_id) return "error: session_id is required";
+        if (
+          typeof args.path !== "string" ||
+          !args.path.startsWith("/") ||
+          args.path.length > 4096
+        ) {
+          return "error: path must be an absolute path of at most 4096 characters";
+        }
+        const result = await this.computer.observe(signal);
+        if (!result.snapshot)
+          return "error: computer did not return a screenshot";
+        this.send({ type: "computer_view", ...result.snapshot });
+        const bytes = Buffer.from(result.snapshot.screenshot.data, "base64");
+        const saved = await gateway.uploadSessionFile(
+          args.session_id,
+          args.path,
+          bytes,
+          result.snapshot.screenshot.mediaType,
+        );
+        return JSON.stringify({
+          saved: true,
+          path: saved.path,
+          size: saved.size,
+          mediaType: result.snapshot.screenshot.mediaType,
+          viewport: result.snapshot.viewport,
+        });
+      }
       return executeTool(tool, args, signal);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
@@ -753,12 +783,43 @@ function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
 }
 
 export function parseComputerAction(args: ToolArgs): ComputerAction | string {
+  // hotkey is global — it takes no target. The driver rejects a chord shorter
+  // than 2 keys, so reject that here rather than spend a one-time approval.
+  if (args.kind === "hotkey") {
+    const keys = args.keys;
+    if (!Array.isArray(keys) || keys.length < 2 || keys.length > 8)
+      return 'hotkey requires a chord of 2 to 8 keys (modifier(s) + one non-modifier key, e.g. ["ctrl","l"])';
+    if (
+      keys.some((k) => typeof k !== "string" || k.length === 0 || k.length > 16)
+    )
+      return "hotkey keys must each be a short key name of 1 to 16 characters";
+    return { kind: "hotkey", keys };
+  }
   const target = parseComputerTarget(args);
   if (typeof target === "string") return target;
   const isElement = "elementIndex" in target;
   switch (args.kind) {
     case "click":
       return { kind: "click", target };
+    case "double_click":
+      return { kind: "double_click", target };
+    case "right_click":
+      return { kind: "right_click", target };
+    case "drag":
+      if (isElement)
+        return "drag cannot target an element_index — supply screen x,y for both the start and end points";
+      if (
+        !Number.isInteger(args.to_x) ||
+        (args.to_x ?? -1) < 0 ||
+        !Number.isInteger(args.to_y) ||
+        (args.to_y ?? -1) < 0
+      )
+        return "drag requires integer to_x and to_y of at least 0";
+      return {
+        kind: "drag",
+        target,
+        to: { x: args.to_x as number, y: args.to_y as number },
+      };
     case "type_text":
       return typeof args.text === "string" && args.text.length <= 10_000
         ? { kind: "type_text", target, text: args.text }

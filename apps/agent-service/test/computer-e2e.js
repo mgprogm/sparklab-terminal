@@ -14,10 +14,13 @@
  *   docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real
  *   CUA_E2E_REAL=1 pnpm --filter @sparklab/agent-service test:computer-e2e
  *
- * Checks: 13 in stub mode (M2 baseline 10 + M3.1: element list in observe(),
- * act() by { elementIndex, snapshotId }, stale-snapshot local reject); real
- * mode adds one more (click a real AT-SPI element, or note zero-element
- * degradation) plus the optional CUA_EGRESS_NETWORK isolation check.
+ * Checks: 19 in stub mode (M2 baseline 10 + M3.1: element list in observe(),
+ * act() by { elementIndex, snapshotId }, stale-snapshot local reject + M3.2/M3.3:
+ * act(double_click) by element, act(right_click) by x,y, act(hotkey), act(drag)
+ * by two points, drag-with-element-target rejected locally, listWindows()
+ * summary); real mode adds two more (right_click by x,y not a transport error;
+ * click a real AT-SPI element or note zero-element degradation) plus the
+ * optional CUA_EGRESS_NETWORK isolation check.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -303,6 +306,128 @@ try {
         assert.equal(readLog().length, before, "no new docker/driver activity");
     },
   );
+
+  // ---- M3.2 / M3.3: extra action family + window listing ---------------
+
+  await check(
+    "act(double_click) by { elementIndex, snapshotId } is dispatched, not refused (M3.2)",
+    async () => {
+      const obs = await rt.observe();
+      const snap = /snapshotId (\S+)/.exec(obs.content)?.[1] ?? "";
+      const line = obs.content
+        .split("\n")
+        .find((l) => l.startsWith("elements ["));
+      const list = line ? JSON.parse(line.slice("elements ".length)) : [];
+      assert.ok(list.length > 0, "an element to target");
+      const result = await rt.act({
+        kind: "double_click",
+        target: { elementIndex: list[0].index, snapshotId: snap },
+      });
+      assert.doesNotMatch(result.content, /^error:/);
+      assert.match(result.content, /^double_click computer element \d+/);
+      assert.match(result.content, /effect=(confirmed|partial|unverifiable)/);
+      assert.doesNotMatch(result.content, /effect=refused/);
+      lastRevision = result.snapshot?.revision ?? lastRevision;
+    },
+  );
+
+  await check(
+    "act(right_click) by screen x,y resolves a window and is dispatched, not refused (M3.2)",
+    async () => {
+      await rt.observe(); // populate the window list windowAtPoint() reads
+      const result = await rt.act({
+        kind: "right_click",
+        target: { x: 100, y: 100 },
+      });
+      assert.doesNotMatch(result.content, /^error:/, result.content);
+      assert.match(result.content, /effect=(confirmed|partial|unverifiable)/);
+      assert.doesNotMatch(result.content, /effect=refused/);
+      lastRevision = result.snapshot?.revision ?? lastRevision;
+    },
+  );
+
+  await check(
+    "act(hotkey, ['ctrl','l']) is dispatched, not refused (M3.2)",
+    async () => {
+      const result = await rt.act({ kind: "hotkey", keys: ["ctrl", "l"] });
+      assert.match(result.content, /^hotkey computer ctrl\+l/);
+      assert.doesNotMatch(result.content, /^error:/);
+      assert.match(result.content, /effect=(confirmed|partial|unverifiable)/);
+      lastRevision = result.snapshot?.revision ?? lastRevision;
+    },
+  );
+
+  await check(
+    "act(drag) between two screen points is dispatched, not refused (M3.2)",
+    async () => {
+      const result = await rt.act({
+        kind: "drag",
+        target: { x: 10, y: 20 },
+        to: { x: 60, y: 80 },
+      });
+      assert.match(result.content, /^drag desktop @ 10,20 → 60,80/);
+      assert.doesNotMatch(result.content, /^error:/);
+      assert.match(result.content, /effect=(confirmed|partial|unverifiable)/);
+      lastRevision = result.snapshot?.revision ?? lastRevision;
+    },
+  );
+
+  await check(
+    "act(drag) with an element target is rejected locally (M3.2)",
+    async () => {
+      const obs = await rt.observe();
+      const snap = /snapshotId (\S+)/.exec(obs.content)?.[1] ?? "";
+      const before = REAL ? 0 : readLog().length;
+      const result = await rt.act({
+        kind: "drag",
+        target: { elementIndex: 0, snapshotId: snap },
+        to: { x: 1, y: 2 },
+      });
+      assert.match(result.content, /^error: drag cannot target an element/);
+      if (!REAL)
+        assert.equal(
+          readLog().length,
+          before,
+          "no driver round-trip for a rejected drag",
+        );
+    },
+  );
+
+  await check(
+    "listWindows() returns a bounded windows + apps summary (M3.3)",
+    async () => {
+      const text = await rt.listWindows();
+      assert.match(text, /windows \[/);
+      assert.match(text, REAL ? /"app":/ : /Thunar/);
+      assert.match(text, /apps \[/);
+      assert.doesNotMatch(text, /screenshot/);
+      assert.ok(
+        Buffer.byteLength(text) < 16384,
+        `summary ${Buffer.byteLength(text)} bytes`,
+      );
+    },
+  );
+
+  if (REAL) {
+    await check(
+      "REAL: right_click by screen x,y returns an ActionResult, not a transport error (M3.2)",
+      async () => {
+        await rt.observe();
+        const result = await rt.act({
+          kind: "right_click",
+          target: { x: 640, y: 450 },
+        });
+        // foreground delivery — may be unverifiable, must not be a transport
+        // error or a local rejection.
+        assert.doesNotMatch(
+          result.content,
+          /^error: |error: computer /,
+          result.content,
+        );
+        assert.match(result.content, /effect=(confirmed|partial|unverifiable)/);
+      },
+    );
+  }
 
   if (REAL) {
     await check(

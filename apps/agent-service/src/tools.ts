@@ -7,9 +7,11 @@
  * processes via the gateway or the isolated Browser Use runtime.
  *
  *   READ  (auto):  list_sessions, read_screen, wait_idle,
- *                  browser_observe, browser_list_tabs
+ *                  browser_observe, browser_list_tabs, computer_observe,
+ *                  computer_list_windows
  *   WRITE (ask):   type_text, press_keys, run_command, create_session,
- *                  run_codex, browser_act, browser_capture, browser_request_handoff
+ *                  run_codex, browser_act, browser_capture, browser_request_handoff,
+ *                  computer_act, computer_capture
  *
  * There is deliberately no kill_session — destroying a session stays a
  * human-only act in the UI.
@@ -33,10 +35,11 @@ export const WRITE_TOOLS = new Set([
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
-  // Virtual Computer (CUA) — spike. computer_observe is a read (absent here);
-  // computer_act is a write and also in ONE_TIME_TOOLS (re-approved every call,
-  // like browser_act).
+  // Virtual Computer (CUA). computer_observe / computer_list_windows are reads
+  // (absent here); computer_act and computer_capture are writes and also in
+  // ONE_TIME_TOOLS (re-approved every call, like browser_act / browser_capture).
   "computer_act",
+  "computer_capture",
   // Kanban writes (D9). The routine four permit allow-always; kanban_delete is
   // additionally in ONE_TIME_TOOLS so it is re-approved on every call.
   "kanban_create",
@@ -94,7 +97,10 @@ export const ONE_TIME_TOOLS = new Set([
   "browser_act",
   "browser_capture",
   "browser_request_handoff",
+  // Every computer_act (one desktop input) and computer_capture (a screenshot
+  // written to the session's server) is approved individually, like browser_*.
   "computer_act",
+  "computer_capture",
   "run_codex",
   "kanban_delete",
   // Destroying a whole project is coerced one-time (D12), like kanban_delete.
@@ -1464,20 +1470,36 @@ if (config.cua.enabled) {
       function: {
         name: "computer_act",
         description:
-          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. For click and type_text, prefer element_index + snapshot_id from the latest computer_observe; fall back to screen-absolute x,y only when no element matches (a canvas, or a window listed as having no elements). press_key and scroll always take screen-absolute x,y. Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
+          'Perform exactly one desktop input action. Always requires one-time user approval. Observe first. kind is one of click, double_click, right_click, drag, type_text, press_key, scroll, hotkey. For click, double_click, right_click and type_text, prefer element_index + snapshot_id from the latest computer_observe; fall back to screen-absolute x,y only when no element matches (a canvas, or a window listed as having no elements). press_key and scroll always take screen-absolute x,y. drag takes screen-absolute x,y (start) plus to_x,to_y (end) — no element. hotkey is a global modifier+key chord (keys, e.g. ["ctrl","l"]) with no target. Delivery is background, except double_click and right_click which briefly focus the target window and then restore the previous one. Type only non-secret data explicitly supplied for this task. The result reports the driver\'s effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.',
         parameters: {
           type: "object",
           properties: {
             kind: {
               type: "string",
-              enum: ["click", "type_text", "press_key", "scroll"],
+              enum: [
+                "click",
+                "double_click",
+                "right_click",
+                "drag",
+                "type_text",
+                "press_key",
+                "scroll",
+                "hotkey",
+              ],
             },
             element_index: { type: "integer", minimum: 0 },
             snapshot_id: { type: "string", maxLength: 64 },
             x: { type: "integer", minimum: 0, maximum: 100000 },
             y: { type: "integer", minimum: 0, maximum: 100000 },
+            to_x: { type: "integer", minimum: 0, maximum: 100000 },
+            to_y: { type: "integer", minimum: 0, maximum: 100000 },
             text: { type: "string", maxLength: 10000 },
             key: { type: "string", maxLength: 64 },
+            keys: {
+              type: "array",
+              items: { type: "string", maxLength: 16 },
+              maxItems: 8,
+            },
             direction: {
               type: "string",
               enum: ["up", "down", "left", "right"],
@@ -1485,6 +1507,44 @@ if (config.cua.enabled) {
             amount: { type: "string", enum: ["line", "page"] },
           },
           required: ["kind"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "computer_list_windows",
+        description:
+          "List the disposable desktop's open windows (window_id, pid, title, app, geometry) and its running apps. Read-only, no screenshot and no Computer View frame — the cheap way to check what is on the desktop without a full computer_observe.",
+        parameters: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "computer_capture",
+        description:
+          "Save the disposable desktop's current screenshot (PNG) to an absolute path on the server of the selected terminal session. The parent directory must already exist and an existing file is overwritten. Always requires one-time user approval. The screenshot is also shown in Computer View but is never stored in chat history.",
+        parameters: {
+          type: "object",
+          properties: {
+            session_id: {
+              type: "string",
+              description:
+                "Target terminal session whose server will receive the screenshot file.",
+            },
+            path: {
+              type: "string",
+              description:
+                "Absolute destination file path, for example /home/user/project/screenshots/desktop.png.",
+            },
+          },
+          required: ["session_id", "path"],
           additionalProperties: false,
         },
       },
@@ -1561,13 +1621,17 @@ export interface ToolArgs {
   markdown?: string;
   to_section_id?: string;
   to_parent_id?: string;
-  // Virtual Computer (CUA). click / type_text prefer element_index +
-  // snapshot_id (M3.1); press_key / scroll and the fallback take screen x,y.
+  // Virtual Computer (CUA). click / double_click / right_click / type_text
+  // prefer element_index + snapshot_id (M3.1); press_key / scroll and the
+  // fallback take screen x,y. drag adds to_x/to_y (end point); hotkey uses
+  // `keys` (declared above for the terminal key tools).
   kind?: string;
   element_index?: number;
   snapshot_id?: string;
   x?: number;
   y?: number;
+  to_x?: number;
+  to_y?: number;
   key?: string;
   amount?: string;
 }
@@ -1636,7 +1700,13 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return "go back in browser";
     case "computer_observe":
       return "observe computer desktop";
+    case "computer_list_windows":
+      return "list computer windows";
+    case "computer_capture":
+      return `capture computer screen to ${truncate(String(args.path ?? ""))}`;
     case "computer_act": {
+      if (args.kind === "hotkey")
+        return `hotkey computer ${(args.keys ?? []).join("+")}`.trimEnd();
       const where =
         Number.isInteger(args.element_index) &&
         typeof args.snapshot_id === "string" &&
@@ -1645,12 +1715,16 @@ export function describeCall(tool: string, args: ToolArgs): string {
           : typeof args.x === "number" && typeof args.y === "number"
             ? `@ ${args.x},${args.y}`
             : "target ?";
+      if (args.kind === "drag")
+        return `drag computer ${where} → ${args.to_x ?? "?"},${args.to_y ?? "?"}`;
       if (args.kind === "type_text")
         return `type into computer ${where}: [redacted]`;
       if (args.kind === "press_key")
         return `press ${String(args.key ?? "?")} on computer ${where}`;
       if (args.kind === "scroll")
         return `scroll computer ${where} ${String(args.direction ?? "")}`.trimEnd();
+      if (args.kind === "double_click") return `double_click computer ${where}`;
+      if (args.kind === "right_click") return `right_click computer ${where}`;
       return `click computer ${where}`;
     }
     case "kanban_list":

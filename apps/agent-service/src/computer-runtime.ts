@@ -18,13 +18,18 @@
  *     window_id, include_screenshot:false})` is called for up to MAX_WINDOWS
  *     on-screen windows to build ONE flat indexed element list.
  *   - act: an element target (`elementIndex` + `snapshotId` from the latest
- *     observe) is the preferred form for `click` / `type_text` — dispatched via
- *     the driver's `element_token` (per-element, per-window; supersession is
- *     per-window, so tokens collected across a whole observe stay live until the
- *     next observe). Screen-absolute `scope:"desktop"` x,y stays the fallback
- *     (and the only form for `press_key` / `scroll`). All delivery is
- *     `delivery_mode:"background"` (XTEST / XInput2 master pointer, no focus
- *     steal).
+ *     observe) is the preferred form for `click` / `double_click` / `right_click`
+ *     / `type_text` — dispatched via the driver's `element_token` (per-element,
+ *     per-window; supersession is per-window, so tokens collected across a whole
+ *     observe stay live until the next observe). Screen-absolute
+ *     `scope:"desktop"` x,y is the fallback (and the only form for `press_key` /
+ *     `scroll`; `drag` is two x,y points; `hotkey` is a global chord). Delivery
+ *     is `delivery_mode:"background"` (XTEST / XInput2, no focus steal) for every
+ *     kind EXCEPT `double_click` / `right_click`: those two driver verbs have no
+ *     focus-free X11 route (the 0.22.2 probe returned `background_unavailable`
+ *     for every target form), so they use `delivery_mode:"foreground"` — a brief
+ *     window activate + restore, a fidelity trade on a human-less disposable
+ *     desktop, not a containment change.
  *
  * Everything container-specific lives behind the private `docker*` helpers so
  * the tool layer and the frontend stay backend-agnostic and a later VM/cloud
@@ -104,6 +109,8 @@ export interface DriverElementRef {
 
 export type ComputerAction =
   | { kind: "click"; target: ComputerTarget }
+  | { kind: "double_click"; target: ComputerTarget }
+  | { kind: "right_click"; target: ComputerTarget }
   | { kind: "type_text"; target: ComputerTarget; text: string }
   | { kind: "press_key"; target: ComputerTarget; key: string }
   | {
@@ -111,7 +118,13 @@ export type ComputerAction =
       target: ComputerTarget;
       direction: "up" | "down" | "left" | "right";
       amount?: "line" | "page";
-    };
+    }
+  // A pointer drag from a start point to an end point. Both ends are
+  // screen-absolute x,y (no element target); dispatched at scope:"desktop".
+  | { kind: "drag"; target: ComputerTarget; to: { x: number; y: number } }
+  // A global modifier+key chord. No target — hotkey is delivered to whatever
+  // the desktop last focused (route:"global_input").
+  | { kind: "hotkey"; keys: string[] };
 
 export interface ComputerObserveResult {
   /**
@@ -146,6 +159,13 @@ const MAX_ELEMENTS = 200;
 const MAX_WINDOW_ELEMENTS = 80;
 const MAX_ELEMENT_NAME = 200;
 const MAX_ELEMENT_ROLE = 60;
+// hotkey chord bounds (M3.2). The driver additionally requires >= 2 keys
+// (modifier(s) + one non-modifier); act() / parseComputerAction enforce that up
+// front so the model never spends an approval on a guaranteed rejection.
+const MAX_HOTKEY_KEYS = 8;
+const MAX_HOTKEY_KEY_LEN = 16;
+// Upper bound on the running-app inventory listWindows() hands the model (M3.3).
+const MAX_APPS = 40;
 const START_ATTEMPTS = 8;
 const ORPHAN_LABEL = "sparklab-cua";
 // Per-instance sweep label (M2.3). sweepOrphans() filters on THIS so a second
@@ -157,9 +177,13 @@ const ORPHAN_INSTANCE_LABEL = "sparklab-cua-instance";
 /** cua-driver desktop-input family (verified against 0.22.2). */
 const ACTION_TOOL: Record<ComputerAction["kind"], string> = {
   click: "click",
+  double_click: "double_click",
+  right_click: "right_click",
   type_text: "type_text",
   press_key: "press_key",
   scroll: "scroll",
+  drag: "drag",
+  hotkey: "hotkey",
 };
 
 export class ComputerRuntime {
@@ -177,6 +201,19 @@ export class ComputerRuntime {
   // is what makes stale element targets fail closed.
   private lastElements = new Map<number, StoredElement>();
   private lastSnapshotId = "";
+  // M3.2: on-screen window rectangles from the LATEST observe(), used to resolve
+  // the pid + window_id a screen-absolute double_click / right_click must carry
+  // (those driver tools have no `scope:"desktop"` form and require a window).
+  // Cleared at the top of observe() so a stale point target fails closed.
+  private lastWindows: Array<{
+    pid: number;
+    windowId: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    zIndex: number;
+  }> = [];
   private pending = new Map<
     number,
     { resolve: (r: McpResponse) => void; reject: (e: Error) => void }
@@ -257,6 +294,7 @@ export class ComputerRuntime {
     // being dispatched against a stale token (QA M3.1 #7).
     this.lastElements = new Map();
     this.lastSnapshotId = "";
+    this.lastWindows = [];
     // 0.22.2: get_desktop_state writes the PNG to a file INSIDE the container
     // (no inline base64 for the desktop) and returns its screen dimensions.
     const shotPath = `${config.cua.screenshotDir.replace(/\/+$/, "")}/cua-${randomUUID()}.png`;
@@ -317,6 +355,20 @@ export class ComputerRuntime {
     } catch {
       // keep default
     }
+    // Stash window rectangles for windowAtPoint() (M3.2). Same set the model
+    // sees in `windows [...]`, so a resolved pid/window_id is always a window
+    // the model could name.
+    this.lastWindows = visibleWindows
+      .map((w) => ({
+        pid: toInt(w.pid) ?? 0,
+        windowId: toInt(w.window_id) ?? 0,
+        x: finiteNum(w.x) ?? 0,
+        y: finiteNum(w.y) ?? 0,
+        width: finiteNum(w.width) ?? 0,
+        height: finiteNum(w.height) ?? 0,
+        zIndex: finiteNum(w.z_index) ?? 0,
+      }))
+      .filter((w) => w.pid && w.windowId && w.width > 0 && w.height > 0);
 
     // M3.1 — per-window AT-SPI elements merged into ONE flat indexed list.
     // get_window_state supersession is per-window (verified against 0.22.2), so
@@ -440,8 +492,44 @@ export class ComputerRuntime {
     action: ComputerAction,
     signal?: AbortSignal,
   ): Promise<ComputerActResult> {
+    // hotkey is global — no target. Validate the chord locally: the driver
+    // rejects < 2 keys (invalid_arguments) so a one-key chord must never reach
+    // it and spend an approval.
+    if (action.kind === "hotkey") {
+      const keys = action.keys;
+      if (
+        !Array.isArray(keys) ||
+        keys.length < 2 ||
+        keys.length > MAX_HOTKEY_KEYS ||
+        keys.some(
+          (k) =>
+            typeof k !== "string" ||
+            k.length === 0 ||
+            k.length > MAX_HOTKEY_KEY_LEN,
+        )
+      )
+        return {
+          content: `error: hotkey requires a chord of 2-${MAX_HOTKEY_KEYS} short key names (modifier(s) + one non-modifier key, e.g. ["ctrl","l"])`,
+        };
+      return this.dispatch(
+        ACTION_TOOL.hotkey,
+        driverArgs(action),
+        `hotkey computer ${keys.join("+")}`,
+        signal,
+      );
+    }
+
     const target = action.target;
     let element: DriverElementRef | undefined;
+    let pointWindow: { pid: number; windowId: number } | undefined;
+    // click / type_text / double_click / right_click may target an element;
+    // press_key / scroll / drag are pixel-only.
+    const elementKinds = new Set([
+      "click",
+      "type_text",
+      "double_click",
+      "right_click",
+    ]);
     if ("elementIndex" in target) {
       // Element target — validate against the LATEST observation before any
       // driver round-trip. A stale snapshot id or an unknown index is a spent
@@ -455,7 +543,7 @@ export class ComputerRuntime {
         return {
           content: `error: element ${target.elementIndex} is not in the latest observation`,
         };
-      if (action.kind !== "click" && action.kind !== "type_text")
+      if (!elementKinds.has(action.kind))
         return {
           content: `error: ${action.kind} cannot target an element — supply screen x,y`,
         };
@@ -477,13 +565,56 @@ export class ComputerRuntime {
         content:
           "error: target requires screen x + y or element_index + snapshot_id",
       };
+    } else if (
+      action.kind === "double_click" ||
+      action.kind === "right_click"
+    ) {
+      // double_click / right_click have no `scope:"desktop"` form — they must
+      // carry a pid + window_id. Resolve the front-most observed window under
+      // the point; fail closed if there is no observation to resolve against.
+      pointWindow = this.windowAtPoint(target.x, target.y);
+      if (!pointWindow)
+        return {
+          content:
+            "error: no observed window contains those coordinates — call computer_observe first",
+        };
     }
-    const args = driverArgs(action, element);
-    const actionContent = await this.call(
-      ACTION_TOOL[action.kind],
-      args,
-      signal,
-    );
+
+    if (action.kind === "drag") {
+      const to = action.to;
+      if (
+        !to ||
+        typeof to.x !== "number" ||
+        typeof to.y !== "number" ||
+        Number.isNaN(to.x) ||
+        Number.isNaN(to.y)
+      )
+        return { content: "error: drag requires a destination to_x + to_y" };
+    }
+
+    const args = driverArgs(action, element, pointWindow);
+    const actionText =
+      action.kind === "type_text"
+        ? "typed [redacted]"
+        : action.kind === "drag"
+          ? `drag desktop @ ${(target as { x: number }).x},${(target as { y: number }).y} → ${action.to.x},${action.to.y}`
+          : "elementIndex" in target
+            ? `${action.kind} computer element ${target.elementIndex}`
+            : `${action.kind} desktop @ ${target.x},${target.y}`;
+    return this.dispatch(ACTION_TOOL[action.kind], args, actionText, signal);
+  }
+
+  /**
+   * Dispatch one already-validated driver call, then re-observe (which
+   * supersedes every element token) and stitch the model-facing text.
+   */
+  private async dispatch(
+    toolName: string,
+    args: Record<string, unknown>,
+    actionText: string,
+    signal?: AbortSignal,
+  ): Promise<ComputerActResult> {
+    const actionContent = await this.call(toolName, args, signal);
     // The driver returns the ActionResult as structuredContent (0.15); older
     // builds put a JSON blob in text. `isError` (transport failure) is already
     // handled in `call()`.
@@ -499,16 +630,78 @@ export class ComputerRuntime {
     } catch (error) {
       observation = `re-observation failed: ${errMsg(error)}`;
     }
-    const actionText =
-      action.kind === "type_text"
-        ? "typed [redacted]"
-        : "elementIndex" in target
-          ? `${action.kind} computer element ${target.elementIndex}`
-          : `${action.kind} desktop @ ${target.x},${target.y}`;
     return {
       content: `${actionText}\n${resultText}\n${observation}`,
       snapshot,
     };
+  }
+
+  /**
+   * Front-most window from the LATEST observe() whose rectangle contains the
+   * point (largest z-index wins; ties break to the smaller window). Used to
+   * carry a pid + window_id on a screen-absolute double_click / right_click.
+   */
+  private windowAtPoint(
+    x: number,
+    y: number,
+  ): { pid: number; windowId: number } | undefined {
+    const hits = this.lastWindows.filter(
+      (w) => x >= w.x && x < w.x + w.width && y >= w.y && y < w.y + w.height,
+    );
+    if (!hits.length) return undefined;
+    hits.sort(
+      (a, b) => b.zIndex - a.zIndex || a.width * a.height - b.width * b.height,
+    );
+    const top = hits[0]!;
+    return { pid: top.pid, windowId: top.windowId };
+  }
+
+  /**
+   * M3.3 — a bounded text inventory of open windows + running apps, no
+   * screenshot and no `computer_view` frame. The cheap analogue of
+   * `browser_list_tabs`.
+   */
+  async listWindows(signal?: AbortSignal): Promise<string> {
+    let windowsText = "windows unavailable";
+    try {
+      const wins = asRecord(
+        pickStructured(await this.call("list_windows", {}, signal)),
+      );
+      const rawList = Array.isArray(wins?.windows) ? wins.windows : [];
+      const visible = rawList
+        .map((w) => asRecord(w) ?? {})
+        .filter(
+          (w) =>
+            w.is_on_screen !== false &&
+            toInt(w.pid) !== undefined &&
+            toInt(w.window_id) !== undefined &&
+            !isOffscreenGeometry(w),
+        )
+        .slice(0, MAX_WINDOWS)
+        .map(summarizeWindow);
+      windowsText = `windows ${JSON.stringify(visible)}`;
+    } catch {
+      // keep default
+    }
+    let appsText = "apps unavailable";
+    try {
+      const apps = asRecord(
+        pickStructured(await this.call("list_apps", {}, signal)),
+      );
+      const rawApps = Array.isArray(apps?.apps) ? apps.apps : [];
+      const running = rawApps
+        .map((a) => asRecord(a) ?? {})
+        .filter((a) => a.running !== false && typeof a.name === "string")
+        .slice(0, MAX_APPS)
+        .map((a) => ({
+          name: String(a.name).slice(0, MAX_ELEMENT_NAME),
+          pid: toInt(a.pid),
+        }));
+      appsText = `apps ${JSON.stringify(running)}`;
+    } catch {
+      // keep default
+    }
+    return [windowsText, appsText].join("\n");
   }
 
   dispose(): Promise<number> {
@@ -939,25 +1132,85 @@ export class ComputerRuntime {
 /**
  * Map a structured ComputerAction to 0.22.2 driver-tool arguments.
  *
- * Delivery is always `delivery_mode:"background"` (XTEST / XInput2 master
- * pointer, no focus steal — verified against 0.22.2).
+ * Delivery is `delivery_mode:"background"` (XTEST / XInput2 master pointer, no
+ * focus steal — verified against 0.22.2) for every kind EXCEPT `double_click` /
+ * `right_click`: those two driver verbs have no focus-free route on X11 (the
+ * real 0.22.2 probe returned `background_unavailable` for both element and x,y
+ * targets), so they escalate to `delivery_mode:"foreground"` — a brief activate
+ * of the target window, then the prior foreground is restored. `drag` /
+ * `hotkey` are dispatched at `scope:"desktop"` with no window; `drag` must NOT
+ * carry a pid/window_id (`invalid_action_target` when combined with desktop
+ * scope).
  *
- * When `element` is supplied (an element target, `click` / `type_text` only —
- * M3.1) the driver is addressed by its per-element `element_token` (which
- * carries `snapshot_id:element_index`), falling back to explicit
- * `element_index + snapshot_id` if the snapshot carried no tokens. `pid` +
- * `window_id` are always sent alongside — the driver rejects `element_token`
- * without a `pid` ("Missing required integer field: pid"). `press_key` /
- * `scroll` and every pixel target stay `scope:"desktop"` screen-absolute:
+ * When `element` is supplied (an element target, `click` / `type_text` /
+ * `double_click` / `right_click`) the driver is addressed by its per-element
+ * `element_token` (which carries `snapshot_id:element_index`), falling back to
+ * explicit `element_index + snapshot_id` if the snapshot carried no tokens.
+ * `pid` + `window_id` are always sent alongside — the driver rejects
+ * `element_token` without a `pid` ("Missing required integer field: pid").
+ * `pointWindow` carries the same pid/window_id resolved from the last observe
+ * for a screen-absolute `double_click` / `right_click`. `press_key` / `scroll`
+ * and every pixel target stay `scope:"desktop"` screen-absolute;
  * element-targeted `press_key` / `scroll` under background delivery always
- * return `background_unavailable` on X11 (the XTest route only reaches the
- * globally-focused widget).
+ * return `background_unavailable` on X11.
  */
 export function driverArgs(
   action: ComputerAction,
   element?: DriverElementRef,
+  pointWindow?: { pid: number; windowId: number },
 ): Record<string, unknown> {
+  // hotkey — global chord. No target, no element.
+  if (action.kind === "hotkey")
+    return {
+      scope: "desktop",
+      keys: action.keys,
+      delivery_mode: "background",
+    };
+  // drag — two screen points at desktop scope; a pid/window_id here is refused.
+  if (action.kind === "drag") {
+    const from = action.target as { x: number; y: number };
+    return {
+      from_x: from.x,
+      from_y: from.y,
+      to_x: action.to.x,
+      to_y: action.to.y,
+      scope: "desktop",
+      delivery_mode: "background",
+    };
+  }
+
   const t = action.target;
+
+  // double_click / right_click — foreground delivery; needs a window handle
+  // (element target OR a pointWindow resolved from the last observe).
+  if (action.kind === "double_click" || action.kind === "right_click") {
+    const fg = { delivery_mode: "foreground" as const };
+    if ("elementIndex" in t && element) {
+      const handle = element.token
+        ? { element_token: element.token }
+        : {
+            element_index: element.driverElementIndex,
+            snapshot_id: element.driverSnapshotId,
+          };
+      return {
+        ...handle,
+        pid: element.pid,
+        window_id: element.windowId,
+        ...fg,
+      };
+    }
+    if ("x" in t && pointWindow)
+      return {
+        x: t.x,
+        y: t.y,
+        pid: pointWindow.pid,
+        window_id: pointWindow.windowId,
+        ...fg,
+      };
+    // act() validates both arms before calling; defensive fallthrough only.
+    return { ...("x" in t ? { x: t.x, y: t.y } : {}), ...fg };
+  }
+
   const delivery = { delivery_mode: "background" as const };
   if ("elementIndex" in t && element) {
     const handle = element.token

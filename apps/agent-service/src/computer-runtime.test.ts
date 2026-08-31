@@ -175,6 +175,105 @@ test("driverArgs element target — prefers element_token, sends pid + window_id
   });
 });
 
+test("computer_list_windows + computer_capture are offered when CUA_ENABLED (M3.3 / M3.4)", () => {
+  const names = TOOLS.map((t) => t.function.name);
+  assert.ok(names.includes("computer_list_windows"));
+  assert.ok(names.includes("computer_capture"));
+  const capture = TOOLS.find((t) => t.function.name === "computer_capture");
+  assert.deepEqual(capture?.function.parameters?.required, [
+    "session_id",
+    "path",
+  ]);
+  const act = TOOLS.find((t) => t.function.name === "computer_act");
+  const kindEnum =
+    (
+      act?.function.parameters?.properties as Record<
+        string,
+        { enum?: string[] }
+      >
+    )?.kind?.enum ?? [];
+  for (const k of ["double_click", "right_click", "drag", "hotkey"])
+    assert.ok(kindEnum.includes(k), `kind enum has ${k}`);
+});
+
+test("driverArgs — double_click / right_click escalate to foreground (M3.2, probed)", () => {
+  // Element target: element_token + pid + window_id + foreground, no scope.
+  const dcEl = driverArgs(
+    { kind: "double_click", target: { elementIndex: 0, snapshotId: "snap-1" } },
+    {
+      pid: 77,
+      windowId: 12582915,
+      token: "s00000001:0",
+      driverSnapshotId: "s00000001",
+      driverElementIndex: 0,
+    },
+  );
+  // Exact deepEqual — proves `scope` is absent (double_click has no scope param)
+  // and delivery is foreground, not background.
+  assert.deepEqual(dcEl, {
+    element_token: "s00000001:0",
+    pid: 77,
+    window_id: 12582915,
+    delivery_mode: "foreground",
+  });
+
+  // Screen point: x,y + a resolved pointWindow's pid/window_id + foreground.
+  const rcXy = driverArgs(
+    { kind: "right_click", target: { x: 640, y: 450 } },
+    undefined,
+    { pid: 90, windowId: 14680104 },
+  );
+  assert.deepEqual(rcXy, {
+    x: 640,
+    y: 450,
+    pid: 90,
+    window_id: 14680104,
+    delivery_mode: "foreground",
+  });
+});
+
+test("driverArgs — drag is two desktop points, background, no pid/window_id (M3.2, probed)", () => {
+  const args = driverArgs({
+    kind: "drag",
+    target: { x: 300, y: 300 },
+    to: { x: 500, y: 420 },
+  });
+  assert.deepEqual(args, {
+    from_x: 300,
+    from_y: 300,
+    to_x: 500,
+    to_y: 420,
+    scope: "desktop",
+    delivery_mode: "background",
+  });
+});
+
+test("driverArgs — hotkey is a desktop-scope chord, background, no target (M3.2, probed)", () => {
+  const args = driverArgs({ kind: "hotkey", keys: ["ctrl", "l"] });
+  assert.deepEqual(args, {
+    scope: "desktop",
+    keys: ["ctrl", "l"],
+    delivery_mode: "background",
+  });
+});
+
+test("listWindows() returns a bounded windows + apps summary, no screenshot (M3.3)", async () => {
+  const { spawn } = fakeSpawn();
+  const rt = new ComputerRuntime(undefined, { label: "chat-lw", spawn });
+  const text = await rt.listWindows();
+  assert.match(text, /^windows \[/m);
+  assert.match(text, /"app":"X"/);
+  assert.match(text, /\napps \[/);
+  assert.match(text, /"name":"Thunar","pid":1/);
+  assert.doesNotMatch(text, /ghost/, "a non-running app is filtered out");
+  assert.doesNotMatch(text, /screenshot|data:/, "no screenshot bytes");
+  assert.ok(
+    Buffer.byteLength(text) < 8192,
+    `summary ${Buffer.byteLength(text)} bytes`,
+  );
+  await rt.stop();
+});
+
 test("parseWindowElements — real Thunar structuredContent (labelled + unlabelled, tokens, snapshot id)", () => {
   const parsed = parseWindowElements(REAL_THUNAR_WINDOW_STATE);
   assert.equal(parsed.snapshotId, "s00000002");
@@ -428,6 +527,19 @@ class FakeChild extends EventEmitter {
           result: {
             content: [{ type: "text", text: "1280x800" }],
             structuredContent: { width: 1280, height: 800, scale_factor: 1 },
+          },
+        });
+      } else if (name === "list_apps") {
+        this.#emit({
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: "2 apps" }],
+            structuredContent: {
+              apps: [
+                { name: "Thunar", pid: 1, running: true },
+                { name: "ghost", pid: 2, running: false },
+              ],
+            },
           },
         });
       } else {
