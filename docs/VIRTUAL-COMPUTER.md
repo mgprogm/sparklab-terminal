@@ -556,7 +556,8 @@ allowlisted tools are admitted (`get_screen_size`, `list_windows`, `list_apps`,
 
 Testing the feature through the real Agent Chat UI (real browser, real
 container, real BytePlus DeepSeek-V4-Pro model — not the stub/harness) surfaced
-three real bugs the harness's synchronous call/response pattern never hit:
+four real bugs the harness's synchronous call/response pattern never hit
+(plus a fifth in the shared approval gate, below):
 
 1. **`files.write` gap in the bounded-mode manifest (fixed).** The very first
    `computer_observe` under bounded mode failed closed with `error: protected
@@ -614,6 +615,45 @@ CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS=<value>` in
    tick; the long override (28800s) survives the same sleep with no
    session-ended error. `CUA_E2E_REAL=1 test:computer-e2e` still 17/17 with
    the env var wired in.
+4. **`ApprovalCard` mislabeled every `computer_act` approval "type into"
+   (fixed).** Approving the click above surfaced a card reading "APPROVAL
+   NEEDED / type into" — no indication a _click_ was pending — plus a
+   persistent "Auto-approve typing this session" checkbox. Root cause:
+   `apps/terminal/.../components/approval-card.tsx`'s label ternary predates
+   `computer_act`/`computer_capture` and falls through to its generic
+   `"type into"` default for every kind (click, double_click, right_click,
+   drag, hotkey, scroll, press_key — not just `type_text`); the same
+   fallthrough also skipped the one-time-only treatment `browser_act` already
+   gets, so the checkbox rendered even though the backend already coerces both
+   tools one-time via `ONE_TIME_TOOLS` (no security gap — the checkbox simply
+   had no effect and looked like it did). Fixed with a `computerActionLabel()`
+   keyed on `input.kind`, computer_act/computer_capture routed through the
+   same one-time button/copy path as browser actions, and `entry.summary`
+   rendered in the detail box (already used for browser_act/browser_capture)
+   so the approver sees the real target, e.g. "click computer element 0" or
+   the already-redacted "type into computer element 2: [redacted]" — no new
+   leak. Verified live: click → "COMPUTER APPROVAL NEEDED / click on the
+   computer"; hotkey → "send a hotkey to the computer"; `type_text` → "type
+   into the computer" with the detail box showing `[redacted]`, never the
+   typed string; `computer_capture` → "save a computer screenshot" with the
+   destination path and (unlike `computer_act`) its terminal-session badge
+   retained. 3 new `approval-card.test.tsx` cases; `apps/terminal` typecheck
+   clean; full vitest 334/334 (was 327/327).
+
+The same testing pass also surfaced a fifth bug in the **shared** approval
+gate every write tool uses (not CUA-specific): the 120s approval timeout and
+an explicit Deny click both resolved to the same wire `"deny"` behavior, and
+the model told the human "you denied this action" even when an approval had
+simply sat un-actioned (confirmed live — an approval expired during an
+unrelated investigation and the model reported a denial that never happened).
+Fixed in `approvals.ts`: a `wasTimedOut(requestId)` check (populated only in
+the timeout branch, consumed on read) lets `agent-loop.ts` choose an honest
+model-facing message — "approval timed out (no response)" vs "denied by
+user" — without changing the wire behavior or the frontend. Verified: two new
+`approvals.test.ts` cases (explicit deny → false; `node:test` fake timers
+firing the real 120s timeout → true, then false on a second read) plus a live
+explicit Deny click that still produces the unchanged "denied by user" in the
+run's `events.jsonl`.
 
 ## Enabling CUA for one operator
 

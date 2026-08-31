@@ -369,6 +369,54 @@ recommended default and the only mode with a hard zero-egress guarantee.
 
 ---
 
+## Post-M3 live Agent Chat end-to-end testing (2026-08-31)
+
+Manually driven through the real Agent Chat UI (real browser, real container,
+real BytePlus DeepSeek-V4-Pro model) end to end across observe/act/capture,
+approve/deny, and teardown. Found and fixed four real bugs the harness's
+synchronous call/response pattern doesn't exercise — full detail in
+`VIRTUAL-COMPUTER.md`'s "Live Agent Chat end-to-end findings" section:
+
+1. `capability-manifest.yaml` was missing a `files.write` grant for
+   `screenshot_out_file` — bounded mode failed every observe/capture closed.
+   **Fixed** (manifest + image rebuild).
+2. Bounded mode's `apps:` grant has no wildcard, so it's architecturally
+   incompatible with M3.1's "any app that happens to be open" element
+   targeting. **Not fixed** — `.env` runs `standard`; tracked as an Open item.
+3. `cua-driver` runs its own background idle-session sweep, independent of
+   container health, that permanently ends the implicit session (agent-service
+   never calls `start_session`) after 300s idle — a slow chat trivially
+   exceeds that, and every subsequent call then fails closed for the rest of
+   the chat with no recovery path. **Fixed**: `cua.sessionIdleTtlSecs`
+   (default 28800s) wired to the driver via `-e
+CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS`; reproduced + confirmed with
+   `test/cua-real/probe-session-ttl.mjs`.
+4. The frontend `ApprovalCard`'s label logic predates `computer_act` /
+   `computer_capture` and fell through to "type into" for every kind (click,
+   drag, hotkey, scroll, ...) — plus a persistent "Auto-approve typing this
+   session" checkbox that had no effect (the backend already coerces both
+   tools one-time via `ONE_TIME_TOOLS`) but looked like it did. **Fixed**: a
+   `computerActionLabel()` keyed on `input.kind`, the same one-time-only
+   button/copy treatment `browser_act` already gets, and `entry.summary`
+   rendered in the detail box so the approver sees the real target. Covered
+   by 3 new `approval-card.test.tsx` cases + a live browser check.
+
+A fifth, adjacent bug surfaced by the same testing (not CUA-specific — the
+approval gate is shared by every write tool): the 120s approval timeout and an
+explicit Deny click both resolved to the same `"deny"` wire behavior, and the
+model told the human "you denied this action" even when they never saw the
+request. **Fixed** in `approvals.ts`/`agent-loop.ts`:
+`ApprovalManager.wasTimedOut(requestId)` distinguishes the two so the
+model-facing text is honest about which happened. See
+`agent-service/src/approvals.test.ts`.
+
+All four CUA-specific findings were caught only by driving the real UI, not by
+`test:computer-e2e` — see `VIRTUAL-COMPUTER.md` for why in each case. QA
+passes: `test:computer-e2e` 19/19 stub, 17/17 real; `tools.test.ts` 167/167;
+`apps/terminal` vitest 334/334; both packages' typecheck clean.
+
+---
+
 ## P3 — Interactive "Take control" (scope only; separate doc)
 
 New **`docs/COMPUTER-HANDOFF-DESIGN.md`** (sibling of
