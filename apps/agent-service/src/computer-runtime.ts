@@ -1042,13 +1042,26 @@ export class ComputerRuntime {
     child.once("error", (error) => this.rejectPending(error));
     child.once("exit", (code, signalName) => {
       const unexpected = this.child === child && !this.closed;
-      if (unexpected) {
-        this.child = null;
-        this.onUnexpectedClose?.(this.computerId, ++this.revision);
-      }
       this.rejectPending(
         new Error(`cua-driver exited (${code ?? signalName ?? "unknown"})`),
       );
+      if (unexpected) {
+        // Route through dispose() — not just clearing `this.child` — so the
+        // desktop-count reservation (releaseSession) and any still-running
+        // container are actually released. Mirrors browser-runtime.ts's
+        // BrowserSessionHost close callback, which does the same. Missing
+        // this leaked one MAX_CUA_DESKTOPS slot per unexpected driver/container
+        // death (crash, OOM, an operator's stray `docker rm`) for the rest of
+        // the process's life — confirmed live, 2026-08-31: a desktop's
+        // container was gone from `docker ps` but /health still reported it
+        // as an active desktop. doDispose() is idempotent and safe to call
+        // here: the child has already exited (waitForExit's exitCode check
+        // returns immediately) and docker rm on an already-gone container is
+        // swallowed by its own .catch().
+        void this.dispose().then((revision) =>
+          this.onUnexpectedClose?.(this.computerId, revision),
+        );
+      }
     });
     child.stderr.on("data", () => undefined);
     let stdout = Buffer.alloc(0);

@@ -720,3 +720,49 @@ test("stop() is idempotent and issues docker rm -f", async () => {
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(rt.isClosed, true);
 });
+
+test("an unexpected driver exit releases the desktop reservation, not just `this.child` (2026-08-31 live finding)", async () => {
+  const { computerResources } = await import("./computer-resource-limiter.js");
+  const baseline = computerResources.snapshot().activeDesktops;
+
+  const { spawn, children } = fakeSpawn();
+  const events: Array<{ computerId: string; revision: number }> = [];
+  const rt = new ComputerRuntime(
+    (computerId, revision) => events.push({ computerId, revision }),
+    { label: "chat-unexpected", spawn },
+  );
+  await rt.observe();
+  assert.equal(
+    computerResources.snapshot().activeDesktops,
+    baseline + 1,
+    "observe() reserved a desktop slot",
+  );
+
+  // The long-lived MCP driver child is NOT necessarily the last one spawned —
+  // observe() also spawns a short-lived `docker exec ... base64` child AFTER
+  // the driver handshake to pull the screenshot bytes, which auto-exits and
+  // can land after the driver child in `children[]`. Identify it by the one
+  // that actually received the JSON-RPC `initialize` write over stdin.
+  const driverChild = children.find((c) =>
+    c.written.some((w) => w.includes('"method":"initialize"')),
+  );
+  if (!driverChild)
+    throw new Error("driver child (received `initialize`) not found");
+  // Simulate the driver process (or its container) dying unexpectedly —
+  // crash, OOM, an operator's stray `docker rm` — NOT rt.stop()/dispose().
+  driverChild.emit("exit", 1, null);
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(
+    rt.isClosed,
+    true,
+    "the runtime is marked closed, not merely child-less",
+  );
+  assert.equal(events.length, 1, "onUnexpectedClose still fires exactly once");
+  assert.equal(events[0]?.computerId, rt.computerId);
+  assert.equal(
+    computerResources.snapshot().activeDesktops,
+    baseline,
+    "the reservation was released — an unexpected exit must not leak a MAX_CUA_DESKTOPS slot",
+  );
+});
