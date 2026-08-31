@@ -21,13 +21,27 @@
  * summary); real mode adds two more (right_click by x,y not a transport error;
  * click a real AT-SPI element or note zero-element degradation) plus the
  * optional CUA_EGRESS_NETWORK isolation check.
+ *
+ * M3.5 proxied-browsing variant (CUA_E2E_REAL=1 CUA_PROXY_BROWSING=true, skipped
+ * otherwise): adds one check — the desktop still reaches X-readiness with
+ * http_proxy set (no_proxy held), `curl -x <proxy> https://example.com` from
+ * inside succeeds, and `curl -x <proxy> http://169.254.169.254/` is refused by
+ * the SafeProxy. `curl --noproxy '*'` still reaching the internet (blocker #3)
+ * is documented in-comment, not asserted.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+
+// The M3.5 proxied-browsing check drives `docker exec … curl` against a
+// SafeBrowserProxy running IN THIS PROCESS — so it must NOT use the synchronous
+// execFileSync (it would block the event loop and the proxy could never accept
+// the connection). Everything else in this file stays sync as before.
+const execFileAsync = promisify(execFile);
 
 const REAL = !!process.env.CUA_E2E_REAL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +56,13 @@ process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 process.env.CUA_ENABLED = "true";
 // Deterministic per-instance sweep id (M2.3).
 process.env.CUA_INSTANCE_ID = "e2e-instance";
+
+// M3.5 — proxied-browsing real-mode variant (CUA_E2E_REAL=1 CUA_PROXY_BROWSING=true).
+// It is mutually exclusive with an --internal egress network — config.ts throws
+// at load if both are set — so drop any inherited CUA_EGRESS_NETWORK on this
+// path BEFORE ../src/config.js is imported below.
+const PROXY_BROWSING = REAL && process.env.CUA_PROXY_BROWSING === "true";
+if (PROXY_BROWSING) delete process.env.CUA_EGRESS_NETWORK;
 
 const EGRESS_NET = REAL ? process.env.CUA_EGRESS_NETWORK || "" : "";
 const HARDENED = REAL && process.env.CUA_HARDEN === "true";
@@ -87,7 +108,8 @@ const readLog = () =>
 
 console.log(
   `mode: ${REAL ? "REAL (" + process.env.CUA_IMAGE + ")" : "stub"}` +
-    `${EGRESS_NET ? " egress=" + EGRESS_NET : ""}${HARDENED ? " hardened" : ""}\n`,
+    `${EGRESS_NET ? " egress=" + EGRESS_NET : ""}${HARDENED ? " hardened" : ""}` +
+    `${PROXY_BROWSING ? " proxy-browsing" : ""}\n`,
 );
 
 const rt = new ComputerRuntime(undefined, { label: "e2e-chat" });
@@ -183,6 +205,80 @@ try {
           false,
           "container reached the public internet — egress is NOT isolated",
         );
+      },
+    );
+  }
+
+  if (PROXY_BROWSING) {
+    await check(
+      "M3.5: desktop reached X-readiness WITH http_proxy set, and curl routes " +
+        "public HTTP(S) through the SafeProxy while private/metadata is refused",
+      async () => {
+        // The first observe() above already succeeded, which means
+        // waitForXReady's in-container `curl 127.0.0.1:<novncPort>` worked
+        // despite http_proxy being set — i.e. no_proxy=127.0.0.1,localhost
+        // held. This is the load-bearing assertion: a wrong no_proxy would
+        // send that probe at the proxy and the desktop would never start.
+        const name = execFileSync(
+          "docker",
+          ["ps", "--filter", "label=sparklab-cua", "--format", "{{.Names}}"],
+          { encoding: "utf8" },
+        )
+          .trim()
+          .split("\n")
+          .filter(Boolean)[0];
+        assert.ok(name, "the runtime's container is running");
+
+        // The proxy URL the runtime injected (http://host.docker.internal:<port>).
+        // Async from here on: the proxy lives in this process's event loop, so a
+        // blocking execFileSync would deadlock its accept().
+        const { stdout: proxyUrlRaw } = await execFileAsync("docker", [
+          "exec",
+          name,
+          "sh",
+          "-lc",
+          'printf %s "$http_proxy"',
+        ]);
+        const proxyUrl = proxyUrlRaw.trim();
+        assert.match(
+          proxyUrl,
+          /^http:\/\/host\.docker\.internal:\d+$/,
+          `http_proxy in the container = ${proxyUrl}`,
+        );
+
+        // Allowed public destination through the SafeProxy → 2xx/3xx.
+        const { stdout: okCode } = await execFileAsync("docker", [
+          "exec",
+          name,
+          "sh",
+          "-lc",
+          `curl -sS -m 20 -o /dev/null -w '%{http_code}' -x ${proxyUrl} https://example.com`,
+        ]);
+        assert.match(
+          okCode.trim(),
+          /^(2|3)\d\d$/,
+          `example.com via proxy → ${okCode.trim()}`,
+        );
+
+        // Link-local / cloud-metadata through the SafeProxy → refused (403,
+        // "blocked by browser network policy"). NOT a 2xx.
+        const { stdout: denied } = await execFileAsync("docker", [
+          "exec",
+          name,
+          "sh",
+          "-lc",
+          `curl -sS -m 20 -o /dev/null -w '%{http_code}' -x ${proxyUrl} http://169.254.169.254/ || true`,
+        ]);
+        assert.doesNotMatch(
+          denied.trim(),
+          /^2\d\d$/,
+          `169.254.169.254 via proxy must be refused (got ${denied.trim()})`,
+        );
+
+        // BLOCKER #3 (documented, not asserted): `curl --noproxy '*'
+        // https://example.com` from inside STILL reaches the internet — the
+        // container keeps a default route off-box; the proxy is honoured, not
+        // enforced. This mode is not a containment boundary.
       },
     );
   }

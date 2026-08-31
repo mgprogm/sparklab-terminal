@@ -90,6 +90,21 @@ const cuaInstanceId =
     (hostname() || "default").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 48)) ||
   "default";
 
+// Virtual Computer (CUA) — M3.5 opt-in proxied browsing. When on, the desktop
+// container is given `http_proxy`/`https_proxy` + a Firefox policy pointing at a
+// per-runtime SafeBrowserProxy (public-only ruleset). This is NOT a containment
+// boundary — the container keeps a default route off-box and only proxy-aware
+// apps honour it. See docs/VIRTUAL-COMPUTER.md "Proxied browsing".
+const cuaProxyBrowsing = optional("CUA_PROXY_BROWSING", "false") === "true";
+const cuaEgressNetwork = optionalValue("CUA_EGRESS_NETWORK");
+if (cuaProxyBrowsing && cuaEgressNetwork)
+  throw new Error(
+    "CUA_PROXY_BROWSING=true is incompatible with CUA_EGRESS_NETWORK: an --internal " +
+      "egress network has no route to the agent-service proxy, so proxied browsing " +
+      "would be a silent no-op. Unset one — keep CUA_EGRESS_NETWORK for the hard " +
+      "zero-egress guarantee, or CUA_PROXY_BROWSING for opt-in browsing.",
+  );
+
 const gatewayAuthUser = process.env.GATEWAY_AUTH_USER?.trim() || "";
 const gatewayAuthPassword = process.env.GATEWAY_AUTH_PASSWORD?.trim() || "";
 const allowMissingOrigin =
@@ -182,7 +197,22 @@ export const config = {
     // Isolated docker network whose only egress route is the agent-service
     // proxy (enforced at the network layer, not via app proxy env). Empty =
     // spike default network; MUST be set for any shared deployment.
-    egressNetwork: optionalValue("CUA_EGRESS_NETWORK"),
+    egressNetwork: cuaEgressNetwork,
+    // M3.5 — opt-in proxied browsing. `proxyBrowsing` starts a per-runtime
+    // SafeBrowserProxy; the container is handed `http_proxy` + a Firefox policy
+    // pointing at `proxyContainerHost:<port>`. `proxyBindHost` is where the
+    // proxy listens on the agent-service host (default `0.0.0.0` so a container
+    // on the default bridge can reach it — set `172.17.0.1` / the bridge
+    // gateway IP to avoid an open relay on other interfaces).
+    // `proxyContainerHost` is the name/IP the container dials; the default
+    // `host.docker.internal` is auto-mapped via `--add-host=…:host-gateway`.
+    // NOT a containment boundary — see docs/VIRTUAL-COMPUTER.md.
+    proxyBrowsing: cuaProxyBrowsing,
+    proxyBindHost: optional("CUA_PROXY_BIND_HOST", "0.0.0.0"),
+    proxyContainerHost: optional(
+      "CUA_PROXY_CONTAINER_HOST",
+      "host.docker.internal",
+    ),
     // Default `standard` (= allow). `bounded` admits ONLY what the reviewed
     // capability manifest lists; bounded-with-no-manifest fails every call
     // closed, so `capabilityManifestFile` below defaults to the image-baked

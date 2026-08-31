@@ -299,6 +299,15 @@ written to chat JSONL history. `computer_closed` records a close tombstone at
 its `revision` so a late `computer_view` cannot reopen the view. Teardown is
 total on Stop / disconnect / shutdown.
 
+Desktop egress: by default the container has whatever route its docker network
+gives it; `CUA_EGRESS_NETWORK` on an `--internal` network is the only mode with
+a hard zero-egress guarantee (the desktop then cannot browse). Opt-in
+`CUA_PROXY_BROWSING=true` (mutually exclusive with the above) routes
+proxy-env-aware tools + policy-driven Firefox through the same public-only
+SafeProxy the browser tools use — **not a containment boundary** (the container
+keeps a default route off-box; non-proxy-aware apps egress freely). See
+`docs/VIRTUAL-COMPUTER.md` "Proxied browsing".
+
 ## Safety
 
 - **Approval by default** for every write, via the loop's dispatcher gate. A

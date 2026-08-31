@@ -180,7 +180,10 @@ layer, keeping Browser Use's public-only ruleset._
   close tombstones.
 - Container network isolated when `CUA_EGRESS_NETWORK` names an `--internal`
   docker network — verified: no route off-box, loopback intact (required for
-  any shared deployment). A proxied-browsing variant is future work.
+  any shared deployment). Opt-in proxied browsing (M3.5,
+  `CUA_PROXY_BROWSING=true`, mutually exclusive with the above) trades that hard
+  guarantee for the desktop being able to reach allowed public HTTP(S) through
+  the SafeProxy — **not a containment boundary**; see the egress section.
 - Total teardown on Stop / disconnect / shutdown — no orphan container or exec
   on a graceful path. A hard crash (SIGKILL) of agent-service can leave a
   detached container running; `ComputerRuntime.sweepOrphans()` removes anything
@@ -467,8 +470,55 @@ loopback still works (X readiness intact), and `curl https://example.com` from
 inside the container **fails** — no route off-box. Set-up (operator, once):
 `docker network create --internal sparklab-cua-egress`. Trade-off: `--internal`
 means the desktop also cannot browse the web at all (Firefox loads nothing) —
-which is the safe v1 default. A proxied "controlled browsing" mode (the
-container reaches only the agent-service egress proxy) is future work.
+which is the safe v1 default.
+
+### Proxied browsing (opt-in, weaker guarantee) — M3.5
+
+`CUA_PROXY_BROWSING=true` starts a per-runtime `SafeBrowserProxy` (the Browser
+Use feature's public-only forward proxy — loopback / link-local / private /
+cloud-metadata destinations are refused, post-DNS-resolution) on the
+agent-service host and hands the desktop container:
+
+- `--add-host=host.docker.internal:host-gateway` + `http_proxy` / `https_proxy`
+  / `HTTP_PROXY` / `HTTPS_PROXY` = `http://host.docker.internal:<port>`, with
+  `no_proxy` / `NO_PROXY` = `127.0.0.1,localhost` (so the in-container
+  X-readiness probe to `127.0.0.1:<novncPort>` never goes at the proxy);
+- a Firefox ESR **enterprise policy** (`policies.json`, `Proxy.Mode=manual`,
+  `Locked=true`) written into the container at start — Firefox does **not** read
+  `http_proxy` env, so the policy is its only route.
+
+**What this enforces:** proxy-env-aware tools (curl, wget) and policy-driven
+Firefox reach **only** allowed public HTTP(S); a request to a private / metadata
+address through the proxy is answered `403 blocked by browser network policy`.
+Verified for curl:
+`CUA_E2E_REAL=1 CUA_PROXY_BROWSING=true test:computer-e2e` — `curl -x <proxy>
+https://example.com` from inside the container succeeds, `curl -x <proxy>
+http://169.254.169.254/` is refused, and the desktop still reaches X-readiness
+with the proxy env set.
+
+**What this does NOT do — this is NOT a containment boundary:**
+
+1. With proxied browsing on the container is **not** on an `--internal` network,
+   so it keeps a **default route off-box**. `curl --noproxy '*'
+https://example.com` from inside still reaches the internet. The proxy is an
+   option apps _honour_, not something the network _enforces_.
+2. XFCE / X11 apps have **no global `--proxy-server`**. Only proxy-env-aware
+   tools and policy-aware Firefox route through the SafeProxy; any other binary
+   (a downloaded installer, a random GUI app) egresses freely.
+3. Real network-layer enforcement needs host firewall rules on the container's
+   network namespace (drop all egress except to the proxy). That is deliberately
+   **not** in v1 — see Open items.
+4. **Firefox end-to-end is UNVERIFIED on `sparklab/cua-desktop:0.22.2`.** The
+   policy-write mechanism is implemented and lands at every path a
+   Debian/Mozilla Firefox build reads, but Firefox 140 ESR cannot render pages
+   in that image at all (broken software-GL framebuffer; hangs before writing a
+   profile), for reasons unrelated to egress — so "Firefox browses through the
+   SafeProxy" could not be demonstrated here. curl/wget routing is verified.
+
+`--internal` (`CUA_EGRESS_NETWORK`) remains the **only** mode with a hard
+guarantee and stays the recommended default. `CUA_PROXY_BROWSING` and
+`CUA_EGRESS_NETWORK` are **mutually exclusive** — an `--internal` net has no
+route to the proxy, so setting both is a fatal config error at startup.
 
 **`CUA_HARDEN` — confirmed incompatible with `trycua/xfce-cua` as-is.**
 `--cap-drop ALL --security-opt no-new-privileges` makes the image's supervisor
@@ -542,6 +592,35 @@ single operator with the safe v1 defaults:
    agent-service host name is ephemeral (containerised) or you run more than
    one agent-service on a host.
 
+### Variant: opt-in proxied browsing (M3.5, weaker guarantee)
+
+If the operator needs the desktop to browse allowed public HTTP(S), swap the
+`--internal` network for the SafeProxy. Read "Proxied browsing (opt-in, weaker
+guarantee)" above first — **this is not a containment boundary**; `--internal`
+remains the only mode with a hard guarantee.
+
+1. Build the desktop image (step 1 above).
+2. **Do NOT** create or use an `--internal` egress network — leave
+   `CUA_EGRESS_NETWORK` unset (setting both is a fatal config error).
+3. **Set in `apps/agent-service/.env`:**
+   ```
+   CUA_ENABLED=true
+   CUA_IMAGE=sparklab/cua-desktop:0.22.2
+   CUA_DRIVER_USER=cua
+   CUA_DRIVER_PERMISSION_MODE=bounded
+   CUA_PROXY_BROWSING=true
+   CUA_PROXY_BIND_HOST=172.17.0.1   # docker default-bridge gateway; avoids an
+                                    # open forward proxy on other interfaces.
+                                    # Leave at 0.0.0.0 only on a trusted host.
+   ```
+   `CUA_PROXY_CONTAINER_HOST` defaults to `host.docker.internal` (auto-mapped
+   via `--add-host`). The startup "unrestricted egress" warning still fires —
+   expected: proxied browsing narrows _what proxy-aware apps can reach_, it does
+   not remove the container's default route.
+4. Caveats that still apply: `curl --noproxy '*'` and any non-proxy-aware app
+   egress freely; Firefox end-to-end through the proxy is UNVERIFIED on this
+   image (curl/wget routing is verified).
+
 ## Open items
 
 - ~~P1: per-window element indexing~~ — **done (M3.1, see the resolved note
@@ -549,9 +628,18 @@ single operator with the safe v1 defaults:
   (background delivery cannot reach a non-focused element on X11); a
   role/label in the approval card (`describeCall` only gets the raw args); the
   `~1 + (N+2)` driver calls per `act()` (re-observe walks every window again).
-- Proxied browsing: a container network that reaches only the agent-service
-  egress proxy (not fully `--internal`), so the desktop can browse allowed
-  public HTTP(S) but nothing else.
+- ~~Proxied browsing~~ — **shipped as opt-in (M3.5, `CUA_PROXY_BROWSING=true`)
+  with a documented weaker guarantee** (see "Proxied browsing (opt-in, weaker
+  guarantee)" above): proxy-env-aware tools + policy-driven Firefox reach only
+  allowed public HTTP(S) via the SafeProxy; NOT a containment boundary — the
+  container keeps a default route off-box.
+- **Network-layer egress enforcement for proxied browsing** (would make M3.5 a
+  real boundary): host firewall rules on the container's network namespace —
+  e.g. after `docker run`, in the container's netns, `iptables -A OUTPUT -p tcp
+-d <bridge-gateway> --dport <proxyPort> -j ACCEPT` + `iptables -A OUTPUT -o lo
+-j ACCEPT` + `iptables -P OUTPUT DROP` (needs `--cap-add=NET_ADMIN`, which
+  currently conflicts with the image's privilege-drop entrypoint — see
+  `CUA_HARDEN`). Deferred beyond v1; `--internal` stays the hard guarantee.
 - Scoped `CUA_HARDEN` compatible with the image (or a no-privilege-drop image).
 - Per-chat `docker run` cold start is ~seconds for X readiness on top of image
   layer unpack; measure under load (M2.2 bounds concurrency, not latency), and

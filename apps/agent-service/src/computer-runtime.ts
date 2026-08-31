@@ -34,6 +34,17 @@
  * Everything container-specific lives behind the private `docker*` helpers so
  * the tool layer and the frontend stay backend-agnostic and a later VM/cloud
  * backend is a swap behind `observe()` / `act()` / `stop()`.
+ *
+ * M3.5 (opt-in, `CUA_PROXY_BROWSING=true`): a per-runtime `SafeBrowserProxy`
+ * (the browser feature's public-only forward proxy) is started in `start()`
+ * and the container is handed `http_proxy`/`https_proxy` env + a Firefox
+ * enterprise policy pointing at it. This lets Firefox and proxy-env-aware CLI
+ * tools (curl/wget) reach allowed public HTTP(S). It is NOT a containment
+ * boundary: with proxied browsing on the container is NOT on an `--internal`
+ * network, so it keeps a default route off-box and anything that ignores the
+ * proxy env/policy egresses freely. `--internal` (`CUA_EGRESS_NETWORK`, which
+ * is mutually exclusive with this) stays the only mode with a hard guarantee.
+ * See docs/VIRTUAL-COMPUTER.md "Proxied browsing".
  */
 import {
   spawn as nodeSpawn,
@@ -41,6 +52,7 @@ import {
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { config, CAPS } from "./config.js";
+import { SafeBrowserProxy } from "./browser-proxy.js";
 import { computerResources } from "./computer-resource-limiter.js";
 import {
   computerPerformanceMetrics,
@@ -191,6 +203,10 @@ export class ComputerRuntime {
   private child: ChildProcessWithoutNullStreams | null = null;
   private containerName: string | null = null;
   private releaseSession: (() => void) | null = null;
+  // M3.5 — a per-runtime forward proxy (public-only ruleset), started in
+  // start() ONLY when config.cua.proxyBrowsing is set and torn down in
+  // doDispose(). Mirrors how browser-runtime.ts owns its own SafeBrowserProxy.
+  private egressProxy: SafeBrowserProxy | null = null;
   private nextId = 1;
   private revision = 0;
   private snapshotSeq = 0;
@@ -737,6 +753,13 @@ export class ComputerRuntime {
     if (container) {
       await this.dockerCapture(["rm", "-f", container]).catch(() => undefined);
     }
+    // M3.5 — tear down the per-runtime forward proxy (idempotent; close() is a
+    // no-op when it was never started).
+    if (this.egressProxy) {
+      const proxy = this.egressProxy;
+      this.egressProxy = null;
+      await proxy.close().catch(() => undefined);
+    }
     // Release the desktop reservation only after the container is actually gone,
     // so a fast-cycling caller can't reserve slot N+1 while container N is still
     // being removed (mirrors browser-runtime.ts). No-op guard covers the case
@@ -778,6 +801,42 @@ export class ComputerRuntime {
     // BEFORE any `docker run`; the ensureStarted().catch -> dispose() path then
     // releases nothing (guarded) so no half-started state leaks.
     this.releaseSession = computerResources.reserveSession();
+
+    // M3.5 — opt-in proxied browsing. Start the per-runtime forward proxy
+    // BEFORE `docker run` so the container env can point at it. `proxyBrowsing`
+    // + `egressNetwork` is rejected in config.ts (an --internal net has no
+    // route to the proxy), so this and `--network` below are mutually
+    // exclusive. This is NOT a containment boundary — see the class doc and
+    // docs/VIRTUAL-COMPUTER.md.
+    let proxyRunArgs: string[] = [];
+    if (config.cua.proxyBrowsing) {
+      this.egressProxy = new SafeBrowserProxy();
+      await this.egressProxy.start(config.cua.proxyBindHost);
+      const proxyUrl = `http://${config.cua.proxyContainerHost}:${this.egressProxy.port}`;
+      proxyRunArgs = [
+        // Map the container-visible proxy host to the docker bridge gateway
+        // (only needed for the default `host.docker.internal`; an explicit IP
+        // routes without it).
+        ...(config.cua.proxyContainerHost === "host.docker.internal"
+          ? ["--add-host=host.docker.internal:host-gateway"]
+          : []),
+        "-e",
+        `http_proxy=${proxyUrl}`,
+        "-e",
+        `https_proxy=${proxyUrl}`,
+        "-e",
+        `HTTP_PROXY=${proxyUrl}`,
+        "-e",
+        `HTTPS_PROXY=${proxyUrl}`,
+        // Keep loopback (the in-container X-readiness probe hits
+        // 127.0.0.1:<novncPort>) and same-host names off the proxy.
+        "-e",
+        "no_proxy=127.0.0.1,localhost",
+        "-e",
+        "NO_PROXY=127.0.0.1,localhost",
+      ];
+    }
+
     const name = `sparklab-cua-${sanitizeLabel(this.opts.label)}-${randomUUID().slice(0, 8)}`;
     const runArgs = [
       "run",
@@ -802,6 +861,7 @@ export class ComputerRuntime {
       ...(config.cua.egressNetwork
         ? ["--network", config.cua.egressNetwork]
         : []),
+      ...proxyRunArgs,
       config.cua.image,
     ];
     // One bounded-concurrency slot for the whole cold-start sequence — the
@@ -822,6 +882,20 @@ export class ComputerRuntime {
         await this.waitForXReady(name, config.cua.startTimeoutMs);
         this.assertOpen();
         desktopReady = true;
+        // M3.5 — point Firefox ESR at the proxy via an enterprise policy
+        // (Firefox does NOT read http_proxy env). Best-effort: a write failure
+        // leaves Firefox unproxied but the desktop and the proxy-env CLI tools
+        // work, so it must not fail startup. NOTE: end-to-end Firefox browsing
+        // through the proxy is UNVERIFIED on sparklab/cua-desktop:0.22.2 —
+        // Firefox 140 ESR cannot render pages in that image (broken SWGL
+        // framebuffer), unrelated to egress. See docs/VIRTUAL-COMPUTER.md.
+        if (config.cua.proxyBrowsing && this.egressProxy)
+          await this.writeFirefoxProxyPolicy(this.egressProxy.port).catch(
+            (error: unknown) =>
+              console.warn(
+                `[agent] CUA: could not write Firefox proxy policy: ${errMsg(error)}`,
+              ),
+          );
       } finally {
         computerPerformanceMetrics.desktopReady(
           Date.now() - desktopStartedAt,
@@ -859,6 +933,40 @@ export class ComputerRuntime {
     } finally {
       releaseLaunch();
     }
+  }
+
+  /**
+   * M3.5 — write a Firefox ESR enterprise policy inside the container pointing
+   * the browser at the per-runtime proxy on the docker bridge gateway. Firefox
+   * ignores `http_proxy`/`https_proxy` env, so the policy is the only route.
+   * Written to every path a Debian/Mozilla build reads (the `/etc/firefox*`
+   * paths are Debian patches; `distribution/policies.json` is Mozilla-official
+   * and read by every build). `$1` carries the JSON so nothing is interpolated
+   * into the shell.
+   */
+  private async writeFirefoxProxyPolicy(proxyPort: number): Promise<void> {
+    const authority = `${config.cua.proxyContainerHost}:${proxyPort}`;
+    const policy = JSON.stringify({
+      policies: {
+        Proxy: {
+          Mode: "manual",
+          HTTPProxy: authority,
+          SSLProxy: authority,
+          UseHTTPProxyForAllProtocols: true,
+          Locked: true,
+          Passthrough: "127.0.0.1,localhost",
+        },
+        DisableTelemetry: true,
+        DisableFirefoxStudies: true,
+      },
+    });
+    const script = [
+      "for d in /etc/firefox-esr/policies /etc/firefox/policies /usr/lib/firefox-esr/distribution /usr/lib/firefox/distribution; do",
+      '  mkdir -p "$d" 2>/dev/null || true',
+      '  printf %s "$1" > "$d/policies.json" 2>/dev/null || true',
+      "done",
+    ].join("\n");
+    await this.execInContainer(["sh", "-lc", script, "sh", policy]);
   }
 
   private async waitForXReady(

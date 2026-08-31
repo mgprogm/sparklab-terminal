@@ -313,33 +313,59 @@ screenshot"` when there is no snapshot, emit the `computer_view` frame, then
 viewport}`. `sanitizePersistedToolResult`'s `computer_*` rule already blanks it
 from durable history. `describeCall` → `"capture computer screen to <path>"`.
 
-### M3.5 Proxied browsing — L, explicitly weaker guarantee
+### M3.5 Proxied browsing — L, explicitly weaker guarantee — ✅ DONE (2026-08-31)
 
-- New `computer-egress-proxy.ts` (or a bind-address option on
-  `SafeBrowserProxy`), reuse `browser-security.ts` public-only ruleset;
-  `config.ts` `CUA_PROXY_BROWSING` + `CUA_PROXY_BIND`; `computer-runtime.ts`
-  `start()` attaches a non-`--internal` bridge + injects `http_proxy`/Firefox
-  policy at a container-visible proxy address.
-- **Three blockers make full "network-layer enforcement" (D9) unachievable in
-  v1:** (1) `SafeBrowserProxy` hardcodes `listen(0, "127.0.0.1")` — a container
-  can't reach loopback; needs a bind param + docker-visible address. (2) A
-  non-`--internal` network gives a default route off-box, so the proxy is an
-  _option_ apps must honor, not _enforcement_ — real enforcement needs host
-  firewall rules on the container's netns. (3) XFCE apps have no global
-  `--proxy-server`; only proxy-env-aware apps route through it.
-- **Recommendation:** keep `--internal` as the default and the only mode with a
-  hard guarantee. Put proxied browsing behind `CUA_PROXY_BROWSING=true` with a
-  documented weaker guarantee ("Firefox to public HTTP(S) via the proxy; not a
-  containment boundary unless paired with host firewall rules"). Full
-  enforcement (netns iptables) is a follow-up beyond v1.
-- Verify: `CUA_E2E_REAL=1` with the flag — Firefox reaches `example.com`, a
-  private/metadata request is 403'd by the proxy, raw-IP curl bypassing proxy
-  env still works (documents the gap).
+**Shipped as an opt-in mode with a deliberately weaker guarantee, as designed:**
 
-**M3 exit:** element targeting (M3.1 ✅), full action family (M3.2 ✅), window
-listing (M3.3 ✅), bounded capture (M3.4 ✅) — all landed 2026-08-31; **M3.5
-proxied browsing** is the only remaining M3 slice (opt-in, documented weaker
-guarantee). With M3.5 the milestone matches the PLAN's v1 acceptance criteria.
+- `browser-proxy.ts` — `SafeBrowserProxy.start(bindHost = "127.0.0.1")` +
+  a `.port` getter. Backward-compatible: the browser path calls `start()` with
+  no argument and is byte-identical. The public-only `browser-security.ts`
+  ruleset is unchanged and applies regardless of bind host.
+- `config.ts` — `cua.proxyBrowsing` (`CUA_PROXY_BROWSING`, default `false`),
+  `cua.proxyBindHost` (`CUA_PROXY_BIND_HOST`, default `0.0.0.0`),
+  `cua.proxyContainerHost` (`CUA_PROXY_CONTAINER_HOST`, default
+  `host.docker.internal`). **Hard config error** (throws at load) when
+  `CUA_PROXY_BROWSING=true` and `CUA_EGRESS_NETWORK` are both set — an
+  `--internal` net has no route to the proxy.
+- `computer-runtime.ts` — a per-runtime `SafeBrowserProxy`, started in `start()`
+  ONLY under `proxyBrowsing`, bound to `proxyBindHost`, torn down in
+  `doDispose()` (idempotent). The `docker run` args gain
+  `--add-host=host.docker.internal:host-gateway` + `-e http_proxy` /
+  `https_proxy` / `HTTP_PROXY` / `HTTPS_PROXY` = `http://<containerHost>:<port>`
+  - `no_proxy` / `NO_PROXY` = `127.0.0.1,localhost`, and NO `--network` (mutually
+    exclusive). After `waitForXReady`, `execInContainer` writes a Firefox ESR
+    enterprise `policies.json` (`Proxy.Mode=manual`, `Locked=true`) to every path
+    a Debian/Mozilla build reads — best-effort, `console.warn` on failure, never
+    fatal.
+- Tests: `browser-proxy.test.ts` (+2 — bindHost/`.port`/teardown, ruleset still
+  applies), `config-cua-proxy-conflict.test.ts` (NEW — both-set → config load
+  rejects), `computer-runtime-proxy.test.ts` (NEW — `docker run` carries
+  `--add-host` + the proxy env and NO `--network`; the proxy really listens then
+  is closed on `stop()`; the Firefox policy write ran). `computer-e2e.js` gains
+  a `CUA_E2E_REAL=1 CUA_PROXY_BROWSING=true`-guarded case: desktop reaches
+  X-readiness with `http_proxy` set, `curl -x <proxy> https://example.com`
+  succeeds from inside, `curl -x <proxy> http://169.254.169.254/` is refused.
+  Stub e2e stays 19/19, default real 17/17.
+
+**What it enforces:** proxy-env-aware tools (curl/wget) and policy-driven
+Firefox reach only allowed public HTTP(S) via the SafeProxy; private / metadata
+destinations are `403`'d.
+
+**What it does NOT do (documented loudly in `VIRTUAL-COMPUTER.md`):** it is
+**not a containment boundary** — the container keeps a default route off-box
+(`curl --noproxy '*'` still reaches the internet), non-proxy-aware apps egress
+freely, and real enforcement needs netns firewall rules (moved to Open items).
+**Deviation / honest gap:** Firefox end-to-end through the proxy is **UNVERIFIED
+on `sparklab/cua-desktop:0.22.2`** — Firefox 140 ESR cannot render pages in that
+image (broken software-GL framebuffer; hangs before writing a profile),
+unrelated to egress. The policy-write mechanism is implemented and lands at the
+right paths; curl/wget routing is verified.
+
+**M3 exit — COMPLETE (2026-08-31).** Element targeting (M3.1 ✅), full action
+family (M3.2 ✅), window listing (M3.3 ✅), bounded capture (M3.4 ✅), opt-in
+proxied browsing (M3.5 ✅, weaker guarantee as designed). The milestone matches
+the PLAN's v1 acceptance criteria; `--internal` (`CUA_EGRESS_NETWORK`) stays the
+recommended default and the only mode with a hard zero-egress guarantee.
 
 ---
 
