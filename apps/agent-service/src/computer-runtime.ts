@@ -1017,6 +1017,10 @@ export class ComputerRuntime {
       `DISPLAY=${config.cua.display}`,
       "-e",
       `CUA_DRIVER_PERMISSION_MODE=${config.cua.driverPermissionMode}`,
+      // Driver-side session idle-eviction sweep, independent of our own
+      // desktop lifecycle — see config.ts's cua.sessionIdleTtlSecs doc.
+      "-e",
+      `CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS=${config.cua.sessionIdleTtlSecs}`,
       ...(config.cua.capabilityManifestFile
         ? [
             "-e",

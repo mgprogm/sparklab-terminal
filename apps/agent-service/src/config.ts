@@ -244,6 +244,26 @@ export const config = {
     // before the driver is spawned (trycua/xfce-cua default 6901).
     novncPort: positiveInt("CUA_NOVNC_PORT", 6901, 65_535),
     startTimeoutMs: positiveInt("CUA_START_TIMEOUT_MS", 90_000, 300_000),
+    // cua-driver runs its OWN background sweep (spawn_lifecycle_maintenance in
+    // cua-driver-sdk/src/runtime.rs) that unilaterally ends any driver-side
+    // session idle longer than this, independent of the container/docker
+    // health and independent of our own approval-timeout/idle-desktop logic.
+    // Since agent-service never calls `start_session` and never passes a
+    // `session` label, every observe/act call shares one implicit session —
+    // so once that single session is swept, EVERY subsequent call (including
+    // a fresh computer_observe) fails closed with "this session has ended;
+    // call start_session explicitly to reuse its label", and there is no
+    // recovery path short of a new chat (confirmed against a real container,
+    // 2026-08-31: the driver's own default is 300s / 5min, checked every 30s,
+    // which a slow chat's human-approval wait trivially exceeds). Set to the
+    // same 8h outer bound used by the bounded-mode manifest's idle_timeout so
+    // a single chat's desktop survives an entire slow session; the driver's
+    // own hard ceiling is 24h.
+    sessionIdleTtlSecs: positiveInt(
+      "CUA_DRIVER_SESSION_IDLE_TTL_SECS",
+      28_800,
+      86_400,
+    ),
   },
   handoff: {
     transport: handoffTransport as "jpeg" | "webrtc-preferred",

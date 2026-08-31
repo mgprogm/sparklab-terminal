@@ -552,6 +552,69 @@ undeclared tools fail closed (`… outside the capability manifest`); the 14
 allowlisted tools are admitted (`get_screen_size`, `list_windows`, `list_apps`,
 `click`, `get_desktop_state` all reached execution).
 
+### Live Agent Chat end-to-end findings (2026-08-31)
+
+Testing the feature through the real Agent Chat UI (real browser, real
+container, real BytePlus DeepSeek-V4-Pro model — not the stub/harness) surfaced
+three real bugs the harness's synchronous call/response pattern never hit:
+
+1. **`files.write` gap in the bounded-mode manifest (fixed).** The very first
+   `computer_observe` under bounded mode failed closed with `error: protected
+resource is outside the capability manifest: the exact path is outside the
+capability manifest`, even though `get_desktop_state` is allowlisted and
+   `resources.desktop.display: true` is granted. Traced to
+   `session_manifest.rs`: `screenshot_out_file` is gated **separately** from
+   the tool allowlist and the display grant, via
+   `authorize_file_resource("screenshot_output", …)` checked against
+   `resources.files.write`. Fixed by adding a `files.write` grant for
+   `CUA_SCREENSHOT_DIR` (default `/tmp`) to `capability-manifest.yaml` and
+   rebuilding the image; verified with `probe.mjs`.
+2. **Bounded mode is incompatible with M3.1 element targeting (not fixed —
+   documented, worked around).** With the `files.write` gap fixed, a full
+   `CUA_E2E_REAL=1 CUA_DRIVER_PERMISSION_MODE=bounded` run dropped to 11/17:
+   every element-targeting check failed. `get_window_state`'s per-window
+   resource check (`authorize_desktop_window` in `session_manifest.rs`)
+   requires either an exact pid+window_id match or an `apps:` grant with an
+   exact `bundle_id`/`executable` — confirmed via the `RawApplicationResource`
+   struct that **no wildcard exists** in the schema. D1's whole premise is
+   "any app that happens to be open on a disposable desktop," so this is a
+   genuine architectural mismatch, not a manifest oversight: bounded mode
+   returns a silent empty element list for any app not individually
+   pre-named. `.env` now runs `CUA_DRIVER_PERMISSION_MODE=standard` with a
+   comment explaining why; revisit only if bounded-mode element targeting is
+   actually needed (it would require either naming every app the desktop might
+   run, upstream wildcard support, or falling back to `x,y` targeting under
+   bounded).
+3. **Driver-side session idle-TTL sweep, independent of container health
+   (fixed).** After several successful `computer_observe` calls, an
+   **approved** `computer_act` click failed with `error: this session has
+ended; call start_session explicitly to reuse its label` — while `docker
+ps` showed the container `Up … (healthy)` and `/health` showed real
+   processing time (467ms) on the failing call, i.e. **not** a crashed
+   container and **not** a hallucinated model error (the model quoted the
+   driver's real text verbatim). Root cause, confirmed by reading
+   `cua-driver-sdk/src/runtime.rs` and reproduced deterministically in
+   `test/cua-real/probe-session-ttl.mjs`: `cua-driver` runs its own background
+   thread (`spawn_lifecycle_maintenance`) that sweeps every 30s and ends any
+   driver session idle longer than `CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS`
+   (driver default **300s**). Since agent-service never calls `start_session`
+   or passes a `session` label, every `computer_observe`/`computer_act` call
+   shares one implicit session — so once it is idle-evicted, **every**
+   subsequent call (including a fresh `computer_observe`) fails the same way,
+   permanently, for the rest of the chat (matches the model's own accurate
+   report: "I don't have a tool to explicitly restart..."). A slow chat — one
+   real human-approval wait, or just LLM latency between turns — trivially
+   exceeds 300s cumulative idle time. Fixed: `config.ts` adds
+   `cua.sessionIdleTtlSecs` (`CUA_DRIVER_SESSION_IDLE_TTL_SECS`, default
+   `28800` = 8h, matching the bounded manifest's own `idle_timeout`, capped at
+   the driver's 24h hard ceiling), passed to the driver process as `-e
+CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS=<value>` in
+   `spawnDriverAndHandshake`. `probe-session-ttl.mjs` proves the mechanism: a
+   short override (5s) reproduces the exact failure text after one sweep
+   tick; the long override (28800s) survives the same sleep with no
+   session-ended error. `CUA_E2E_REAL=1 test:computer-e2e` still 17/17 with
+   the env var wired in.
+
 ## Enabling CUA for one operator
 
 CUA is off unless `CUA_ENABLED=true` and inert otherwise. To turn it on for a
@@ -623,6 +686,12 @@ remains the only mode with a hard guarantee.
 
 ## Open items
 
+- **Bounded mode + M3.1 element targeting are incompatible** (see "Live Agent
+  Chat end-to-end findings" above) — the `apps:` grant schema has no wildcard,
+  so bounded mode silently returns zero elements for any app not individually
+  named. `.env` runs `standard` until this is resolved; step 3's bounded-mode
+  proxied-browsing example above still works for observe/act by `x,y`, just
+  not per-element targeting.
 - ~~P1: per-window element indexing~~ — **done (M3.1, see the resolved note
   above).** Deferred within M3.1: element-targeted `press_key` / `scroll`
   (background delivery cannot reach a non-focused element on X11); a

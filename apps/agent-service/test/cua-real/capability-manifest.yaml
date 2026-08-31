@@ -31,9 +31,24 @@ idle_timeout: 8h
 # display-scope screen-x,y input, so the manifest grants exactly that. Without
 # `desktop.display: true` the migrated `private_observation` / `desktop_input`
 # adapters refuse every display-scoped call and the allowlist below is inert.
+#
+# files.write: get_desktop_state's `screenshot_out_file` argument is a SEPARATE
+# gate from desktop.display — session_manifest.rs routes it through
+# authorize_file_resource("screenshot_output", ...), which checks the path
+# against files.write independently of the tool allowlist and the display
+# grant. Miss this and every computer_observe/computer_capture call fails
+# closed under bounded with "protected resource is outside the capability
+# manifest" even though get_desktop_state itself is allowed and display is
+# granted — confirmed against a real container (2026-08-31). Must cover
+# CUA_SCREENSHOT_DIR (default /tmp; computer-runtime.ts writes
+# `${screenshotDir}/cua-<uuid>.png` and deletes it after reading).
 resources:
   desktop:
     display: true
+  files:
+    write:
+      - dir: /tmp
+        recursive: false
 
 # The ONLY tools the bounded desktop may run — v1 plus the M3 action family.
 # Every entry is a classified tool in authorization.rs::advertised_risk_for
