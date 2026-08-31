@@ -334,10 +334,12 @@ export class AgentLoop {
 
           if (isWrite && !this.approvals.isAutoAllowed(tc.name, sessionId)) {
             this.send({ type: "status", state: "awaiting_approval" });
+            let approvalRequestId = "";
             const behavior = await this.approvals.request(
               tc.name,
               sessionId,
-              (requestId) =>
+              (requestId) => {
+                approvalRequestId = requestId;
                 this.send({
                   type: "approval_request",
                   requestId,
@@ -345,7 +347,8 @@ export class AgentLoop {
                   sessionId,
                   summary,
                   input: publicArgs,
-                }),
+                });
+              },
               // ONE_TIME_TOOLS (browser_act, browser_request_handoff,
               // run_codex, kanban_delete) are consequential enough that each
               // invocation is approved individually (no persistent
@@ -359,15 +362,27 @@ export class AgentLoop {
                 }),
             );
             if (behavior === "deny") {
-              resultContent =
-                "The user denied this action. Do not retry it; explain or offer an alternative.";
+              // The wire `behavior` is "deny" whether the human clicked Deny
+              // or just never responded before the 120s approval timeout —
+              // the two are NOT the same event, and telling the model "the
+              // user denied this" for a timeout is a lie the model then
+              // repeats to a human who never saw the choice (confirmed live,
+              // 2026-08-31: an approval sat un-actioned during unrelated
+              // investigation, timed out, and the model reported "you denied
+              // this action" to someone who hadn't).
+              const timedOut = this.approvals.wasTimedOut(approvalRequestId);
+              resultContent = timedOut
+                ? "This action was not approved within the 120-second approval window — the human did not respond (they may be away or busy), they did not explicitly deny it. Do not retry it without asking first; tell the human it timed out and ask whether to try again or do something else."
+                : "The user denied this action. Do not retry it; explain or offer an alternative.";
               ok = false;
               this.send({
                 type: "tool_result",
                 callId: tc.id,
                 tool: tc.name,
                 ok: false,
-                summary: "denied by user",
+                summary: timedOut
+                  ? "approval timed out (no response)"
+                  : "denied by user",
               });
               await this.appendToolResult(tc.id, resultContent, tc.name);
               continue;

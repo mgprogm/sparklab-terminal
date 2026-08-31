@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import type { AgentApprovalBehavior } from "@sparklab/shared-types";
 
 // approvals.ts reads CAPS from the fail-fast service config. Supply inert test
@@ -57,6 +57,36 @@ test("denyAll resolves every outstanding approval as denied", async () => {
   approvals.denyAll();
 
   assert.deepEqual(await Promise.all([first, second]), ["deny", "deny"]);
+});
+
+test("wasTimedOut is true only for a requestId resolved by the timeout, and only once", async () => {
+  const approvals = new ApprovalManager();
+  let requestId = "";
+  const pending = approvals.request("type_text", "web-one", (id) => {
+    requestId = id;
+  });
+  approvals.resolve(requestId, "deny");
+  assert.equal(await pending, "deny");
+  // An explicit deny is not a timeout.
+  assert.equal(approvals.wasTimedOut(requestId), false);
+});
+
+test("wasTimedOut is true when the 120s approval timeout fires with no response, and false on a second read", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const approvals = new ApprovalManager();
+    let requestId = "";
+    const pending = approvals.request("type_text", "web-one", (id) => {
+      requestId = id;
+    });
+    mock.timers.tick(120_000);
+    assert.equal(await pending, "deny");
+    assert.equal(approvals.wasTimedOut(requestId), true);
+    // Consumed: a second read must not report a stale true.
+    assert.equal(approvals.wasTimedOut(requestId), false);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("reports the normalized approval decision", async () => {
