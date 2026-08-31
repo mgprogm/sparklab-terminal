@@ -190,35 +190,55 @@ scroll, type_text, press_key, hotkey`. **Pull the exact YAML schema from the
 Ordering: **M3.1 before M3.2** (the extra actions re-plumb `ComputerTarget` /
 `act()`).
 
-### M3.1 P1 per-window element targeting — L
+### M3.1 P1 per-window element targeting — L — ✅ DONE (2026-08-31)
 
-- `observe()` gains a second phase: for the top N on-screen windows from
-  `list_windows`, call `get_window_state({pid, window_id,
-include_screenshot:false})`, collect `elements[]` + per-window `snapshot_id` +
-  `element_token`s. Merge into one indexed list with a synthetic `snapshotId`
-  mapping back to `(window_id → driver snapshot_id, element_token)`.
-- `ComputerTarget` regains `{ elementIndex, snapshotId }` (or `{ elementToken }`
-  — prefer tokens, stable across the driver's snapshot churn). `driverArgs`
-  emits `element_token` or `element_index+snapshot_id`. `act()`'s existing
-  staleness/membership checks become live. New `parseWindowElements()` replaces
-  the deleted `parseAxTree`.
-- `tools.ts` — restore element params in `computer_act`; element targeting
-  becomes preferred, x,y the fallback. `computer_observe` advertises the indexed
-  list again (now true). `agent-loop.ts` `parseComputerTarget` — element first,
-  x,y fallback, coherent when both supplied. `system-prompt.ts` updated.
-- New `MAX_WINDOWS` (~12) distinct from `MAX_ELEMENTS` (today `MAX_ELEMENTS=200`
-  is wrongly applied to the window list). New `elementBytes` counter.
-- Bound everything: cap windows, elements/window, name length; skip
-  `is_on_screen:false`. Keep `delivery_mode:"background"`.
-- Verify: stub `cua-driver-mcp.mjs` answers `get_window_state` with
-  `elements[] + snapshot_id + element_token`; new e2e cases; `CUA_E2E_REAL=1`
-  clicks a real element by token and re-observes the effect;
-  `test:computer-smoke` live click-by-element; unit `parseWindowElements`
-  against recorded real JSON.
-- Risks: token/snapshot lifetime vs re-observe cadence (tokens mitigate);
-  GTK/Qt-under-Xtigervnc AX fidelity unmeasured; slice size vs model context;
-  `get_window_state` returns an inline screenshot unless
-  `include_screenshot:false` — must pass that or blow the byte bound.
+**Shipped as planned:**
+
+- `observe()` phase 2: `get_window_state({pid, window_id,
+include_screenshot:false, max_elements:80})` for up to `MAX_WINDOWS=12`
+  on-screen windows (skipping `is_on_screen:false` and parked/degenerate
+  geometry), merged into ONE flat 0-based indexed list
+  (`[{index, role, name, windowId}]`, labelled elements first, total ≤
+  `MAX_ELEMENTS=200`, name ≤ `MAX_ELEMENT_NAME`), minted under a synthetic
+  `snap-<n>` id. `this.lastElements` (Map) + `this.lastSnapshotId` re-added.
+- `ComputerTarget` is now `{ elementIndex; snapshotId } | { x; y }` (vestigial
+  `windowId?` dropped). New exported `parseWindowElements()` (tolerant, unit-
+  tested against recorded real Thunar + degraded-Desktop JSON). `driverArgs`
+  gained an element arm — **prefers `element_token`** (the driver requires
+  `pid` alongside it; `element_index + snapshot_id` is the fallback when a
+  snapshot carried no tokens). `act()` staleness/membership checks are live
+  (`error: stale snapshotId` / `error: element N is not in the latest
+observation`, both local, no driver round-trip).
+- `tools.ts` — `computer_act` re-exposes `element_index` + `snapshot_id`;
+  `computer_observe` / `computer_act` descriptions rewritten; `describeCall`
+  element case → `"click computer element N"`. `agent-loop.ts`
+  `parseComputerTarget` — element branch first, x,y fallback, coherent when
+  both supplied. `system-prompt.ts` updated. `elementBytes` counter now
+  measures the emitted model-facing element JSON (was the window list).
+- Stub `cua-driver-mcp.mjs` answers `get_window_state` (2 windows, tokens) and
+  `list_windows` bumped to 2. New e2e cases (stub 13/13); `CUA_E2E_REAL=1`
+  10/10 incl. a live click-by-element + stale-snapshot reject.
+
+**Deviated from the plan (all evidence-backed by the pre-impl real probe):**
+
+- **Element targeting is `click` + `type_text` only.** Element-targeted
+  `press_key` / `scroll` under `delivery_mode:"background"` on X11 _always_
+  return `background_unavailable` (the XTest route only reaches the globally
+  focused widget) — the parse layer rejects that combination so the model
+  never spends an approval on a guaranteed failure. `press_key` / `scroll`
+  stay `x,y`-only, unchanged from M2.
+- Token supersession is **per-window** (probed), so the specced stored-token
+  multi-window merge is safe with **zero** extra round-trips — no re-snapshot
+  before dispatch.
+- AT-SPI fidelity is **good**, not "unmeasured / possibly poor" — Thunar 71
+  labelled elements, Application Finder 120, panels 6–10; only `xfdesktop`'s
+  canvas is empty (surfaced as an `elements-degraded` hint). Element targeting
+  is a real capability on this image, not "nice when available".
+
+**Known M3.1 gaps (documented, not blockers):** `describeCall` shows only
+`element N` (role/label aren't in the tool args); `act()` costs `1 + (N+2)`
+driver calls because the trailing re-observe re-walks every window;
+`test:computer-smoke` was not extended (out of scope — no live-model change).
 
 ### M3.2 `drag` / `double_click` / `right_click` / `hotkey` — M
 
@@ -308,11 +328,16 @@ extracted from both implementations _afterward_, not generalized up front.
   on; a slimmer image (Openbox) changes the AX surface M3.1 depends on.
 - **Manifest schema drift** — `bounded` YAML is version-coupled to
   `cua-driver`; pin with the image, re-verify the deny probe on any bump.
-- **AX-tree fidelity** — GTK/Qt-under-Xtigervnc element quality for M3.1 is
-  unmeasured; if poor, x,y stays primary and M3.1 degrades to "nice when
-  available."
-- **`element_token`/`snapshot_id` lifetime** vs re-observe cadence — prefer
-  tokens; expect `unverifiable`, keep the "not confirmed" path under test.
+- **AX-tree fidelity** — ~~unmeasured~~ measured in M3.1: **good** for GTK/XFCE
+  under Xtigervnc (Thunar 71 elements, Application Finder 120, panels 6–10);
+  only `xfdesktop`'s canvas is empty. x,y stays the documented fallback for
+  non-AX surfaces and for `press_key` / `scroll`.
+- **`element_token`/`snapshot_id` lifetime** — M3.1 confirmed supersession is
+  **per-window**, so tokens collected across one `observe()` stay live
+  together; a stale token → driver `stale_element_token` refusal, and `act()`
+  now also rejects a stale synthetic `snapshotId` locally. `click` /
+  `type_text` by element return `unverifiable` (AT-SPI route, no readback) —
+  the "not confirmed" path stays under test.
 - **Resolution** — real desktop 1280x900; if the overlay aspect is wrong in the
   default split, expose `CUA_SCREEN_SIZE` (small; do it in M3.1 if M2.5 flags
   it).

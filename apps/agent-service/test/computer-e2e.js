@@ -13,6 +13,11 @@
  *
  *   docker build -t sparklab/cua-desktop:0.22.2 apps/agent-service/test/cua-real
  *   CUA_E2E_REAL=1 pnpm --filter @sparklab/agent-service test:computer-e2e
+ *
+ * Checks: 13 in stub mode (M2 baseline 10 + M3.1: element list in observe(),
+ * act() by { elementIndex, snapshotId }, stale-snapshot local reject); real
+ * mode adds one more (click a real AT-SPI element, or note zero-element
+ * degradation) plus the optional CUA_EGRESS_NETWORK isolation check.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -235,6 +240,95 @@ try {
     assert.match(result.content, /^typed \[redacted\]/);
     assert.doesNotMatch(result.content, /sup3r-s3cret/);
   });
+
+  // ---- M3.1: per-window element targeting -------------------------------
+  let firstElementIndex = -1;
+  let elementSnapshotId = "";
+
+  await check(
+    "observe() returns a flat indexed AT-SPI element list (M3.1)",
+    async () => {
+      const result = await rt.observe();
+      const line = result.content
+        .split("\n")
+        .find((l) => l.startsWith("elements ["));
+      assert.ok(line, "an `elements [...]` line is present");
+      const list = JSON.parse(line.slice("elements ".length));
+      assert.ok(Array.isArray(list) && list.length > 0, "list is non-empty");
+      for (const e of list) {
+        assert.equal(typeof e.index, "number");
+        assert.equal(typeof e.role, "string");
+        assert.equal(typeof e.name, "string");
+        assert.ok("windowId" in e);
+      }
+      firstElementIndex = list[0].index;
+      elementSnapshotId = /snapshotId (\S+)/.exec(result.content)?.[1] ?? "";
+      assert.ok(elementSnapshotId, "the observation carries a snapshotId");
+      lastRevision = result.snapshot.revision;
+    },
+  );
+
+  await check(
+    "act(click) by { elementIndex, snapshotId } is dispatched, not refused",
+    async () => {
+      const result = await rt.act({
+        kind: "click",
+        target: {
+          elementIndex: firstElementIndex,
+          snapshotId: elementSnapshotId,
+        },
+      });
+      assert.match(result.content, /^click computer element \d+/);
+      assert.match(
+        result.content,
+        /effect=(confirmed|partial|unverifiable)/,
+        result.content,
+      );
+      assert.doesNotMatch(result.content, /effect=refused/);
+      assert.ok(result.snapshot, "a fresh snapshot is published");
+      lastRevision = result.snapshot.revision;
+    },
+  );
+
+  await check(
+    "act() rejects a stale snapshotId locally, without a driver round-trip",
+    async () => {
+      const before = REAL ? 0 : readLog().length;
+      const result = await rt.act({
+        kind: "click",
+        target: { elementIndex: 0, snapshotId: "snap-does-not-exist" },
+      });
+      assert.match(result.content, /^error: stale snapshotId/);
+      if (!REAL)
+        assert.equal(readLog().length, before, "no new docker/driver activity");
+    },
+  );
+
+  if (REAL) {
+    await check(
+      "REAL: if a window exposes elements, act(click) on the first one is not refused / a transport error",
+      async () => {
+        const result = await rt.observe();
+        const line = result.content
+          .split("\n")
+          .find((l) => l.startsWith("elements ["));
+        const list = line ? JSON.parse(line.slice("elements ".length)) : [];
+        if (list.length === 0) {
+          console.log(
+            "      (real desktop exposed ZERO AT-SPI elements — element targeting degrades to x,y; acceptable v1 outcome)",
+          );
+          return;
+        }
+        const snap = /snapshotId (\S+)/.exec(result.content)?.[1] ?? "";
+        const act = await rt.act({
+          kind: "click",
+          target: { elementIndex: list[0].index, snapshotId: snap },
+        });
+        assert.doesNotMatch(act.content, /effect=refused|error: /, act.content);
+        assert.match(act.content, /effect=(confirmed|partial|unverifiable)/);
+      },
+    );
+  }
 
   if (!REAL) {
     await check(

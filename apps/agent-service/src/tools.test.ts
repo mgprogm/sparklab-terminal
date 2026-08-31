@@ -123,6 +123,24 @@ test("virtual-computer tools are hidden from TOOLS unless CUA_ENABLED, but their
     }),
     "type into computer @ 40,80: [redacted]",
   );
+  // M3.1: element-target form of describeCall.
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "click",
+      element_index: 5,
+      snapshot_id: "snap-3",
+    }),
+    "click computer element 5",
+  );
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "type_text",
+      element_index: 2,
+      snapshot_id: "snap-3",
+      text: "hunter2",
+    }),
+    "type into computer element 2: [redacted]",
+  );
 });
 
 test("browser capture is an explicit one-time approved file write", () => {

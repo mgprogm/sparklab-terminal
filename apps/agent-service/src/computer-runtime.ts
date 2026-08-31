@@ -14,12 +14,17 @@
  *     container path (no inline base64 for the desktop); the bytes are pulled
  *     back with `docker exec … base64 -w0` and the file deleted. Screen dims
  *     come from that response (fallback `get_screen_size`). `list_windows`
- *     gives the model a window inventory.
- *   - act: targets use `scope:"desktop"` screen coordinates with
+ *     gives the model a window inventory, and (M3.1) `get_window_state({pid,
+ *     window_id, include_screenshot:false})` is called for up to MAX_WINDOWS
+ *     on-screen windows to build ONE flat indexed element list.
+ *   - act: an element target (`elementIndex` + `snapshotId` from the latest
+ *     observe) is the preferred form for `click` / `type_text` — dispatched via
+ *     the driver's `element_token` (per-element, per-window; supersession is
+ *     per-window, so tokens collected across a whole observe stay live until the
+ *     next observe). Screen-absolute `scope:"desktop"` x,y stays the fallback
+ *     (and the only form for `press_key` / `scroll`). All delivery is
  *     `delivery_mode:"background"` (XTEST / XInput2 master pointer, no focus
- *     steal). Screen-absolute x,y is the ONLY targeting mode in v1; per-window
- *     element indexing (get_window_state → elements[] + snapshot_id) is an
- *     M3.1 refinement and not wired here.
+ *     steal).
  *
  * Everything container-specific lives behind the private `docker*` helpers so
  * the tool layer and the frontend stay backend-agnostic and a later VM/cloud
@@ -64,10 +69,38 @@ export interface ComputerSnapshot {
   status: string;
 }
 
-// v1: screen-absolute point (desktop scope) is the ONLY targeting mode.
-// `windowId` is reserved for the M3.1 per-window element path (see
-// docs/VIRTUAL-COMPUTER-REMAINING.md) and is currently ignored.
-export type ComputerTarget = { x: number; y: number; windowId?: string };
+// M3.1: an element target (from the latest observe's flat indexed list) is the
+// preferred form; a screen-absolute desktop point is the fallback.
+export type ComputerTarget =
+  { elementIndex: number; snapshotId: string } | { x: number; y: number };
+
+/** One row of the flat indexed element list observe() hands the model. */
+export interface ComputerElement {
+  index: number;
+  role: string;
+  name: string;
+  windowId: number;
+}
+
+/** What observe() stashes per synthetic index so act() can dispatch it. */
+interface StoredElement {
+  windowId: number;
+  pid: number;
+  driverElementToken?: string;
+  driverSnapshotId: string;
+  driverElementIndex: number;
+  role: string;
+  name: string;
+}
+
+/** Driver-side handle for one element, passed into driverArgs(). */
+export interface DriverElementRef {
+  pid: number;
+  windowId: number;
+  token?: string;
+  driverSnapshotId: string;
+  driverElementIndex: number;
+}
 
 export type ComputerAction =
   | { kind: "click"; target: ComputerTarget }
@@ -81,7 +114,10 @@ export type ComputerAction =
     };
 
 export interface ComputerObserveResult {
-  /** Model-facing text: viewport, current snapshotId, window inventory. */
+  /**
+   * Model-facing text: viewport, current snapshotId, window inventory, and the
+   * flat indexed element list (M3.1).
+   */
   content: string;
   snapshot?: ComputerSnapshot;
   snapshotId: string;
@@ -100,9 +136,16 @@ const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 const MAX_SCREENSHOT_B64_BYTES = Math.ceil(MAX_SCREENSHOT_BYTES / 3) * 4 + 4;
 const MAX_VIEWPORT_EDGE = 4096;
 const MAX_MCP_LINE_BYTES = 8 * 1024 * 1024;
-// Applied to the window inventory `list_windows` returns for the model.
+// On-screen windows visited for element extraction per observe (M3.1). Distinct
+// from MAX_ELEMENTS — also caps the `list_windows` inventory shown to the model.
+const MAX_WINDOWS = 12;
+// Cap on the merged, flat indexed element list across all visited windows.
 const MAX_ELEMENTS = 200;
+// Passed to the driver as get_window_state({max_elements}) to bound the AT-SPI
+// walk, and applied again when slicing one window's contribution to the merge.
+const MAX_WINDOW_ELEMENTS = 80;
 const MAX_ELEMENT_NAME = 200;
+const MAX_ELEMENT_ROLE = 60;
 const START_ATTEMPTS = 8;
 const ORPHAN_LABEL = "sparklab-cua";
 // Per-instance sweep label (M2.3). sweepOrphans() filters on THIS so a second
@@ -127,6 +170,13 @@ export class ComputerRuntime {
   private nextId = 1;
   private revision = 0;
   private snapshotSeq = 0;
+  // M3.1: the flat indexed element list from the LATEST observe(), and the
+  // synthetic snapshot id it was minted under. act() validates an element
+  // target against both before any driver round-trip. A fresh observe() (incl.
+  // the one act() runs after every action) replaces the map and the id, which
+  // is what makes stale element targets fail closed.
+  private lastElements = new Map<number, StoredElement>();
+  private lastSnapshotId = "";
   private pending = new Map<
     number,
     { resolve: (r: McpResponse) => void; reject: (e: Error) => void }
@@ -201,6 +251,12 @@ export class ComputerRuntime {
   }
 
   async observe(signal?: AbortSignal): Promise<ComputerObserveResult> {
+    // Fail closed: drop the previous observe's element map + snapshot id up
+    // front, so if get_desktop_state throws/aborts before a fresh id is minted,
+    // a replayed element target hits the staleness check locally rather than
+    // being dispatched against a stale token (QA M3.1 #7).
+    this.lastElements = new Map();
+    this.lastSnapshotId = "";
     // 0.22.2: get_desktop_state writes the PNG to a file INSIDE the container
     // (no inline base64 for the desktop) and returns its screen dimensions.
     const shotPath = `${config.cua.screenshotDir.replace(/\/+$/, "")}/cua-${randomUUID()}.png`;
@@ -234,28 +290,102 @@ export class ComputerRuntime {
       void this.execInContainer(["rm", "-f", shotPath]).catch(() => undefined);
     }
 
-    // Window inventory for the model. Per-window element indexing
-    // (get_window_state → elements[] + snapshot_id) is an M3.1 refinement; v1
-    // targets by desktop x,y only.
+    // Window inventory for the model. Filter to on-screen, real-geometry
+    // windows FIRST and slice to MAX_WINDOWS, so the shown inventory is exactly
+    // the set the element walk below visits — element windowIds never point at
+    // a window the model can't see in `windows [...]` (QA M3.1 #3).
+    let visibleWindows: Array<Record<string, unknown>> = [];
     let windowsText = "windows unavailable";
     try {
       const wins = asRecord(
         pickStructured(await this.call("list_windows", {}, signal)),
       );
-      const list = Array.isArray(wins?.windows) ? wins.windows : [];
+      const rawList = Array.isArray(wins?.windows) ? wins.windows : [];
+      visibleWindows = rawList
+        .map((w) => asRecord(w) ?? {})
+        .filter(
+          (w) =>
+            w.is_on_screen !== false &&
+            toInt(w.pid) !== undefined &&
+            toInt(w.window_id) !== undefined &&
+            !isOffscreenGeometry(w),
+        )
+        .slice(0, MAX_WINDOWS);
       windowsText = `windows ${JSON.stringify(
-        list.slice(0, MAX_ELEMENTS).map(summarizeWindow),
+        visibleWindows.map(summarizeWindow),
       )}`;
     } catch {
       // keep default
     }
-    if (windowsText !== "windows unavailable") {
-      const elementBytes = Buffer.byteLength(windowsText);
+
+    // M3.1 — per-window AT-SPI elements merged into ONE flat indexed list.
+    // get_window_state supersession is per-window (verified against 0.22.2), so
+    // element_tokens collected across the whole walk stay live together until
+    // the next observe(). include_screenshot:false is required or every window
+    // re-embeds a PNG and blows the byte bound.
+    const elements: ComputerElement[] = [];
+    const elementMap = new Map<number, StoredElement>();
+    const degradedWindows: Array<{ windowId: number; reason: string }> = [];
+    let synthetic = 0;
+    for (const w of visibleWindows) {
+      if (elements.length >= MAX_ELEMENTS) break;
+      const pid = toInt(w.pid);
+      const windowId = toInt(w.window_id);
+      if (pid === undefined || windowId === undefined) continue;
+      try {
+        const parsed = parseWindowElements(
+          pickStructured(
+            await this.call(
+              "get_window_state",
+              {
+                pid,
+                window_id: windowId,
+                include_screenshot: false,
+                max_elements: MAX_WINDOW_ELEMENTS,
+              },
+              signal,
+            ),
+          ),
+        );
+        if (parsed.degraded && parsed.degradedReason)
+          degradedWindows.push({ windowId, reason: parsed.degradedReason });
+        // Labelled elements first so an arbitrary cut keeps the buttons, not a
+        // pile of empty table cells.
+        const ordered = [
+          ...parsed.elements.filter((e) => e.name),
+          ...parsed.elements.filter((e) => !e.name),
+        ].slice(0, MAX_WINDOW_ELEMENTS);
+        for (const e of ordered) {
+          if (elements.length >= MAX_ELEMENTS) break;
+          const index = synthetic++;
+          const name = e.name.slice(0, MAX_ELEMENT_NAME);
+          const role = e.role.slice(0, MAX_ELEMENT_ROLE);
+          elements.push({ index, role, name, windowId });
+          elementMap.set(index, {
+            windowId,
+            pid,
+            driverElementToken: e.elementToken,
+            driverSnapshotId: parsed.snapshotId,
+            driverElementIndex: e.elementIndex,
+            role,
+            name,
+          });
+        }
+      } catch {
+        // skip a window whose get_window_state errors
+      }
+    }
+    this.lastElements = elementMap;
+
+    const elementsJson = JSON.stringify(elements);
+    if (elements.length) {
+      const elementBytes = Buffer.byteLength(elementsJson);
       this.counters.elementBytes = elementBytes;
       computerPerformanceMetrics.computerElements(elementBytes);
     }
 
     const snapshotId = `snap-${++this.snapshotSeq}`;
+    this.lastSnapshotId = snapshotId;
 
     let snapshot: ComputerSnapshot | undefined;
     const bytes = data ? Buffer.byteLength(data, "base64") : 0;
@@ -276,8 +406,15 @@ export class ComputerRuntime {
         : `viewport ${width || "?"}x${height || "?"} (no screenshot bytes)`,
       `snapshotId ${snapshotId}`,
       windowsText,
-      "target computer_act by screen-absolute x,y from the screenshot",
+      `elements ${elementsJson}`,
     ];
+    if (degradedWindows.length)
+      lines.push(
+        `elements-degraded ${JSON.stringify(degradedWindows.slice(0, MAX_WINDOWS))} — act by screen x,y in these windows`,
+      );
+    lines.push(
+      "target computer_act by element_index + snapshotId from the list above (click / type_text); fall back to screen-absolute x,y when no element matches, and always for press_key / scroll",
+    );
     return { content: lines.join("\n"), snapshot, snapshotId };
   }
 
@@ -304,17 +441,44 @@ export class ComputerRuntime {
     signal?: AbortSignal,
   ): Promise<ComputerActResult> {
     const target = action.target;
-    if (
+    let element: DriverElementRef | undefined;
+    if ("elementIndex" in target) {
+      // Element target — validate against the LATEST observation before any
+      // driver round-trip. A stale snapshot id or an unknown index is a spent
+      // approval otherwise (M1 fix #1).
+      if (target.snapshotId !== this.lastSnapshotId)
+        return {
+          content: "error: stale snapshotId — call computer_observe again",
+        };
+      const stored = this.lastElements.get(target.elementIndex);
+      if (!stored)
+        return {
+          content: `error: element ${target.elementIndex} is not in the latest observation`,
+        };
+      if (action.kind !== "click" && action.kind !== "type_text")
+        return {
+          content: `error: ${action.kind} cannot target an element — supply screen x,y`,
+        };
+      element = {
+        pid: stored.pid,
+        windowId: stored.windowId,
+        token: stored.driverElementToken,
+        driverSnapshotId: stored.driverSnapshotId,
+        driverElementIndex: stored.driverElementIndex,
+      };
+    } else if (
       typeof target?.x !== "number" ||
       typeof target?.y !== "number" ||
       Number.isNaN(target.x) ||
       Number.isNaN(target.y)
     ) {
-      // v1 targets by screen-absolute x,y only — reject a malformed target
-      // locally, before any driver round-trip.
-      return { content: "error: target requires screen x + y" };
+      // Pixel target — reject a malformed one locally, before any driver call.
+      return {
+        content:
+          "error: target requires screen x + y or element_index + snapshot_id",
+      };
     }
-    const args = driverArgs(action);
+    const args = driverArgs(action, element);
     const actionContent = await this.call(
       ACTION_TOOL[action.kind],
       args,
@@ -338,7 +502,9 @@ export class ComputerRuntime {
     const actionText =
       action.kind === "type_text"
         ? "typed [redacted]"
-        : `${action.kind} desktop @ ${target.x},${target.y}`;
+        : "elementIndex" in target
+          ? `${action.kind} computer element ${target.elementIndex}`
+          : `${action.kind} desktop @ ${target.x},${target.y}`;
     return {
       content: `${actionText}\n${resultText}\n${observation}`,
       snapshot,
@@ -772,16 +938,43 @@ export class ComputerRuntime {
 
 /**
  * Map a structured ComputerAction to 0.22.2 driver-tool arguments.
- * v1 targeting is desktop-scope only (`scope:"desktop"`, screen-absolute x,y);
- * background delivery is via XTEST / XInput2 master pointer (no focus steal —
- * verified against 0.22.2). Per-window element targeting is an M3.1 refinement
- * (docs/VIRTUAL-COMPUTER-REMAINING.md) and is not wired here.
+ *
+ * Delivery is always `delivery_mode:"background"` (XTEST / XInput2 master
+ * pointer, no focus steal — verified against 0.22.2).
+ *
+ * When `element` is supplied (an element target, `click` / `type_text` only —
+ * M3.1) the driver is addressed by its per-element `element_token` (which
+ * carries `snapshot_id:element_index`), falling back to explicit
+ * `element_index + snapshot_id` if the snapshot carried no tokens. `pid` +
+ * `window_id` are always sent alongside — the driver rejects `element_token`
+ * without a `pid` ("Missing required integer field: pid"). `press_key` /
+ * `scroll` and every pixel target stay `scope:"desktop"` screen-absolute:
+ * element-targeted `press_key` / `scroll` under background delivery always
+ * return `background_unavailable` on X11 (the XTest route only reaches the
+ * globally-focused widget).
  */
-export function driverArgs(action: ComputerAction): Record<string, unknown> {
+export function driverArgs(
+  action: ComputerAction,
+  element?: DriverElementRef,
+): Record<string, unknown> {
   const t = action.target;
-  const point = { scope: "desktop", x: t.x, y: t.y };
-  const focusScope = { scope: "desktop" };
   const delivery = { delivery_mode: "background" as const };
+  if ("elementIndex" in t && element) {
+    const handle = element.token
+      ? { element_token: element.token }
+      : {
+          element_index: element.driverElementIndex,
+          snapshot_id: element.driverSnapshotId,
+        };
+    const win = { pid: element.pid, window_id: element.windowId };
+    return action.kind === "type_text"
+      ? { ...handle, ...win, ...delivery, text: action.text }
+      : { ...handle, ...win, ...delivery };
+  }
+  // Pixel / desktop-focus arm.
+  const point =
+    "x" in t ? { scope: "desktop", x: t.x, y: t.y } : { scope: "desktop" };
+  const focusScope = { scope: "desktop" };
   switch (action.kind) {
     case "click":
       return { ...point, ...delivery };
@@ -838,6 +1031,145 @@ export function summarizeActionResult(result: unknown): string {
   if (escalation && typeof escalation.reason === "string")
     parts.push(`reason=${escalation.reason}`);
   return parts.join(" ");
+}
+
+/** One element as `parseWindowElements` normalises it (pre-merge). */
+export interface RawElement {
+  /** The driver's own per-window element index (NOT contiguous, NOT 0-based). */
+  elementIndex: number;
+  /** `snapshot_id:element_index`; preferred dispatch handle. */
+  elementToken?: string;
+  role: string;
+  /** From `label` / `name` / `title`; may be empty. */
+  name: string;
+  /** Window-relative; present on some elements only. */
+  frame?: { x: number; y: number; w: number; h: number };
+}
+
+export interface ParsedWindowState {
+  /** `^s[0-9a-f]{8}$` — the driver's per-get_window_state snapshot id. */
+  snapshotId: string;
+  elements: RawElement[];
+  degraded?: boolean;
+  degradedReason?: string;
+  elementsComplete?: boolean;
+  /** `escalation.recommended` — e.g. "px" for a non-AX (canvas) surface. */
+  escalation?: string;
+}
+
+/**
+ * Tolerant parser for ONE `get_window_state` `structuredContent`
+ * (cua-driver 0.22.2). Real shape:
+ *   { snapshot_id: "s00000002",
+ *     elements: [{ element_index, element_token: "s00000002:0", role,
+ *                  label?, enabled?, frame?: {x,y,w,h}, depth?, parent_index?,
+ *                  value? }, ...],
+ *     element_count, total_element_count, returned_element_count,
+ *     elements_complete, tree_markdown, _note,
+ *     degraded?, degraded_reason?, escalation?: { reason, recommended } }
+ * Fallback shapes: `tree` / `nodes` for the array; `snapshotId` for the id;
+ * `index`, `token`, `name` / `title`, `bounds` {x,y,width,height} per element.
+ */
+export function parseWindowElements(
+  structuredContent: unknown,
+): ParsedWindowState {
+  const sc = asRecord(structuredContent) ?? {};
+  const snapshotId =
+    typeof sc.snapshot_id === "string"
+      ? sc.snapshot_id
+      : typeof sc.snapshotId === "string"
+        ? sc.snapshotId
+        : "";
+  const rawArray = Array.isArray(sc.elements)
+    ? sc.elements
+    : Array.isArray(sc.tree)
+      ? sc.tree
+      : Array.isArray(sc.nodes)
+        ? sc.nodes
+        : [];
+  const elements: RawElement[] = [];
+  for (const item of rawArray) {
+    const e = asRecord(item);
+    if (!e) continue;
+    const idxRaw = e.element_index ?? e.index ?? e.id;
+    const elementIndex =
+      typeof idxRaw === "number" && Number.isInteger(idxRaw)
+        ? idxRaw
+        : elements.length;
+    const role =
+      typeof e.role === "string"
+        ? e.role
+        : typeof e.role_name === "string"
+          ? e.role_name
+          : "";
+    const nameRaw = e.label ?? e.name ?? e.title ?? e.text ?? "";
+    const name = typeof nameRaw === "string" ? nameRaw : "";
+    const token =
+      typeof e.element_token === "string"
+        ? e.element_token
+        : typeof e.token === "string"
+          ? e.token
+          : undefined;
+    const fr = asRecord(e.frame) ?? asRecord(e.bounds);
+    let frame: RawElement["frame"];
+    if (fr) {
+      const x = finiteNum(fr.x);
+      const y = finiteNum(fr.y);
+      const w = finiteNum(fr.w ?? fr.width);
+      const h = finiteNum(fr.h ?? fr.height);
+      if (
+        x !== undefined &&
+        y !== undefined &&
+        w !== undefined &&
+        h !== undefined
+      )
+        frame = { x, y, w, h };
+    }
+    if (!role && !name && !token) continue;
+    elements.push({ elementIndex, elementToken: token, role, name, frame });
+  }
+  const escalationRec = asRecord(sc.escalation);
+  return {
+    snapshotId,
+    elements,
+    degraded: sc.degraded === true || undefined,
+    degradedReason:
+      typeof sc.degraded_reason === "string" ? sc.degraded_reason : undefined,
+    elementsComplete:
+      typeof sc.elements_complete === "boolean"
+        ? sc.elements_complete
+        : undefined,
+    escalation:
+      escalationRec && typeof escalationRec.recommended === "string"
+        ? escalationRec.recommended
+        : undefined,
+  };
+}
+
+function finiteNum(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function toInt(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isInteger(n) ? n : undefined;
+}
+
+/**
+ * Skip windows we should not spend a `get_window_state` round-trip on:
+ * fully parked off-screen (`list_windows` still reports `is_on_screen:true` for
+ * a 3x3 panel helper at -9999,-9999) or degenerately tiny.
+ */
+function isOffscreenGeometry(w: Record<string, unknown>): boolean {
+  const x = finiteNum(w.x);
+  const y = finiteNum(w.y);
+  const width = finiteNum(w.width);
+  const height = finiteNum(w.height);
+  if ((x !== undefined && x <= -9999) || (y !== undefined && y <= -9999))
+    return true;
+  if (width !== undefined && height !== undefined && width * height < 100)
+    return true;
+  return false;
 }
 
 function pickStructured(content: McpContent[]): unknown {

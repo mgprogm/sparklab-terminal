@@ -42,10 +42,11 @@ function toolResult(id, name, args) {
     };
   }
   if (name === "list_windows") {
+    // Two on-screen windows so observe()'s per-window merge is exercised.
     return {
       id,
       result: {
-        content: [{ type: "text", text: "Found 1 window" }],
+        content: [{ type: "text", text: "Found 2 windows" }],
         structuredContent: {
           windows: [
             {
@@ -60,8 +61,95 @@ function toolResult(id, name, args) {
               is_on_screen: true,
               z_index: 1,
             },
+            {
+              window_id: 222,
+              pid: 88,
+              title: "cua - Thunar",
+              app_name: "Thunar",
+              x: 5,
+              y: 56,
+              width: 640,
+              height: 480,
+              is_on_screen: true,
+              z_index: 2,
+            },
           ],
         },
+      },
+    };
+  }
+  if (name === "get_window_state") {
+    // 0.22.2 shape: per-window elements[] + a `^s[0-9a-f]{8}$` snapshot_id,
+    // element_token = `${snapshot_id}:${element_index}` (per-element).
+    const winId = args && args.window_id;
+    if (winId === 111) {
+      return {
+        id,
+        result: {
+          content: [{ type: "text", text: "window_id=111 pid=77 elements=1" }],
+          structuredContent: {
+            snapshot_id: "s0000a001",
+            element_count: 1,
+            elements_complete: true,
+            elements: [
+              {
+                depth: 3,
+                element_index: 0,
+                element_token: "s0000a001:0",
+                enabled: true,
+                label: "Applications",
+                role: "toggle button",
+                frame: { x: 0, y: 0, w: 102, h: 26 },
+              },
+            ],
+            tree_markdown: '- [0] toggle button "Applications"\n',
+            window_id: 111,
+            pid: 77,
+          },
+        },
+      };
+    }
+    if (winId === 222) {
+      return {
+        id,
+        result: {
+          content: [{ type: "text", text: "window_id=222 pid=88 elements=2" }],
+          structuredContent: {
+            snapshot_id: "s0000a002",
+            element_count: 2,
+            elements_complete: false,
+            elements: [
+              {
+                depth: 4,
+                element_index: 0,
+                element_token: "s0000a002:0",
+                enabled: true,
+                label: "Home",
+                role: "push button",
+                frame: { x: 120, y: 85, w: 37, h: 35 },
+              },
+              // One unlabelled node — observe() orders labelled elements first.
+              {
+                depth: 5,
+                element_index: 1,
+                element_token: "s0000a002:1",
+                enabled: true,
+                label: "",
+                role: "table cell",
+              },
+            ],
+            tree_markdown: '- [0] push button "Home"\n- [1] table cell ""\n',
+            window_id: 222,
+            pid: 88,
+          },
+        },
+      };
+    }
+    return {
+      id,
+      result: {
+        content: [{ type: "text", text: "no such window" }],
+        isError: true,
       },
     };
   }

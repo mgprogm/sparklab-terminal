@@ -8,9 +8,99 @@ process.env.GPT56SOL_DEPLOYMENT ??= "test-deployment";
 process.env.CUA_ENABLED = "true";
 process.env.CUA_INSTANCE_ID = "testinst";
 
-const { ComputerRuntime, driverArgs, summarizeActionResult } =
-  await import("./computer-runtime.js");
+const {
+  ComputerRuntime,
+  driverArgs,
+  summarizeActionResult,
+  parseWindowElements,
+} = await import("./computer-runtime.js");
 const { config } = await import("./config.js");
+// This file boots with CUA_ENABLED=true, so tools.ts offers the computer tools.
+const { TOOLS } = await import("./tools.js");
+
+test("computer_act schema re-exposes element_index + snapshot_id, keeps x,y (M3.1)", () => {
+  const act = TOOLS.find((t) => t.function.name === "computer_act");
+  assert.ok(act, "computer_act is offered when CUA_ENABLED");
+  const props = (act.function.parameters?.properties ?? {}) as Record<
+    string,
+    { type?: string }
+  >;
+  assert.equal(props.element_index?.type, "integer");
+  assert.ok(props.snapshot_id, "snapshot_id is back in the schema");
+  assert.ok(props.x && props.y, "screen x,y stay as the fallback");
+  assert.equal(props.x?.type, "integer");
+});
+
+// ---- recorded real get_window_state structuredContent (cua-driver 0.22.2) ---
+// Trimmed from apps/agent-service/test/cua-real/probe-window-state.mjs output.
+const REAL_THUNAR_WINDOW_STATE = {
+  _note: "Prefer `elements` — `tree_markdown` will continue to work …",
+  element_count: 71,
+  elements: [
+    {
+      depth: 4,
+      element_index: 0,
+      element_token: "s00000002:0",
+      enabled: true,
+      label: "Menubar",
+      role: "push button",
+    },
+    {
+      depth: 4,
+      element_index: 1,
+      element_token: "s00000002:1",
+      enabled: true,
+      frame: { h: 35, w: 37, x: 83, y: 85 },
+      label: "Open Parent",
+      role: "push button",
+    },
+    {
+      depth: 4,
+      element_index: 14,
+      element_token: "s00000002:14",
+      enabled: true,
+      label: "split pane",
+      parent_index: 9,
+      role: "split pane",
+      value: "170.0",
+    },
+    {
+      depth: 6,
+      element_index: 16,
+      element_token: "s00000002:16",
+      enabled: true,
+      label: "",
+      role: "table cell",
+    },
+  ],
+  elements_complete: false,
+  pid: 81,
+  returned_element_count: 71,
+  snapshot_id: "s00000002",
+  total_element_count: 71,
+  tree_markdown: '- frame = "cua - Thunar"\n    - [0] push button "Menubar"\n',
+  window_id: 10485767,
+};
+
+const REAL_DESKTOP_WINDOW_STATE = {
+  _note: "Prefer `elements` — …",
+  degraded: true,
+  degraded_reason:
+    "atspi_tree_empty: the AT-SPI walk returned no actionable elements. …",
+  element_count: 0,
+  elements: [],
+  elements_complete: false,
+  escalation: {
+    reason: "non-AX surface — act by pixel (x,y) off the screenshot …",
+    recommended: "px",
+  },
+  pid: 91,
+  returned_element_count: 0,
+  snapshot_id: "s00000001",
+  total_element_count: 0,
+  tree_markdown: '- frame = "Desktop"\n',
+  window_id: 16777256,
+};
 
 // ---- pure helpers -------------------------------------------------------
 
@@ -40,6 +130,164 @@ test("driverArgs fixes background delivery and maps targets (0.22.2)", () => {
   });
   assert.equal(scroll.direction, "down");
   assert.equal(scroll.by, "line");
+});
+
+test("driverArgs element target — prefers element_token, sends pid + window_id (M3.1)", () => {
+  const withToken = driverArgs(
+    { kind: "click", target: { elementIndex: 3, snapshotId: "snap-7" } },
+    {
+      pid: 81,
+      windowId: 10485767,
+      token: "s00000002:1",
+      driverSnapshotId: "s00000002",
+      driverElementIndex: 1,
+    },
+  );
+  assert.deepEqual(withToken, {
+    element_token: "s00000002:1",
+    pid: 81,
+    window_id: 10485767,
+    delivery_mode: "background",
+  });
+
+  // No per-element token in the snapshot → explicit element_index + snapshot_id.
+  const noToken = driverArgs(
+    {
+      kind: "type_text",
+      target: { elementIndex: 0, snapshotId: "snap-7" },
+      text: "hello",
+    },
+    {
+      pid: 88,
+      windowId: 222,
+      token: undefined,
+      driverSnapshotId: "s0000a002",
+      driverElementIndex: 0,
+    },
+  );
+  assert.deepEqual(noToken, {
+    element_index: 0,
+    snapshot_id: "s0000a002",
+    pid: 88,
+    window_id: 222,
+    delivery_mode: "background",
+    text: "hello",
+  });
+});
+
+test("parseWindowElements — real Thunar structuredContent (labelled + unlabelled, tokens, snapshot id)", () => {
+  const parsed = parseWindowElements(REAL_THUNAR_WINDOW_STATE);
+  assert.equal(parsed.snapshotId, "s00000002");
+  assert.equal(parsed.elements.length, 4);
+  assert.deepEqual(parsed.elements[0], {
+    elementIndex: 0,
+    elementToken: "s00000002:0",
+    role: "push button",
+    name: "Menubar",
+    frame: undefined,
+  });
+  assert.deepEqual(parsed.elements[1]?.frame, { x: 83, y: 85, w: 37, h: 35 });
+  assert.equal(parsed.elements[2]?.elementIndex, 14); // driver index is not contiguous
+  assert.equal(parsed.elements[3]?.name, ""); // unlabelled node kept
+  assert.equal(parsed.degraded, undefined);
+});
+
+test("parseWindowElements — real degraded (non-AX) window: empty list + reason + px escalation", () => {
+  const parsed = parseWindowElements(REAL_DESKTOP_WINDOW_STATE);
+  assert.equal(parsed.snapshotId, "s00000001");
+  assert.deepEqual(parsed.elements, []);
+  assert.equal(parsed.degraded, true);
+  assert.match(parsed.degradedReason ?? "", /atspi_tree_empty/);
+  assert.equal(parsed.escalation, "px");
+});
+
+test("parseWindowElements — tolerates a fallback shape (nodes / index / name / bounds)", () => {
+  const parsed = parseWindowElements({
+    snapshotId: "sdeadbeef",
+    nodes: [
+      {
+        index: 2,
+        name: "OK",
+        role: "push button",
+        bounds: { x: 1, y: 2, width: 3, height: 4 },
+      },
+      { garbage: true },
+    ],
+  });
+  assert.equal(parsed.snapshotId, "sdeadbeef");
+  assert.equal(parsed.elements.length, 1);
+  assert.deepEqual(parsed.elements[0], {
+    elementIndex: 2,
+    elementToken: undefined,
+    role: "push button",
+    name: "OK",
+    frame: { x: 1, y: 2, w: 3, h: 4 },
+  });
+});
+
+test("observe() merges per-window elements into one flat indexed list (M3.1)", async () => {
+  const { spawn } = fakeSpawn();
+  const rt = new ComputerRuntime(undefined, { label: "chat-el", spawn });
+
+  const result = await rt.observe();
+
+  assert.match(
+    result.content,
+    /\nelements \[/,
+    "element list is in the content",
+  );
+  assert.match(result.content, /"role":"push button"/);
+  assert.match(result.content, /"name":"Reload"/);
+  assert.match(result.content, /"index":0/);
+  // Bounded: the whole observation text stays small.
+  assert.ok(
+    Buffer.byteLength(result.content) < 8192,
+    `content ${Buffer.byteLength(result.content)} bytes`,
+  );
+  await rt.stop();
+});
+
+test("act() by element — fresh snapshot dispatches; stale / unknown reject locally", async () => {
+  const { spawn, children } = fakeSpawn();
+  const rt = new ComputerRuntime(undefined, { label: "chat-ae", spawn });
+
+  const obs = await rt.observe();
+  const snapshotId = /snapshotId (snap-\d+)/.exec(obs.content)?.[1] ?? "";
+  assert.ok(snapshotId);
+  const spawnCountAfterObserve = children.length;
+
+  // Fresh element target → reaches the driver, not a local reject.
+  const ok = await rt.act({
+    kind: "click",
+    target: { elementIndex: 0, snapshotId },
+  });
+  assert.doesNotMatch(ok.content, /^error:/);
+  assert.match(ok.content, /click computer element 0/);
+
+  // Stale snapshot id → local reject, no driver/docker round-trip.
+  const staleBefore = children.length;
+  const stale = await rt.act({
+    kind: "click",
+    target: { elementIndex: 0, snapshotId: "snap-999" },
+  });
+  assert.match(stale.content, /^error: stale snapshotId/);
+  assert.equal(children.length, staleBefore, "no new child for a stale target");
+
+  // Unknown index in the latest observation → local reject.
+  const latest = /snapshotId (snap-\d+)/.exec(
+    (await rt.observe()).content,
+  )?.[1] as string;
+  const unknown = await rt.act({
+    kind: "click",
+    target: { elementIndex: 999, snapshotId: latest },
+  });
+  assert.match(
+    unknown.content,
+    /^error: element 999 is not in the latest observation/,
+  );
+
+  assert.ok(spawnCountAfterObserve >= 0);
+  await rt.stop();
 });
 
 test("summarizeActionResult surfaces effect, route, delivery, and refusal reason", () => {
@@ -141,6 +389,36 @@ class FakeChild extends EventEmitter {
                   height: 20,
                 },
               ],
+            },
+          },
+        });
+      } else if (name === "get_window_state") {
+        this.#emit({
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: "window_id=9 pid=1 elements=2" }],
+            structuredContent: {
+              snapshot_id: "s0000b001",
+              element_count: 2,
+              elements_complete: true,
+              elements: [
+                {
+                  element_index: 0,
+                  element_token: "s0000b001:0",
+                  role: "push button",
+                  label: "Reload",
+                  enabled: true,
+                  frame: { x: 4, y: 4, w: 30, h: 20 },
+                },
+                {
+                  element_index: 1,
+                  element_token: "s0000b001:1",
+                  role: "table cell",
+                  label: "",
+                },
+              ],
+              window_id: 9,
+              pid: 1,
             },
           },
         });

@@ -641,6 +641,8 @@ function parseArgs(raw: string): ToolArgs {
 function redactToolArgs(tool: string, args: ToolArgs): ToolArgs {
   if (tool === "browser_act" && args.action === "type")
     return { ...args, text: "[redacted]" };
+  // Keyed on kind, so it also covers the M3.1 element-target form
+  // (element_index + snapshot_id) of type_text.
   if (tool === "computer_act" && args.kind === "type_text")
     return { ...args, text: "[redacted]" };
   return args;
@@ -677,9 +679,10 @@ export function sanitizePersistedToolResult(
 ): string {
   if (tool.startsWith("browser_"))
     return "[browser result omitted from durable history]";
-  // computer_observe carries the window inventory (titles, geometry) + a
-  // screenshot, and computer_act echoes a fresh observation — never persisted
-  // (docs/VIRTUAL-COMPUTER.md: desktop state is ephemeral in chat).
+  // computer_observe carries the window inventory (titles, geometry), the
+  // indexed AT-SPI element list, and a screenshot; computer_act echoes a fresh
+  // observation — never persisted (docs/VIRTUAL-COMPUTER.md: desktop state is
+  // ephemeral in chat).
   if (tool.startsWith("computer_"))
     return "[computer result omitted from durable history]";
   return content;
@@ -724,7 +727,20 @@ function parseBrowserAction(args: ToolArgs): BrowserAction | string {
 }
 
 function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
-  // v1: screen-absolute point (desktop scope) is the only targeting mode.
+  // M3.1: element target (from the latest computer_observe) is preferred; a
+  // screen-absolute desktop point is the fallback. Element branch first so a
+  // model that supplies both is routed to the element.
+  if (
+    Number.isInteger(args.element_index) &&
+    (args.element_index ?? -1) >= 0 &&
+    typeof args.snapshot_id === "string" &&
+    args.snapshot_id.length > 0
+  ) {
+    return {
+      elementIndex: args.element_index as number,
+      snapshotId: args.snapshot_id,
+    };
+  }
   if (
     Number.isInteger(args.x) &&
     (args.x ?? -1) >= 0 &&
@@ -733,12 +749,13 @@ function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
   ) {
     return { x: args.x as number, y: args.y as number };
   }
-  return "target requires screen x + y";
+  return "target requires element_index + snapshot_id (preferred) or screen x + y";
 }
 
-function parseComputerAction(args: ToolArgs): ComputerAction | string {
+export function parseComputerAction(args: ToolArgs): ComputerAction | string {
   const target = parseComputerTarget(args);
   if (typeof target === "string") return target;
+  const isElement = "elementIndex" in target;
   switch (args.kind) {
     case "click":
       return { kind: "click", target };
@@ -747,12 +764,16 @@ function parseComputerAction(args: ToolArgs): ComputerAction | string {
         ? { kind: "type_text", target, text: args.text }
         : "type_text requires text of at most 10000 characters";
     case "press_key":
+      if (isElement)
+        return "press_key cannot target an element_index — supply screen x,y (element targeting is for click and type_text)";
       return typeof args.key === "string" &&
         args.key.length > 0 &&
         args.key.length <= 64
         ? { kind: "press_key", target, key: args.key }
         : "press_key requires a key name of at most 64 characters";
     case "scroll":
+      if (isElement)
+        return "scroll cannot target an element_index — supply screen x,y (element targeting is for click and type_text)";
       return args.direction === "up" ||
         args.direction === "down" ||
         args.direction === "left" ||

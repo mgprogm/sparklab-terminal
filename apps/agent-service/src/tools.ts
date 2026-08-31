@@ -1451,7 +1451,7 @@ if (config.cua.enabled) {
       function: {
         name: "computer_observe",
         description:
-          "Observe the disposable Linux desktop owned by this chat. Returns the viewport size, the current snapshotId, a window inventory (window_id, pid, title, app, bounds), and a screenshot. Starts the desktop lazily. Call before every computer_act and re-observe after each one. computer_act targets by screen-absolute x,y read from the screenshot — there is no element index in v1.",
+          "Observe the disposable Linux desktop owned by this chat. Returns the viewport size, the current snapshotId, a window inventory (window_id, pid, title, app, bounds), an indexed AT-SPI element list (per on-screen window: each entry has an index, role, name, and windowId), any windows with no element data (act by x,y there), and a screenshot. Starts the desktop lazily. Call before every computer_act and re-observe after each one — element indexes and the snapshotId go stale after any action.",
         parameters: {
           type: "object",
           properties: {},
@@ -1464,7 +1464,7 @@ if (config.cua.enabled) {
       function: {
         name: "computer_act",
         description:
-          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. Targeting is by screen-absolute x,y only (read from the latest screenshot). Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
+          "Perform exactly one desktop input action. Always requires one-time user approval. Observe first. For click and type_text, prefer element_index + snapshot_id from the latest computer_observe; fall back to screen-absolute x,y only when no element matches (a canvas, or a window listed as having no elements). press_key and scroll always take screen-absolute x,y. Delivery is always background (no window is raised or focused). Type only non-secret data explicitly supplied for this task. The result reports the driver's effect (confirmed / partial / unverifiable / suspected_noop / refused); report a refusal such as background_unavailable rather than working around it.",
         parameters: {
           type: "object",
           properties: {
@@ -1472,6 +1472,8 @@ if (config.cua.enabled) {
               type: "string",
               enum: ["click", "type_text", "press_key", "scroll"],
             },
+            element_index: { type: "integer", minimum: 0 },
+            snapshot_id: { type: "string", maxLength: 64 },
             x: { type: "integer", minimum: 0, maximum: 100000 },
             y: { type: "integer", minimum: 0, maximum: 100000 },
             text: { type: "string", maxLength: 10000 },
@@ -1559,8 +1561,11 @@ export interface ToolArgs {
   markdown?: string;
   to_section_id?: string;
   to_parent_id?: string;
-  // Virtual Computer (CUA) — v1 targets by screen-absolute x,y only.
+  // Virtual Computer (CUA). click / type_text prefer element_index +
+  // snapshot_id (M3.1); press_key / scroll and the fallback take screen x,y.
   kind?: string;
+  element_index?: number;
+  snapshot_id?: string;
   x?: number;
   y?: number;
   key?: string;
@@ -1633,9 +1638,13 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return "observe computer desktop";
     case "computer_act": {
       const where =
-        typeof args.x === "number" && typeof args.y === "number"
-          ? `@ ${args.x},${args.y}`
-          : "target ?";
+        Number.isInteger(args.element_index) &&
+        typeof args.snapshot_id === "string" &&
+        args.snapshot_id.length > 0
+          ? `element ${args.element_index}`
+          : typeof args.x === "number" && typeof args.y === "number"
+            ? `@ ${args.x},${args.y}`
+            : "target ?";
       if (args.kind === "type_text")
         return `type into computer ${where}: [redacted]`;
       if (args.kind === "press_key")
