@@ -372,10 +372,13 @@ recommended default and the only mode with a hard zero-egress guarantee.
 ## Post-M3 live Agent Chat end-to-end testing (2026-08-31)
 
 Manually driven through the real Agent Chat UI (real browser, real container,
-real BytePlus DeepSeek-V4-Pro model) end to end across observe/act/capture,
-approve/deny, and teardown. Found and fixed four real bugs the harness's
-synchronous call/response pattern doesn't exercise — full detail in
-`VIRTUAL-COMPUTER.md`'s "Live Agent Chat end-to-end findings" section:
+real BytePlus DeepSeek-V4-Pro model) end to end across all six planned
+phases — observe (1), every `computer_act` kind incl. explicit approve/deny
+(2), read-only `computer_list_windows` (3), `computer_capture` (4), teardown
+(5), and egress (6). Found and fixed five real bugs the harness's synchronous
+call/response pattern doesn't exercise — full detail in `VIRTUAL-COMPUTER.md`'s
+"Live Agent Chat end-to-end findings" and "Phase 5/6 lifecycle + egress
+findings" sections:
 
 1. `capability-manifest.yaml` was missing a `files.write` grant for
    `screenshot_out_file` — bounded mode failed every observe/capture closed.
@@ -400,8 +403,21 @@ CUA_DRIVER_RS_SESSION_IDLE_TTL_SECS`; reproduced + confirmed with
    button/copy treatment `browser_act` already gets, and `entry.summary`
    rendered in the detail box so the approver sees the real target. Covered
    by 3 new `approval-card.test.tsx` cases + a live browser check.
+5. Phase 5 (teardown): an **unexpected** driver/container death (crash, OOM,
+   an operator's stray `docker rm`) only cleared `this.child` — it never
+   routed through `dispose()`, so the desktop-count reservation was never
+   released, permanently eating one `MAX_CUA_DESKTOPS` slot per incident for
+   the rest of the process's life. A graceful `stop()`/interrupt already
+   worked correctly; only the unexpected path leaked.
+   `browser-runtime.ts`'s equivalent already disposes before notifying —
+   `computer-runtime.ts` had drifted from that pattern. **Fixed**: route the
+   unexpected-exit handler through `dispose()` before notifying
+   `onUnexpectedClose`. Verified against a stub (new
+   `computer-runtime.test.ts` case, fails on the old code) and a **real**
+   container (`test/cua-real/probe-unexpected-close.mjs`, force-killed
+   externally, reservation confirmed back at baseline).
 
-A fifth, adjacent bug surfaced by the same testing (not CUA-specific — the
+A sixth, adjacent bug surfaced by the same testing (not CUA-specific — the
 approval gate is shared by every write tool): the 120s approval timeout and an
 explicit Deny click both resolved to the same `"deny"` wire behavior, and the
 model told the human "you denied this action" even when they never saw the
@@ -410,9 +426,14 @@ request. **Fixed** in `approvals.ts`/`agent-loop.ts`:
 model-facing text is honest about which happened. See
 `agent-service/src/approvals.test.ts`.
 
-All four CUA-specific findings were caught only by driving the real UI, not by
+Phase 6 (egress) needed no fix — confirmed live against a real running
+desktop (not just the harness's own spin-up): attached to the `--internal`
+`sparklab-cua-egress` network, public `curl` fails (couldn't resolve host)
+while local noVNC still works.
+
+All five CUA-specific findings were caught only by driving the real UI, not by
 `test:computer-e2e` — see `VIRTUAL-COMPUTER.md` for why in each case. QA
-passes: `test:computer-e2e` 19/19 stub, 17/17 real; `tools.test.ts` 167/167;
+passes: `test:computer-e2e` 19/19 stub, 17/17 real; `tools.test.ts` 168/168;
 `apps/terminal` vitest 334/334; both packages' typecheck clean.
 
 ---

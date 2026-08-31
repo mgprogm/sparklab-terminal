@@ -37,7 +37,7 @@ three M3.1 cases + six M3.2/M3.3 cases),
 unit (`computer-runtime.test.ts`,
 `computer-resource-limiter.test.ts`, `computer-performance-metrics.test.ts`,
 `computer-view/__tests__/store.test.ts`, `computer_*` in `agent-loop.test.ts` /
-`tools.test.ts`), terminal 327/327.
+`tools.test.ts`), terminal 334/334.
 
 The real run changed the design in three places from the initial spike; M3.1
 then restored element targeting against the real `get_window_state` contract
@@ -47,6 +47,13 @@ then restored element targeting against the real `get_window_state` contract
 the model (`test:computer-smoke`, DeepSeek V4 Pro / BytePlus) also passes:
 the agent calls `computer_observe` and accurately describes the real XFCE
 windows. Not wired into a release build.
+
+**A full manual Phase 1–6 pass through the real Agent Chat UI** (observe,
+every `computer_act` kind incl. explicit approve/deny, read-only
+`computer_list_windows`, `computer_capture`, teardown, egress — 2026-08-31)
+found and fixed six real bugs — see "Live Agent Chat end-to-end findings" and
+"Phase 5/6 lifecycle + egress findings" below — and confirmed egress isolation
+live against a real running desktop, not just the harness's own spin-up.
 
 ## Context
 
@@ -555,9 +562,11 @@ allowlisted tools are admitted (`get_screen_size`, `list_windows`, `list_apps`,
 ### Live Agent Chat end-to-end findings (2026-08-31)
 
 Testing the feature through the real Agent Chat UI (real browser, real
-container, real BytePlus DeepSeek-V4-Pro model — not the stub/harness) surfaced
-four real bugs the harness's synchronous call/response pattern never hit
-(plus a fifth in the shared approval gate, below):
+container, real BytePlus DeepSeek-V4-Pro model — not the stub/harness) across
+a full Phase 1–6 pass (observe, every `computer_act` kind, capture, approve/
+deny, teardown, egress) surfaced six real bugs the harness's synchronous
+call/response pattern never hit (one of them in the shared approval gate,
+below, not CUA-specific):
 
 1. **`files.write` gap in the bounded-mode manifest (fixed).** The very first
    `computer_observe` under bounded mode failed closed with `error: protected
@@ -655,6 +664,47 @@ firing the real 120s timeout → true, then false on a second read) plus a live
 explicit Deny click that still produces the unchanged "denied by user" in the
 run's `events.jsonl`.
 
+### Phase 5/6 lifecycle + egress findings (2026-08-31)
+
+Driving Phase 5 (teardown/lifecycle) live surfaced a sixth bug, this time a
+resource leak rather than a wrong-message bug: `/health` reported an active
+desktop with **zero** matching containers in `docker ps`. Root cause:
+`computer-runtime.ts`'s driver-process `child.once("exit", …)` handler only
+cleared `this.child` and notified `onUnexpectedClose` on an **unexpected**
+death (crash, OOM, an operator's stray `docker rm`) — it never routed through
+`dispose()`, so the desktop-count reservation (`releaseSession`) and any
+still-running container were never released. `browser-runtime.ts`'s
+equivalent (`BrowserSessionHost`'s close callback) already calls `dispose()`
+before notifying; `computer-runtime.ts` had drifted from the pattern it was
+supposed to mirror. Every subsequent unexpected crash permanently ate one of
+`MAX_CUA_DESKTOPS` (default 3) for the rest of the process's life. Fixed by
+routing the unexpected-exit path through `this.dispose()` (idempotent and
+safe here — the child has already exited so `waitForExit`'s exitCode check
+returns immediately, and `docker rm` on an already-gone container is
+swallowed by its own `.catch()`) before notifying `onUnexpectedClose` with
+`dispose()`'s revision. Verified two ways: a new `computer-runtime.test.ts`
+case that emits `"exit"` on the stub driver child directly (not via
+`stop()`/`dispose()`) and asserts the reservation returns to baseline (fails
+on the old code, confirmed by temporarily reverting the fix); and
+`test/cua-real/probe-unexpected-close.mjs`, which does the same thing against
+a **real** container (`docker rm -f` it externally) and confirms
+`onUnexpectedClose` fires once, `rt.isClosed` is `true`, and the reservation
+returns to 0 — PASS. (Chasing this live through the actual Agent Chat UI was
+repeatedly derailed by unrelated environment chaos — duplicate stray
+`tsx watch` supervisors from earlier troubleshooting racing on the same port,
+one orphaned instance whose stdout piped to nothing, and stale replayed chat
+history that looked like a live response but wasn't — none of which was
+evidence against the fix; the direct `ComputerRuntime`-against-a-real-
+container probe cut through all of it.)
+
+Phase 6 (egress) needed no fix — confirmed working as designed. With a
+desktop live through the real UI, `docker inspect` showed it attached to
+`sparklab-cua-egress` (`--internal: true`); from inside, `curl
+https://example.com` failed with curl exit code 6 ("couldn't resolve host",
+`http_code=000`) while `curl http://127.0.0.1:6901/vnc.html` (local noVNC)
+still returned `200` — proving the container is healthy and specifically
+walled off from the public internet, not just broken.
+
 ## Enabling CUA for one operator
 
 CUA is off unless `CUA_ENABLED=true` and inert otherwise. To turn it on for a
@@ -693,7 +743,16 @@ single operator with the safe v1 defaults:
    across restarts**. The host-name default is stable on a bare host; set
    `CUA_INSTANCE_ID` explicitly to a fixed per-instance string if the
    agent-service host name is ephemeral (containerised) or you run more than
-   one agent-service on a host.
+   one agent-service on a host. **This repo's own dev + local-prod setup hits
+   exactly that case today** — confirmed empirically 2026-08-31 (both
+   instances' containers carried the identical
+   `sparklab-cua-instance=<hostname>` label, since neither sets
+   `CUA_INSTANCE_ID` and both run on the same host) — so `sweepOrphans()` at
+   either instance's boot cannot distinguish the other's live desktops from
+   its own crash-leaked orphans. Not yet exploited into an actual incident,
+   but a boot-time sweep racing a live desktop on the other instance is a
+   real risk here specifically, not just a hypothetical; give dev and prod
+   distinct `CUA_INSTANCE_ID` values before relying on the sweep in this repo.
 
 ### Variant: opt-in proxied browsing (M3.5, weaker guarantee)
 
