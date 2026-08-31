@@ -21,6 +21,12 @@ interface Pending {
 export class ApprovalManager {
   private pending = new Map<string, Pending>();
   private allowAlways = new Set<string>();
+  // requestIds resolved by the 120s timeout rather than an explicit
+  // approval_response. The wire `behavior` stays "deny" either way (the
+  // frontend never distinguishes them and never needs to), but the model
+  // must not tell the human "you denied this" when they never actually
+  // responded — see agent-loop.ts's use of wasTimedOut().
+  private timedOut = new Set<string>();
 
   private key(tool: string, sessionId?: string): string {
     return `${tool}::${sessionId ?? "*"}`;
@@ -45,6 +51,7 @@ export class ApprovalManager {
     return new Promise<AgentApprovalBehavior>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
+        this.timedOut.add(requestId);
         resolve("deny");
       }, CAPS.approvalTimeoutMs);
       this.pending.set(requestId, { resolve, timer });
@@ -67,6 +74,16 @@ export class ApprovalManager {
     clearTimeout(p.timer);
     this.pending.delete(requestId);
     p.resolve(behavior);
+  }
+
+  /**
+   * True exactly once for a requestId whose "deny" came from the 120s
+   * timeout rather than an explicit approval_response — consumes the flag
+   * so a later, unrelated requestId reuse (randomUUID, so practically never)
+   * can't read a stale true. Call after awaiting request()'s promise.
+   */
+  wasTimedOut(requestId: string): boolean {
+    return this.timedOut.delete(requestId);
   }
 
   /** Deny everything outstanding (on interrupt or disconnect). */

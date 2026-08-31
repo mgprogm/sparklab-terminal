@@ -192,17 +192,70 @@ Frame dropping under load is intentional; a permanently frozen frame is not.
 
 ## Decision Table
 
-| Observation                                                  | Most likely layer                              | Next check                                                         |
-| ------------------------------------------------------------ | ---------------------------------------------- | ------------------------------------------------------------------ |
-| No virtual cursor                                            | Stale bundle or canvas event/overlay issue     | Bundle markers and DOM stacking                                    |
-| Cursor moves, says `connecting...`                           | Handoff socket/auth                            | Banner, WebSocket route, cookie, Origin                            |
-| Cursor moves, no ACK, socket remains open                    | Client send or broker processing               | WS text frames, schema, queue/rate limit                           |
-| `✓`, but blank-space click changes nothing                   | Expected page behavior                         | Click a controlled input/button                                    |
-| `✓`, known target will not focus                             | Wrong target or coordinate mapping             | Canvas bitmap/CSS dimensions and active target                     |
-| Known input accepts typing but canvas stays unchanged        | Server-to-client frame path                    | Binary frames, decode, canvas paint                                |
-| Canvas changes in a fresh E2E session but not the user's tab | Client-specific stale state/browser behavior   | Hard reload, new handoff, browser console/network                  |
-| Reload returns only recovery controls                        | Expected loss of memory-only media credentials | Use Done to return control, or Cancel and start a fresh handoff    |
-| Reopen request reports active but no recovery view appears   | Chat/client ownership or control-frame failure | Verify the same chat and inspect the authenticated `/agent` socket |
+| Observation                                                                                                                                                | Most likely layer                                                                                | Next check                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No virtual cursor                                                                                                                                          | Stale bundle or canvas event/overlay issue                                                       | Bundle markers and DOM stacking                                                                                                                                  |
+| Cursor moves, says `connecting...`                                                                                                                         | Handoff socket/auth                                                                              | Banner, WebSocket route, cookie, Origin                                                                                                                          |
+| Cursor moves, no ACK, socket remains open                                                                                                                  | Client send or broker processing                                                                 | WS text frames, schema, queue/rate limit                                                                                                                         |
+| `✓`, but blank-space click changes nothing                                                                                                                 | Expected page behavior                                                                           | Click a controlled input/button                                                                                                                                  |
+| `✓`, known target will not focus                                                                                                                           | Wrong target or coordinate mapping                                                               | Canvas bitmap/CSS dimensions and active target                                                                                                                   |
+| Known input accepts typing but canvas stays unchanged                                                                                                      | Server-to-client frame path                                                                      | Binary frames, decode, canvas paint                                                                                                                              |
+| Canvas changes in a fresh E2E session but not the user's tab                                                                                               | Client-specific stale state/browser behavior                                                     | Hard reload, new handoff, browser console/network                                                                                                                |
+| Reload returns only recovery controls                                                                                                                      | Expected loss of memory-only media credentials                                                   | Use Done to return control, or Cancel and start a fresh handoff                                                                                                  |
+| Reopen request reports active but no recovery view appears                                                                                                 | Chat/client ownership or control-frame failure                                                   | Verify the same chat and inspect the authenticated `/agent` socket                                                                                               |
+| Take control click has no visible effect at all                                                                                                            | Handoff control frame never reached the client                                                   | Inspect `/agent` socket for `agent_event`-wrapped handoff frames (incident 2026-08-30a below)                                                                    |
+| Banner says **Connected**, canvas stays solid white forever, `/health`'s `handoffFrames.sent` shows exactly one frame and never grows, no ACK ever appears | Client disposed the live handoff connection right after authentication (stale React effect deps) | Watch the `/browser-handoff` socket in devtools: does the socket close/get torn down immediately after the `authenticated` frame? See incident 2026-08-30b below |
+
+## Known Past Incidents
+
+### 2026-08-30a — Take control did nothing (agent_event envelope)
+
+`browser_handoff_ready`/`browser_handoff_state` are broadcast over `/agent`
+wrapped in a seq-tracked `{type:"agent_event", seq, frame}` run-recovery
+envelope (added for restart replay). `AgentConnection.onmessage` only checked
+the raw top-level message against the handoff schema before unwrapping
+`agent_event`; the inner frame fell through to the generic frame handler
+instead of the handoff handler and was silently dropped — the client never
+received the handoff token, so the UI never left the read-only screenshot,
+with no error anywhere. Confirmed live via WS capture: the server sent both
+frames correctly, the client just never surfaced them. Fixed by re-checking
+the unwrapped `agent_event.frame` against the same schema
+(`apps/terminal/src/features/agent-chat/connection.ts`, commit `ec91d8f` on
+`fix/browser-handoff-agent-event-routing`). See the protocol note above.
+
+### 2026-08-30b — Take control connects but shows a permanent white screen
+
+Once (a) was fixed and handoff frames started reaching the client, "Take
+control" stopped being a no-op but instead showed a solid white canvas
+forever, with the banner falsely still reading **Connected**. Root cause: the
+overlay's connect effect
+(`apps/terminal/src/features/browser-view/components/browser-view-overlay.tsx`)
+depended on the store's one-time `token`. The instant the `/browser-handoff`
+socket authenticates, `BrowserHandoffConnection`'s `onAuthenticated` callback
+calls `consumeToken()`, nulling `token` in the store — which re-ran the
+effect, whose cleanup called `dispose()` on the socket that had just
+authenticated. The re-run then saw `token === null` and returned early
+without creating a replacement connection, leaving React state pointing at a
+dead, disposed connection. No error surfaces because `dispose()` nulls the
+socket's event handlers before closing, and the store's `connectionState`
+(set once, on auth) is never reset back — so the banner keeps claiming
+"Connected" indefinitely. Fixed by dropping the token from the effect's deps
+array (`[handoffId, handoffResume]`); the token is still read once via
+`getState().token` inside the effect body, which is safe because
+`BrowserHandoffConnection.connect()` blanks its own one-time credential
+immediately after sending it. Verified live end-to-end against production
+with the dev-browser skill: captured the `/browser-handoff` WebSocket via
+`page.on("websocket", ...)`, confirmed exactly one binary JPEG frame arrives
+and paints correctly, and cross-checked `/health`'s
+`handoffFrames.sent.count` incrementing per attempt. A regression test lives
+in `browser-view-overlay.test.tsx` (mocks
+`@/features/browser-handoff/connection` and asserts `dispose()` is not
+called when `consumeToken()` fires).
+
+If you still see this exact signature (Connected banner, white canvas, one
+static frame, no ACK) **after** both fixes are deployed, first rule out a
+stale open tab/PWA that predates the deploy (see "Confirm the current
+frontend bundle" above) before assuming a third bug.
 
 ## Reproducible Tests
 

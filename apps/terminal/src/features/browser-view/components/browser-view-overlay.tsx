@@ -110,7 +110,14 @@ export function BrowserViewOverlay() {
       setMediaStream(null);
       next.dispose();
     };
-  }, [handoffId, handoffToken, handoffResume]);
+    // `token` is deliberately excluded: onAuthenticated (consumeToken) nulls it
+    // the moment the socket authenticates, as a one-time-credential safeguard.
+    // Depending on it here would re-run this effect right after a successful
+    // connect and dispose() the very socket that just authenticated, leaving
+    // `connection` pointing at a dead BrowserHandoffConnection forever (the
+    // "take control" screen goes solid white with no frames and no visible
+    // error). The token is read once via getState() above instead.
+  }, [handoffId, handoffResume]);
 
   useEffect(() => {
     if (handoffState !== "human_active") return;

@@ -100,6 +100,102 @@ test("browser handoff is an explicit one-time approved tool", () => {
   );
 });
 
+test("virtual-computer tools are hidden from TOOLS unless CUA_ENABLED, but their approval tiers are always keyed", () => {
+  // This suite runs without CUA_ENABLED, so the model never sees the tools.
+  for (const t of [
+    "computer_observe",
+    "computer_act",
+    "computer_list_windows",
+    "computer_capture",
+  ])
+    assert.equal(
+      toolNames().includes(t),
+      false,
+      `${t} hidden without CUA_ENABLED`,
+    );
+  // Membership is by name and unconditional: if the tool ever is offered, it
+  // is a one-time-approved write (no allow-always), like browser_act.
+  assert.equal(WRITE_TOOLS.has("computer_act"), true);
+  assert.equal(ONE_TIME_TOOLS.has("computer_act"), true);
+  assert.equal(WRITE_TOOLS.has("computer_observe"), false);
+  // M3.3: computer_list_windows is a read — never a write tool.
+  assert.equal(WRITE_TOOLS.has("computer_list_windows"), false);
+  assert.equal(ONE_TIME_TOOLS.has("computer_list_windows"), false);
+  // M3.4: computer_capture is a one-time-approved file write, like browser_capture.
+  assert.equal(WRITE_TOOLS.has("computer_capture"), true);
+  assert.equal(ONE_TIME_TOOLS.has("computer_capture"), true);
+  // describeCall stays defined regardless of gating.
+  assert.equal(
+    describeCall("computer_observe", {}),
+    "observe computer desktop",
+  );
+  assert.equal(
+    describeCall("computer_list_windows", {}),
+    "list computer windows",
+  );
+  assert.equal(
+    describeCall("computer_capture", {
+      session_id: "web-x",
+      path: "/tmp/desktop.png",
+    }),
+    "capture computer screen to /tmp/desktop.png",
+  );
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "type_text",
+      x: 40,
+      y: 80,
+      text: "hunter2",
+    }),
+    "type into computer @ 40,80: [redacted]",
+  );
+  // M3.1: element-target form of describeCall.
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "click",
+      element_index: 5,
+      snapshot_id: "snap-3",
+    }),
+    "click computer element 5",
+  );
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "type_text",
+      element_index: 2,
+      snapshot_id: "snap-3",
+      text: "hunter2",
+    }),
+    "type into computer element 2: [redacted]",
+  );
+  // M3.2: new kinds render on the approval card.
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "double_click",
+      element_index: 5,
+      snapshot_id: "snap-3",
+    }),
+    "double_click computer element 5",
+  );
+  assert.equal(
+    describeCall("computer_act", { kind: "right_click", x: 12, y: 34 }),
+    "right_click computer @ 12,34",
+  );
+  assert.equal(
+    describeCall("computer_act", {
+      kind: "drag",
+      x: 10,
+      y: 20,
+      to_x: 30,
+      to_y: 40,
+    }),
+    "drag computer @ 10,20 → 30,40",
+  );
+  assert.equal(
+    describeCall("computer_act", { kind: "hotkey", keys: ["ctrl", "l"] }),
+    "hotkey computer ctrl+l",
+  );
+});
+
 test("browser capture is an explicit one-time approved file write", () => {
   const capture = TOOLS.find((t) => t.function.name === "browser_capture");
   assert.ok(capture);
@@ -764,5 +860,221 @@ test("AC7: pm_move_task retries once on 409 stale", async () => {
   } finally {
     gateway.getPmProject = originalGetPm;
     gateway.movePmTask = originalMovePm;
+  }
+});
+
+// ---- Notes tools (docs/NOTES-TOOL-PLAN.md) ----------------------------------
+
+const NOTES_READ_TOOLS = [
+  "notes_list",
+  "notes_get_notebook",
+  "notes_get_page",
+  "notes_search",
+];
+const NOTES_ALLOW_ALWAYS_WRITE_TOOLS = [
+  "notes_create_notebook",
+  "notes_create_section",
+  "notes_create_page",
+  "notes_append_to_page",
+  "notes_move_page",
+];
+const NOTES_ONE_TIME_WRITE_TOOLS = [
+  "notes_update_page",
+  "notes_delete_page",
+  "notes_delete_section",
+  "notes_delete_notebook",
+];
+const NOTES_TOOLS = [
+  ...NOTES_READ_TOOLS,
+  ...NOTES_ALLOW_ALWAYS_WRITE_TOOLS,
+  ...NOTES_ONE_TIME_WRITE_TOOLS,
+];
+
+test("all thirteen Notes tools are exposed", () => {
+  const names = toolNames();
+  for (const t of NOTES_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("every Notes tool has a closed parameters schema", () => {
+  for (const name of NOTES_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("Notes reads are auto (NOT write tools)", () => {
+  for (const t of NOTES_READ_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), false, `${t} should NOT be a WRITE tool`);
+  }
+});
+
+test("the five additive/structural Notes writes are WRITE tools, allow-always (D9)", () => {
+  for (const t of NOTES_ALLOW_ALWAYS_WRITE_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      false,
+      `${t} should permit allow-always`,
+    );
+  }
+});
+
+test("notes_update_page is approval-gated AND coerced one-time (D9 — inverted from the naive reading)", () => {
+  assert.equal(WRITE_TOOLS.has("notes_update_page"), true);
+  assert.equal(ONE_TIME_TOOLS.has("notes_update_page"), true);
+});
+
+test("notes_append_to_page is NOT in the one-time set (cannot clobber, D9)", () => {
+  assert.equal(ONE_TIME_TOOLS.has("notes_append_to_page"), false);
+});
+
+test("the three Notes deletes are approval-gated AND coerced one-time (D10)", () => {
+  for (const t of [
+    "notes_delete_page",
+    "notes_delete_section",
+    "notes_delete_notebook",
+  ]) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+    assert.equal(ONE_TIME_TOOLS.has(t), true, `${t} should be one-time`);
+  }
+});
+
+test("describeCall returns a non-empty summary for each Notes tool", () => {
+  const args = {
+    notebook_id: "nb-1",
+    section_id: "sec-1",
+    page_id: "pg-1",
+    query: "kickoff",
+    name: "Engineering",
+    title: "Kickoff",
+    markdown: "- follow up",
+    to_section_id: "sec-2",
+    to_index: 0,
+  };
+  for (const t of NOTES_TOOLS) {
+    const s = describeCall(t, args);
+    assert.equal(typeof s, "string");
+    assert.ok(s.length > 0, `${t} produced an empty describeCall`);
+  }
+});
+
+test("notes_get_notebook requires notebook_id (no gateway call when missing)", async () => {
+  assert.equal(
+    await executeTool("notes_get_notebook", {}),
+    "error: notebook_id is required",
+  );
+});
+
+test("notes_create_page requires either section_id or parent_id", async () => {
+  assert.equal(
+    await executeTool("notes_create_page", { notebook_id: "nb-1" }),
+    "error: either section_id or parent_id is required",
+  );
+});
+
+test("notes_move_page retries ONCE on a 409 stale (safe: re-derived splice, D4)", async () => {
+  const originalGetNotebook = gateway.getNotebook.bind(gateway);
+  const originalMovePage = gateway.movePage.bind(gateway);
+  let moveCallCount = 0;
+
+  gateway.getNotebook = async () =>
+    ({ id: "nb-test", rev: 5, sections: [], pages: [] }) as never;
+
+  gateway.movePage = async () => {
+    moveCallCount++;
+    if (moveCallCount === 1) {
+      return {
+        stale: true,
+        notebook: { id: "nb-test", rev: 6, sections: [], pages: [] } as never,
+      };
+    }
+    return {
+      stale: false,
+      notebook: { id: "nb-test", rev: 7, sections: [], pages: [] } as never,
+    };
+  };
+
+  try {
+    const result = await executeTool("notes_move_page", {
+      notebook_id: "nb-test",
+      page_id: "pg-1",
+      to_section_id: "sec-1",
+      to_index: 0,
+    });
+    assert.equal(
+      moveCallCount,
+      2,
+      `409 stale must trigger exactly 2 gateway calls, got ${moveCallCount}`,
+    );
+    assert.ok(
+      !result.startsWith("error:"),
+      `retried move should succeed, got: ${result}`,
+    );
+  } finally {
+    gateway.getNotebook = originalGetNotebook;
+    gateway.movePage = originalMovePage;
+  }
+});
+
+test("notes_update_page does NOT retry a 409 stale (D4 — blind overwrite, surfaced not replayed)", async () => {
+  const originalGetPage = gateway.getPage.bind(gateway);
+  const originalUpdatePage = gateway.updatePage.bind(gateway);
+  let updateCallCount = 0;
+
+  gateway.getPage = async () =>
+    ({
+      id: "pg-1",
+      title: "Kickoff",
+      rev: 3,
+      body: "old body",
+    }) as never;
+
+  gateway.updatePage = async () => {
+    updateCallCount++;
+    return {
+      stale: true,
+      page: {
+        id: "pg-1",
+        title: "Kickoff",
+        rev: 4,
+        body: "someone else's newer body",
+      } as never,
+    };
+  };
+
+  try {
+    const result = await executeTool("notes_update_page", {
+      notebook_id: "nb-1",
+      page_id: "pg-1",
+      body: "my overwrite",
+    });
+    assert.equal(
+      updateCallCount,
+      1,
+      `a stale update must trigger exactly 1 gateway call (no retry), got ${updateCallCount}`,
+    );
+    assert.ok(
+      result.startsWith("error:") && result.includes("stale"),
+      `stale update should surface the conflict as an error string, got: ${result}`,
+    );
+    assert.ok(
+      result.includes("someone else's newer body"),
+      "the conflict should carry the CURRENT server page so the model sees what it would have clobbered",
+    );
+  } finally {
+    gateway.getPage = originalGetPage;
+    gateway.updatePage = originalUpdatePage;
   }
 });

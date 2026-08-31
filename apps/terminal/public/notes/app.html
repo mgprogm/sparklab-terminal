@@ -1,0 +1,2284 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Notes</title>
+<!--
+  Pluggable Notes artifact (NOTES-TOOL-PLAN.md D6) — a OneNote-style
+  Notebook -> Section -> Page hierarchical note tool.
+
+  A SINGLE self-contained document — inline <style> + inline <script>, ZERO
+  external requests (no CDN, no fetched web fonts, no imports). Loaded into a
+  same-origin sandboxed <iframe> by components/notes-dialog.tsx; it talks to
+  the gateway over relative /api/notes/* fetches, which carry the app-origin
+  gw_session cookie through the Next proxy.
+
+  Palette/type are hardcoded to mirror DESIGN.md (a documented exception to
+  the "use Tailwind tokens" rule — this isolated document has no access to
+  the app's theme tokens): warm near-charcoal canvas #2b2622, off-white ink
+  #f7f5f0, Inter-ish system stack, tight radii — same palette as
+  public/kanban/app.html and public/pm/app.html.
+
+  Safety: all user-supplied text (titles, tags, snippets, page bodies) is
+  injected via textContent / DOM nodes, never innerHTML, so nothing can
+  inject markup. The Markdown preview (D11) is a hand-rolled subset renderer
+  that builds real DOM nodes directly (no HTML-string intermediate at all),
+  so a malicious/odd body can never become live markup either. Search
+  snippets are rendered as plain textContent — NEVER through the Markdown
+  formatter, since a snippet cut mid-fence/mid-list would render as garbage
+  (and, unlike the formatter path, would otherwise risk half-parsed markup).
+
+  D12 conflict handling: page-body PATCH is rev-guarded and a 409 is
+  SURFACED, never auto-retried — see resolveReload/resolveOverwrite below.
+  Structural moves (section reorder, page move) MAY retry once on 409 (D4),
+  mirroring public/kanban/app.html's moveCard.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono:
+      ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+      monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+  }
+
+  select,
+  input,
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+  }
+
+  /* ---- Top bar (search) ---- */
+  .topbar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--hairline);
+    flex: 0 0 auto;
+  }
+
+  .app-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--mute);
+    white-space: nowrap;
+  }
+
+  .search-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    max-width: 420px;
+  }
+
+  .search-input {
+    width: 100%;
+  }
+
+  .search-results-panel {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    z-index: 20;
+  }
+
+  .search-results-panel.show {
+    display: block;
+  }
+
+  .search-hit {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--hairline);
+    color: var(--ink);
+    padding: 8px 10px;
+  }
+
+  .search-hit:last-child {
+    border-bottom: none;
+  }
+
+  .search-hit:hover {
+    background: var(--canvas-softer);
+  }
+
+  .search-hit-title {
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .search-hit-meta {
+    font-size: 11px;
+    color: var(--mute);
+    margin-top: 1px;
+  }
+
+  .search-hit-snippet {
+    font-size: 12px;
+    color: var(--body);
+    margin-top: 3px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* ---- Banner (API errors) ---- */
+  .banner {
+    display: none;
+    padding: 8px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    color: var(--danger);
+    font-size: 13px;
+    flex: 0 0 auto;
+  }
+
+  .banner.show {
+    display: block;
+  }
+
+  /* ---- Shared controls ---- */
+  .btn {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    transition:
+      background 0.12s ease,
+      border-color 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--canvas-softer);
+  }
+
+  .btn-primary {
+    background: var(--ink);
+    color: var(--canvas);
+    border-color: var(--ink);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--mute);
+    padding: 4px 8px;
+  }
+
+  .btn-ghost:hover {
+    color: var(--ink);
+    background: var(--canvas-soft);
+  }
+
+  .btn-danger:hover {
+    color: var(--danger);
+  }
+
+  .btn-sm {
+    padding: 4px 9px;
+    font-size: 12px;
+  }
+
+  .btn-xs {
+    padding: 2px 6px;
+    font-size: 11px;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .field {
+    width: 100%;
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+  }
+
+  .select {
+    background: var(--canvas-soft);
+    color: var(--ink);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+  }
+
+  .tag {
+    display: inline-block;
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    color: var(--body);
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .hint,
+  .placeholder-sm {
+    font-size: 12px;
+    color: var(--mute);
+    padding: 6px 4px;
+  }
+
+  /* ---- Workspace (3 panes) ---- */
+  .workspace {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ---- Left rail: notebooks + sections ---- */
+  .rail {
+    flex: 0 0 260px;
+    width: 260px;
+    border-right: 1px solid var(--hairline);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 12px;
+    overflow-y: auto;
+  }
+
+  .rail-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .rail-top .select {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .rail-notebook-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin: 8px 0 4px;
+    flex-wrap: wrap;
+  }
+
+  .notebook-tags {
+    display: inline-flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .rail-sections-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+    padding-bottom: 4px;
+  }
+
+  .rail-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--mute);
+  }
+
+  .sections-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .section-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: var(--radius-sm);
+    padding: 2px;
+  }
+
+  .section-row.active {
+    background: var(--canvas-softer);
+  }
+
+  .section-name-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    padding: 5px 6px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .section-name-btn:hover {
+    background: var(--canvas-soft);
+  }
+
+  .section-count {
+    color: var(--mute);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  .section-actions {
+    display: flex;
+    gap: 1px;
+    flex-shrink: 0;
+  }
+
+  /* ---- Middle column: page tree ---- */
+  .middle {
+    flex: 0 0 280px;
+    width: 280px;
+    border-right: 1px solid var(--hairline);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .middle-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .middle-title {
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pages-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .page-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: var(--radius-sm);
+    padding: 2px;
+    padding-left: 10px;
+  }
+
+  .page-row.active {
+    background: var(--canvas-softer);
+  }
+
+  .page-title-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    padding: 5px 6px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .page-title-btn:hover {
+    background: var(--canvas-soft);
+  }
+
+  .page-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .move-select {
+    background: var(--canvas-soft);
+    color: var(--body);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 2px 4px;
+    max-width: 92px;
+    font-size: 11px;
+  }
+
+  /* ---- Right pane: editor ---- */
+  .editor {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .editor-placeholder {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--mute);
+    text-align: center;
+    padding: 32px;
+  }
+
+  .editor-main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: none;
+    flex-direction: column;
+  }
+
+  .editor-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--hairline);
+    flex: 0 0 auto;
+  }
+
+  .page-title-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--ink);
+    font-size: 15px;
+    font-weight: 500;
+    padding: 6px 4px;
+  }
+
+  .editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .save-status {
+    font-size: 11px;
+    color: var(--mute);
+    min-width: 92px;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  /* ---- Conflict banner (D12) ---- */
+  .conflict-banner {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 16px;
+    background: rgba(224, 122, 106, 0.12);
+    border-bottom: 1px solid var(--hairline);
+    flex: 0 0 auto;
+  }
+
+  .conflict-banner.show {
+    display: flex;
+  }
+
+  .conflict-msg {
+    color: var(--danger);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .conflict-compare {
+    display: flex;
+    gap: 12px;
+  }
+
+  .conflict-col {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .conflict-col-label {
+    font-size: 11px;
+    color: var(--mute);
+  }
+
+  .conflict-pre {
+    margin: 0;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 140px;
+    overflow-y: auto;
+  }
+
+  .conflict-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .editor-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+
+  .body-textarea {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 16px 20px;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+
+  .body-preview {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 22px;
+  }
+
+  /* Markdown subset rendering (D11) */
+  .body-preview h1,
+  .body-preview h2,
+  .body-preview h3,
+  .body-preview h4,
+  .body-preview h5,
+  .body-preview h6 {
+    margin: 18px 0 8px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--ink);
+  }
+
+  .body-preview h1 {
+    font-size: 22px;
+  }
+  .body-preview h2 {
+    font-size: 19px;
+  }
+  .body-preview h3 {
+    font-size: 16px;
+  }
+  .body-preview h4,
+  .body-preview h5,
+  .body-preview h6 {
+    font-size: 14px;
+  }
+
+  .body-preview p {
+    margin: 0 0 12px;
+    color: var(--body);
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+
+  .body-preview strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .body-preview em {
+    font-style: italic;
+  }
+
+  .body-preview .md-inline-code {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 1px 5px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .body-preview pre {
+    background: var(--canvas-soft);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 0 0 12px;
+  }
+
+  .body-preview pre code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--body);
+    white-space: pre;
+  }
+
+  .body-preview blockquote {
+    margin: 0 0 12px;
+    padding: 4px 14px;
+    border-left: 3px solid var(--hairline);
+    color: var(--mute);
+  }
+
+  .body-preview ul,
+  .body-preview ol {
+    margin: 0 0 12px;
+    padding-left: 22px;
+    color: var(--body);
+  }
+
+  .body-preview li {
+    margin-bottom: 4px;
+    line-height: 1.55;
+  }
+
+  .body-preview hr {
+    border: none;
+    border-top: 1px solid var(--hairline);
+    margin: 16px 0;
+  }
+
+  .body-preview a {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+
+  /* ---- Modal (new notebook) ---- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 30;
+  }
+
+  .overlay.show {
+    display: flex;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 440px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--mute);
+    margin-bottom: 4px;
+  }
+
+  .row-end {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 9999px;
+  }
+</style>
+
+<div class="topbar">
+  <span class="app-label">Notes</span>
+  <div class="search-wrap">
+    <input
+      id="search-input"
+      class="field search-input"
+      type="text"
+      autocomplete="off"
+      placeholder="Search notes…"
+      aria-label="Search notes"
+    />
+    <div id="search-results" class="search-results-panel"></div>
+  </div>
+</div>
+
+<div id="banner" class="banner" role="alert"></div>
+
+<div class="workspace">
+  <div class="rail">
+    <div class="rail-top">
+      <select
+        id="notebook-select"
+        class="select"
+        aria-label="Select notebook"
+      ></select>
+      <button id="new-notebook-btn" class="btn btn-primary btn-sm" type="button">
+        New
+      </button>
+    </div>
+    <div class="rail-notebook-meta">
+      <span id="notebook-tags" class="notebook-tags"></span>
+      <button
+        id="delete-notebook-btn"
+        class="btn btn-ghost btn-danger btn-sm"
+        type="button"
+        title="Delete this notebook"
+      >
+        Delete
+      </button>
+    </div>
+    <div class="rail-sections-head">
+      <span class="rail-label">Sections</span>
+      <button id="new-section-btn" class="btn btn-ghost btn-sm" type="button">
+        + New
+      </button>
+    </div>
+    <div id="sections-list" class="sections-list"></div>
+  </div>
+
+  <div class="middle">
+    <div class="middle-head">
+      <span id="middle-section-name" class="middle-title"></span>
+      <button id="new-page-btn" class="btn btn-primary btn-sm" type="button">
+        New page
+      </button>
+    </div>
+    <div id="pages-list" class="pages-list"></div>
+  </div>
+
+  <div class="editor">
+    <div id="editor-placeholder" class="editor-placeholder">
+      Select or create a page to start writing.
+    </div>
+    <div id="editor-main" class="editor-main">
+      <div class="editor-head">
+        <input
+          id="page-title-input"
+          class="page-title-input"
+          type="text"
+          autocomplete="off"
+          placeholder="Untitled page"
+        />
+        <div class="editor-actions">
+          <span id="save-status" class="save-status"></span>
+          <button id="preview-toggle-btn" class="btn btn-ghost btn-sm" type="button">
+            Preview
+          </button>
+        </div>
+      </div>
+      <div id="conflict-banner" class="conflict-banner" role="alert"></div>
+      <div class="editor-body">
+        <textarea
+          id="page-body-textarea"
+          class="body-textarea"
+          placeholder="Write in Markdown…"
+          spellcheck="false"
+        ></textarea>
+        <div id="page-preview" class="body-preview"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- New notebook modal -->
+<div id="new-notebook-overlay" class="overlay">
+  <form id="new-notebook-form" class="modal">
+    <h3>New notebook</h3>
+    <div>
+      <label for="nb-name">Name</label>
+      <input
+        id="nb-name"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="Engineering"
+        required
+      />
+    </div>
+    <div>
+      <label for="nb-tags">Tags</label>
+      <input
+        id="nb-tags"
+        class="field"
+        type="text"
+        autocomplete="off"
+        placeholder="work, personal"
+      />
+      <div class="hint">Comma-separated. Optional.</div>
+    </div>
+    <div class="row-end">
+      <button type="button" class="btn" data-close="new-notebook-overlay">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary">Create notebook</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  "use strict";
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  var state = {
+    notebooks: [], // summaries: {id,name,tags,rev,updatedAt,sectionCount,pageCount}
+    notebookId: null,
+    notebook: null, // full tree {id,name,tags,rev,sections[],pages[] (flat, derived sectionId+depth)}
+    sectionId: null, // selected section id
+    pageId: null, // selected page id
+    page: null, // full page content {..., body, rev}
+    previewMode: false,
+    dirty: false, // unsaved local edits in the editor
+    saving: false,
+    saveTimer: null,
+    // Set only on a page-body 409. { serverPage, localTitle, localBody }.
+    // Autosave is suspended while this is set (D4/D12) until the user
+    // explicitly Reloads or Overwrites.
+    conflict: null,
+    searchResults: null,
+    searchTimer: null,
+  };
+
+  var el = {
+    searchInput: document.getElementById("search-input"),
+    searchResults: document.getElementById("search-results"),
+    banner: document.getElementById("banner"),
+    notebookSelect: document.getElementById("notebook-select"),
+    newNotebookBtn: document.getElementById("new-notebook-btn"),
+    deleteNotebookBtn: document.getElementById("delete-notebook-btn"),
+    notebookTags: document.getElementById("notebook-tags"),
+    newSectionBtn: document.getElementById("new-section-btn"),
+    sectionsList: document.getElementById("sections-list"),
+    middleSectionName: document.getElementById("middle-section-name"),
+    newPageBtn: document.getElementById("new-page-btn"),
+    pagesList: document.getElementById("pages-list"),
+    editorPlaceholder: document.getElementById("editor-placeholder"),
+    editorMain: document.getElementById("editor-main"),
+    pageTitleInput: document.getElementById("page-title-input"),
+    saveStatus: document.getElementById("save-status"),
+    previewToggleBtn: document.getElementById("preview-toggle-btn"),
+    conflictBanner: document.getElementById("conflict-banner"),
+    pageBodyTextarea: document.getElementById("page-body-textarea"),
+    pagePreview: document.getElementById("page-preview"),
+    newNotebookOverlay: document.getElementById("new-notebook-overlay"),
+    newNotebookForm: document.getElementById("new-notebook-form"),
+    nbName: document.getElementById("nb-name"),
+    nbTags: document.getElementById("nb-tags"),
+  };
+
+  // ---------------------------------------------------------------------------
+  // API layer
+  // ---------------------------------------------------------------------------
+  function ApiError(status, message) {
+    this.status = status;
+    this.message = message || "Request failed";
+  }
+  ApiError.prototype = Object.create(Error.prototype);
+
+  // Performs a same-origin JSON fetch against /api/notes/*. On non-2xx,
+  // throws ApiError with the parsed body attached (`.body`) so 409-stale /
+  // 422-not_empty handling can read the current server state.
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) {
+      opts.headers["content-type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    var res;
+    try {
+      res = await fetch("/api/notes" + path, opts);
+    } catch (e) {
+      throw new ApiError(0, "Network error — is the gateway reachable?");
+    }
+    if (res.status === 204) return null;
+    var data = null;
+    var text = await res.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = null;
+      }
+    }
+    if (!res.ok) {
+      var err = new ApiError(
+        res.status,
+        (data && data.error) || res.statusText || "Request failed",
+      );
+      err.body = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function parseTags(raw) {
+    return raw
+      .split(",")
+      .map(function (t) {
+        return t.trim();
+      })
+      .filter(function (t) {
+        return t.length > 0;
+      });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Error / banner handling
+  // ---------------------------------------------------------------------------
+  function showBanner(message) {
+    el.banner.textContent = message;
+    el.banner.classList.add("show");
+  }
+
+  function clearBanner() {
+    el.banner.textContent = "";
+    el.banner.classList.remove("show");
+  }
+
+  function handleError(e) {
+    if (e && e.status === 401) {
+      showBanner("Session expired — reload the page to sign in again.");
+      return;
+    }
+    showBanner((e && e.message) || "Something went wrong.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DOM helpers (textContent-only; never innerHTML with user data)
+  // ---------------------------------------------------------------------------
+  function elem(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function tagChips(container, tags) {
+    (tags || []).forEach(function (t) {
+      container.appendChild(elem("span", "tag", t));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hand-rolled Markdown subset renderer (D11) — headings, bold/italic,
+  // inline code, fenced code, unordered/ordered lists, links, blockquote,
+  // `---`. Builds DOM nodes directly (createElement/textContent), never an
+  // HTML string, so there is no innerHTML step to sanitize.
+  // ---------------------------------------------------------------------------
+  function parseInline(text, parent) {
+    var i = 0;
+    var buffer = "";
+    function flush() {
+      if (buffer) {
+        parent.appendChild(document.createTextNode(buffer));
+        buffer = "";
+      }
+    }
+    while (i < text.length) {
+      var ch = text[i];
+
+      if (ch === "`") {
+        var end = text.indexOf("`", i + 1);
+        if (end === -1) {
+          buffer += ch;
+          i++;
+          continue;
+        }
+        flush();
+        var code = elem("code", "md-inline-code", text.slice(i + 1, end));
+        parent.appendChild(code);
+        i = end + 1;
+        continue;
+      }
+
+      if ((ch === "*" || ch === "_") && text[i + 1] === ch) {
+        var marker = ch + ch;
+        var end2 = text.indexOf(marker, i + 2);
+        if (end2 === -1) {
+          buffer += ch;
+          i++;
+          continue;
+        }
+        flush();
+        var strong = document.createElement("strong");
+        parseInline(text.slice(i + 2, end2), strong);
+        parent.appendChild(strong);
+        i = end2 + 2;
+        continue;
+      }
+
+      if (ch === "*" || ch === "_") {
+        var end3 = text.indexOf(ch, i + 1);
+        if (end3 === -1) {
+          buffer += ch;
+          i++;
+          continue;
+        }
+        flush();
+        var em = document.createElement("em");
+        parseInline(text.slice(i + 1, end3), em);
+        parent.appendChild(em);
+        i = end3 + 1;
+        continue;
+      }
+
+      if (ch === "[") {
+        var closeBracket = text.indexOf("]", i + 1);
+        if (closeBracket !== -1 && text[closeBracket + 1] === "(") {
+          var closeParen = text.indexOf(")", closeBracket + 2);
+          if (closeParen !== -1) {
+            var linkText = text.slice(i + 1, closeBracket);
+            var href = text.slice(closeBracket + 2, closeParen);
+            flush();
+            var a = document.createElement("a");
+            // Reject javascript:/data: schemes; only render an href for
+            // otherwise-plain URLs (relative, http(s), mailto, etc).
+            if (!/^\s*(javascript|data):/i.test(href)) {
+              a.href = href;
+              a.target = "_blank";
+              a.rel = "noopener noreferrer";
+            }
+            a.textContent = linkText;
+            parent.appendChild(a);
+            i = closeParen + 1;
+            continue;
+          }
+        }
+        buffer += ch;
+        i++;
+        continue;
+      }
+
+      buffer += ch;
+      i++;
+    }
+    flush();
+  }
+
+  function renderMarkdownInto(container, md) {
+    container.textContent = "";
+    var lines = (md || "").split("\n");
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+
+      // Fenced code block.
+      if (/^```/.test(line)) {
+        i++;
+        var codeLines = [];
+        while (i < lines.length && !/^```/.test(lines[i])) {
+          codeLines.push(lines[i]);
+          i++;
+        }
+        i++; // skip closing fence (or EOF)
+        var pre = document.createElement("pre");
+        var codeEl = document.createElement("code");
+        codeEl.textContent = codeLines.join("\n");
+        pre.appendChild(codeEl);
+        container.appendChild(pre);
+        continue;
+      }
+
+      // Heading.
+      var headingMatch = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (headingMatch) {
+        var level = headingMatch[1].length;
+        var h = document.createElement("h" + Math.min(level, 6));
+        parseInline(headingMatch[2], h);
+        container.appendChild(h);
+        i++;
+        continue;
+      }
+
+      // Horizontal rule.
+      if (/^\s*(---|\*\*\*)\s*$/.test(line)) {
+        container.appendChild(document.createElement("hr"));
+        i++;
+        continue;
+      }
+
+      // Blockquote.
+      if (/^>\s?/.test(line)) {
+        var quoteLines = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          quoteLines.push(lines[i].replace(/^>\s?/, ""));
+          i++;
+        }
+        var bq = document.createElement("blockquote");
+        parseInline(quoteLines.join(" "), bq);
+        container.appendChild(bq);
+        continue;
+      }
+
+      // Lists (unordered / ordered) — flat, no nested-list support.
+      var ulMatch = /^\s*[-*]\s+(.*)$/.exec(line);
+      var olMatch = /^\s*\d+\.\s+(.*)$/.exec(line);
+      if (ulMatch || olMatch) {
+        var ordered = !!olMatch;
+        var list = document.createElement(ordered ? "ol" : "ul");
+        while (i < lines.length) {
+          var um = /^\s*[-*]\s+(.*)$/.exec(lines[i]);
+          var om = /^\s*\d+\.\s+(.*)$/.exec(lines[i]);
+          var m = ordered ? om : um;
+          if (!m) break;
+          var li = document.createElement("li");
+          parseInline(m[1], li);
+          list.appendChild(li);
+          i++;
+        }
+        container.appendChild(list);
+        continue;
+      }
+
+      // Blank line.
+      if (line.trim() === "") {
+        i++;
+        continue;
+      }
+
+      // Paragraph: accumulate lines until a blank line or another block starts.
+      var paraLines = [line];
+      i++;
+      while (
+        i < lines.length &&
+        lines[i].trim() !== "" &&
+        !/^```/.test(lines[i]) &&
+        !/^#{1,6}\s+/.test(lines[i]) &&
+        !/^>\s?/.test(lines[i]) &&
+        !/^\s*[-*]\s+/.test(lines[i]) &&
+        !/^\s*\d+\.\s+/.test(lines[i]) &&
+        !/^\s*(---|\*\*\*)\s*$/.test(lines[i])
+      ) {
+        paraLines.push(lines[i]);
+        i++;
+      }
+      var p = document.createElement("p");
+      parseInline(paraLines.join(" "), p);
+      container.appendChild(p);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------------
+  async function loadNotebooks(preferId) {
+    clearBanner();
+    var data;
+    try {
+      data = await api("GET", "/notebooks");
+    } catch (e) {
+      handleError(e);
+      renderAll();
+      return;
+    }
+    state.notebooks = (data && data.notebooks) || [];
+    if (state.notebooks.length === 0) {
+      state.notebookId = null;
+      state.notebook = null;
+      state.sectionId = null;
+      state.pageId = null;
+      state.page = null;
+      renderNotebookSelect();
+      renderAll();
+      return;
+    }
+    var ids = state.notebooks.map(function (n) {
+      return n.id;
+    });
+    var next =
+      (preferId && ids.indexOf(preferId) >= 0 && preferId) ||
+      (state.notebookId && ids.indexOf(state.notebookId) >= 0 && state.notebookId) ||
+      state.notebooks[0].id;
+    await loadNotebook(next);
+  }
+
+  // preferSectionId/preferPageId let callers (search, create) land on a
+  // specific section/page after the tree refetch.
+  async function loadNotebook(nbId, preferSectionId, preferPageId) {
+    clearBanner();
+    try {
+      state.notebook = await api(
+        "GET",
+        "/notebooks/" + encodeURIComponent(nbId),
+      );
+      state.notebookId = nbId;
+    } catch (e) {
+      state.notebook = null;
+      state.notebookId = null;
+      handleError(e);
+      renderNotebookSelect();
+      renderAll();
+      return;
+    }
+    renderNotebookSelect();
+
+    var secIds = state.notebook.sections.map(function (s) {
+      return s.id;
+    });
+    var nextSec =
+      (preferSectionId && secIds.indexOf(preferSectionId) >= 0 && preferSectionId) ||
+      (state.sectionId && secIds.indexOf(state.sectionId) >= 0 && state.sectionId) ||
+      (state.notebook.sections[0] && state.notebook.sections[0].id) ||
+      null;
+    state.sectionId = nextSec;
+
+    var pages = pagesInSection(nextSec);
+    var pageIds = pages.map(function (p) {
+      return p.id;
+    });
+    var nextPage =
+      (preferPageId && pageIds.indexOf(preferPageId) >= 0 && preferPageId) ||
+      (state.pageId && pageIds.indexOf(state.pageId) >= 0 && state.pageId) ||
+      (pages[0] && pages[0].id) ||
+      null;
+
+    await selectPage(nextPage, /* skipRender */ true);
+    renderAll();
+  }
+
+  function pagesInSection(secId) {
+    if (!state.notebook || !secId) return [];
+    return state.notebook.pages.filter(function (p) {
+      return p.sectionId === secId;
+    });
+  }
+
+  function pageHasChildren(pageId) {
+    if (!state.notebook) return false;
+    return state.notebook.pages.some(function (p) {
+      return p.parentId === pageId;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Selection
+  // ---------------------------------------------------------------------------
+  async function selectSection(secId) {
+    if (secId === state.sectionId) return;
+    // Flush any pending edit before leaving the current page/section.
+    await flushPendingSave();
+    state.sectionId = secId;
+    var pages = pagesInSection(secId);
+    await selectPage(pages[0] ? pages[0].id : null);
+    renderAll();
+  }
+
+  async function selectPage(pageId, skipRender) {
+    if (pageId === state.pageId && state.page) {
+      if (!skipRender) renderAll();
+      return;
+    }
+    await flushPendingSave();
+    clearConflictState();
+    state.pageId = pageId;
+    state.page = null;
+    state.dirty = false;
+    if (pageId) {
+      try {
+        state.page = await api(
+          "GET",
+          "/notebooks/" +
+            encodeURIComponent(state.notebookId) +
+            "/pages/" +
+            encodeURIComponent(pageId),
+        );
+      } catch (e) {
+        handleError(e);
+      }
+    }
+    if (!skipRender) renderAll();
+  }
+
+  // Best-effort: if there are unsaved edits and no unresolved conflict,
+  // save them before navigating away (page/section switch). Never blocks
+  // navigation on failure — errors surface via the banner as usual.
+  async function flushPendingSave() {
+    if (state.saveTimer) {
+      clearTimeout(state.saveTimer);
+      state.saveTimer = null;
+    }
+    if (state.dirty && !state.conflict && state.page) {
+      await performSave();
+    }
+  }
+
+  function clearConflictState() {
+    state.conflict = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Editor autosave (D12) — debounced ~800ms, rev-guarded PATCH. A 409
+  // `stale` STOPS autosaving and surfaces a non-destructive conflict banner
+  // (resolveReload / resolveOverwrite); it is NEVER auto-retried (D4).
+  // ---------------------------------------------------------------------------
+  function scheduleSave() {
+    state.dirty = true;
+    renderSaveStatus();
+    if (state.conflict) return; // suspended until the user resolves it
+    if (state.saveTimer) clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(function () {
+      state.saveTimer = null;
+      performSave();
+    }, 800);
+  }
+
+  async function performSave() {
+    if (!state.page || state.conflict) return;
+    var title = el.pageTitleInput.value.trim() || "Untitled page";
+    var body = el.pageBodyTextarea.value;
+    state.saving = true;
+    renderSaveStatus();
+    try {
+      var updated = await api(
+        "PATCH",
+        "/pages/" + encodeURIComponent(state.page.id),
+        {
+          notebookId: state.notebookId,
+          title: title,
+          body: body,
+          rev: state.page.rev,
+        },
+      );
+      state.page = updated;
+      state.dirty = false;
+      syncPageMetaInTree(updated);
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.page) {
+        state.conflict = {
+          serverPage: e.body.page,
+          localTitle: title,
+          localBody: body,
+        };
+      } else {
+        handleError(e);
+      }
+    } finally {
+      state.saving = false;
+      renderSaveStatus();
+      renderConflictBanner();
+    }
+  }
+
+  // Keep the middle-column tree in sync with a saved title/rev without a
+  // full notebook refetch.
+  function syncPageMetaInTree(pageContent) {
+    if (!state.notebook) return;
+    var meta = state.notebook.pages.find(function (p) {
+      return p.id === pageContent.id;
+    });
+    if (meta) {
+      meta.title = pageContent.title;
+      meta.rev = pageContent.rev;
+      meta.updatedAt = pageContent.updatedAt;
+    }
+    renderPagesList();
+  }
+
+  function resolveReload() {
+    if (!state.conflict) return;
+    state.page = state.conflict.serverPage;
+    state.dirty = false;
+    state.conflict = null;
+    syncPageMetaInTree(state.page);
+    renderEditor();
+  }
+
+  async function resolveOverwrite() {
+    if (!state.conflict) return;
+    var title = state.conflict.localTitle;
+    var body = state.conflict.localBody;
+    var rev = state.conflict.serverPage.rev;
+    try {
+      var updated = await api(
+        "PATCH",
+        "/pages/" + encodeURIComponent(state.page.id),
+        { notebookId: state.notebookId, title: title, body: body, rev: rev },
+      );
+      state.page = updated;
+      state.dirty = false;
+      state.conflict = null;
+      syncPageMetaInTree(updated);
+      renderEditor();
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.page) {
+        // Changed again in between — refresh the banner with the newest
+        // server copy rather than silently retrying.
+        state.conflict = {
+          serverPage: e.body.page,
+          localTitle: title,
+          localBody: body,
+        };
+        renderConflictBanner();
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notebook mutations
+  // ---------------------------------------------------------------------------
+  async function createNotebookFlow(name, tags) {
+    try {
+      var nb = await api("POST", "/notebooks", { name: name, tags: tags });
+      await loadNotebooks(nb.id);
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  async function deleteNotebookFlow() {
+    if (!state.notebook) return;
+    if (
+      !window.confirm(
+        'Delete notebook "' +
+          state.notebook.name +
+          '" and everything in it? This cannot be undone.',
+      )
+    )
+      return;
+    try {
+      await api("DELETE", "/notebooks/" + encodeURIComponent(state.notebook.id));
+      state.notebookId = null;
+      state.notebook = null;
+      state.sectionId = null;
+      state.pageId = null;
+      state.page = null;
+      await loadNotebooks();
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Section mutations
+  // ---------------------------------------------------------------------------
+  async function createSectionFlow() {
+    if (!state.notebook) return;
+    var name = window.prompt("Section name:");
+    if (name == null) return;
+    name = name.trim();
+    if (!name) return;
+    try {
+      var nb = await api(
+        "POST",
+        "/notebooks/" + encodeURIComponent(state.notebookId) + "/sections",
+        { name: name },
+      );
+      state.notebook = nb;
+      var newSec = nb.sections[nb.sections.length - 1];
+      await selectSection(newSec ? newSec.id : state.sectionId);
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  function renameSectionFlow(sec) {
+    var name = window.prompt("Rename section:", sec.name);
+    if (name == null) return;
+    name = name.trim();
+    if (!name || name === sec.name) return;
+    api("PATCH", "/sections/" + encodeURIComponent(sec.id), {
+      notebookId: state.notebookId,
+      name: name,
+    })
+      .then(function (nb) {
+        state.notebook = nb;
+        renderSectionsList();
+        renderPagesList();
+      })
+      .catch(handleError);
+  }
+
+  async function moveSectionDir(sec, dir) {
+    if (!state.notebook) return;
+    var ids = state.notebook.sections.map(function (s) {
+      return s.id;
+    });
+    var idx = ids.indexOf(sec.id);
+    var toIndex = idx + dir;
+    if (idx < 0 || toIndex < 0 || toIndex >= ids.length) return;
+    await attemptMoveSection(sec.id, toIndex, state.notebook.rev);
+  }
+
+  // Structural move — MAY retry once on 409 (D4): the splice is re-derived
+  // from fresh server state, so replaying it just re-applies the same intent.
+  async function attemptMoveSection(secId, toIndex, rev) {
+    async function attempt(useRev) {
+      return api("POST", "/sections/" + encodeURIComponent(secId) + "/move", {
+        notebookId: state.notebookId,
+        toIndex: toIndex,
+        rev: useRev,
+      });
+    }
+    try {
+      state.notebook = await attempt(rev);
+      renderSectionsList();
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.notebook) {
+        state.notebook = e.body.notebook;
+        try {
+          state.notebook = await attempt(state.notebook.rev);
+        } catch (e2) {
+          handleError(e2);
+        }
+        renderSectionsList();
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  async function deleteSectionFlow(sec) {
+    if (!window.confirm('Delete section "' + sec.name + '"?')) return;
+    try {
+      await api(
+        "DELETE",
+        "/sections/" +
+          encodeURIComponent(sec.id) +
+          "?notebookId=" +
+          encodeURIComponent(state.notebookId),
+      );
+      await afterSectionDeleted(sec.id);
+    } catch (e) {
+      if (e && e.status === 422) {
+        if (
+          window.confirm(
+            'Section "' +
+              sec.name +
+              '" is not empty. Delete it and ALL its pages? This cannot be undone.',
+          )
+        ) {
+          try {
+            await api(
+              "DELETE",
+              "/sections/" +
+                encodeURIComponent(sec.id) +
+                "?notebookId=" +
+                encodeURIComponent(state.notebookId) +
+                "&mode=cascade",
+            );
+            await afterSectionDeleted(sec.id);
+          } catch (e2) {
+            handleError(e2);
+          }
+        }
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  async function afterSectionDeleted(deletedId) {
+    if (state.sectionId === deletedId) {
+      state.sectionId = null;
+      state.pageId = null;
+      state.page = null;
+    }
+    await loadNotebook(state.notebookId, state.sectionId, state.pageId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page mutations
+  // ---------------------------------------------------------------------------
+  async function createPageFlow() {
+    if (!state.notebook || !state.sectionId) return;
+    var title = window.prompt("New page title:", "Untitled page");
+    if (title == null) return;
+    title = title.trim();
+    try {
+      var page = await api(
+        "POST",
+        "/notebooks/" + encodeURIComponent(state.notebookId) + "/pages",
+        { sectionId: state.sectionId, title: title || undefined },
+      );
+      await loadNotebook(state.notebookId, state.sectionId, page.id);
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  async function createSubpageFlow(parentPage) {
+    var title = window.prompt("New subpage title:", "Untitled page");
+    if (title == null) return;
+    title = title.trim();
+    try {
+      var page = await api(
+        "POST",
+        "/notebooks/" + encodeURIComponent(state.notebookId) + "/pages",
+        {
+          sectionId: parentPage.sectionId,
+          parentId: parentPage.id,
+          title: title || undefined,
+        },
+      );
+      await loadNotebook(state.notebookId, parentPage.sectionId, page.id);
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  async function deletePageFlow(page) {
+    var hasChildren = pageHasChildren(page.id);
+    var msg = 'Delete page "' + page.title + '"?';
+    if (hasChildren) msg += " It has subpages.";
+    if (!window.confirm(msg)) return;
+    var mode = "orphan";
+    if (hasChildren) {
+      mode = window.confirm(
+        "Also delete its subpages? OK = delete subpages too (cascade). " +
+          "Cancel = keep subpages — they move up a level.",
+      )
+        ? "cascade"
+        : "orphan";
+    }
+    try {
+      await api(
+        "DELETE",
+        "/pages/" +
+          encodeURIComponent(page.id) +
+          "?notebookId=" +
+          encodeURIComponent(state.notebookId) +
+          "&mode=" +
+          mode,
+      );
+      var nextPageId = state.pageId === page.id ? null : state.pageId;
+      await loadNotebook(state.notebookId, state.sectionId, nextPageId);
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  // Move a page (+ its whole subtree, D5) into another section, as a
+  // top-level page there (toParentId: null — reparenting under a specific
+  // page in the target section is not exposed in v1, see notes-dialog
+  // review notes). MAY retry once on 409 (D4).
+  async function movePageTo(page, toSectionId) {
+    if (!state.notebook) return;
+    async function attempt(rev) {
+      var target = state.notebook.sections.find(function (s) {
+        return s.id === toSectionId;
+      });
+      var toIndex = target ? target.pageIds.length : 0;
+      return api("POST", "/pages/" + encodeURIComponent(page.id) + "/move", {
+        notebookId: state.notebookId,
+        toSectionId: toSectionId,
+        toIndex: toIndex,
+        toParentId: null,
+        rev: rev,
+      });
+    }
+    try {
+      state.notebook = await attempt(state.notebook.rev);
+      state.sectionId = toSectionId;
+      renderAll();
+    } catch (e) {
+      if (e && e.status === 409 && e.body && e.body.notebook) {
+        state.notebook = e.body.notebook;
+        try {
+          state.notebook = await attempt(state.notebook.rev);
+          state.sectionId = toSectionId;
+        } catch (e2) {
+          handleError(e2);
+        }
+        renderAll();
+      } else {
+        handleError(e);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------------
+  async function runSearch(q) {
+    try {
+      var data = await api(
+        "GET",
+        "/search?q=" + encodeURIComponent(q) + "&limit=20",
+      );
+      state.searchResults = (data && data.results) || [];
+    } catch (e) {
+      state.searchResults = [];
+      handleError(e);
+    }
+    renderSearchResults();
+  }
+
+  async function openSearchHit(hit) {
+    el.searchInput.value = "";
+    state.searchResults = null;
+    renderSearchResults();
+    await loadNotebook(hit.notebookId, hit.sectionId, hit.pageId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+  function renderAll() {
+    renderNotebookMeta();
+    renderSectionsList();
+    renderPagesList();
+    renderEditor();
+  }
+
+  function renderNotebookSelect() {
+    var sel = el.notebookSelect;
+    sel.textContent = "";
+    if (state.notebooks.length === 0) {
+      var opt = elem("option", null, "No notebooks");
+      opt.value = "";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      el.deleteNotebookBtn.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    el.deleteNotebookBtn.disabled = false;
+    state.notebooks.forEach(function (nb) {
+      var opt = elem("option", null, nb.name);
+      opt.value = nb.id;
+      if (nb.id === state.notebookId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderNotebookMeta() {
+    el.notebookTags.textContent = "";
+    if (state.notebook && state.notebook.tags) {
+      tagChips(el.notebookTags, state.notebook.tags);
+    }
+  }
+
+  function renderSectionsList() {
+    var list = el.sectionsList;
+    list.textContent = "";
+    if (!state.notebook) {
+      list.appendChild(elem("div", "hint", "No notebook selected."));
+      return;
+    }
+    var sections = state.notebook.sections;
+    if (sections.length === 0) {
+      list.appendChild(elem("div", "hint", "No sections yet — create one."));
+      return;
+    }
+    sections.forEach(function (sec, idx) {
+      var row = elem(
+        "div",
+        "section-row" + (sec.id === state.sectionId ? " active" : ""),
+      );
+
+      var nameBtn = elem("button", "section-name-btn", sec.name);
+      nameBtn.type = "button";
+      nameBtn.addEventListener("click", function () {
+        selectSection(sec.id);
+      });
+      row.appendChild(nameBtn);
+      row.appendChild(
+        elem("span", "section-count", String(sec.pageIds.length)),
+      );
+
+      var actions = elem("span", "section-actions");
+
+      var upBtn = elem("button", "btn btn-ghost btn-xs", "↑");
+      upBtn.type = "button";
+      upBtn.title = "Move section up";
+      upBtn.disabled = idx === 0;
+      upBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        moveSectionDir(sec, -1);
+      });
+
+      var downBtn = elem("button", "btn btn-ghost btn-xs", "↓");
+      downBtn.type = "button";
+      downBtn.title = "Move section down";
+      downBtn.disabled = idx === sections.length - 1;
+      downBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        moveSectionDir(sec, 1);
+      });
+
+      var renameBtn = elem("button", "btn btn-ghost btn-xs", "✎");
+      renameBtn.type = "button";
+      renameBtn.title = "Rename section";
+      renameBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        renameSectionFlow(sec);
+      });
+
+      var delBtn = elem("button", "btn btn-ghost btn-xs btn-danger", "✕");
+      delBtn.type = "button";
+      delBtn.title = "Delete section";
+      delBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        deleteSectionFlow(sec);
+      });
+
+      actions.appendChild(upBtn);
+      actions.appendChild(downBtn);
+      actions.appendChild(renameBtn);
+      actions.appendChild(delBtn);
+      row.appendChild(actions);
+
+      list.appendChild(row);
+    });
+  }
+
+  function renderPagesList() {
+    var list = el.pagesList;
+    list.textContent = "";
+    el.middleSectionName.textContent = "";
+    el.newPageBtn.disabled = !state.sectionId;
+
+    if (!state.notebook) {
+      list.appendChild(elem("div", "placeholder-sm", "Select a notebook."));
+      return;
+    }
+    if (!state.sectionId) {
+      list.appendChild(
+        elem("div", "placeholder-sm", "Select or create a section."),
+      );
+      return;
+    }
+    var sec = state.notebook.sections.find(function (s) {
+      return s.id === state.sectionId;
+    });
+    el.middleSectionName.textContent = sec ? sec.name : "";
+
+    var pages = pagesInSection(state.sectionId);
+    if (pages.length === 0) {
+      list.appendChild(elem("div", "placeholder-sm", "No pages yet — create one."));
+      return;
+    }
+
+    var otherSections = state.notebook.sections.filter(function (s) {
+      return s.id !== state.sectionId;
+    });
+
+    pages.forEach(function (page) {
+      var row = elem(
+        "div",
+        "page-row" + (page.id === state.pageId ? " active" : ""),
+      );
+      row.style.paddingLeft = 10 + (page.depth || 0) * 16 + "px";
+
+      var titleBtn = elem("button", "page-title-btn", page.title);
+      titleBtn.type = "button";
+      titleBtn.addEventListener("click", function () {
+        selectPage(page.id);
+      });
+      row.appendChild(titleBtn);
+
+      var actions = elem("span", "page-actions");
+
+      var addSubBtn = elem("button", "btn btn-ghost btn-xs", "+ Sub");
+      addSubBtn.type = "button";
+      addSubBtn.title = "New subpage";
+      addSubBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        createSubpageFlow(page);
+      });
+      actions.appendChild(addSubBtn);
+
+      if (otherSections.length) {
+        var moveSel = elem("select", "move-select");
+        moveSel.setAttribute("aria-label", "Move page to section");
+        var placeholder = elem("option", null, "Move ▾");
+        placeholder.value = "";
+        placeholder.selected = true;
+        moveSel.appendChild(placeholder);
+        otherSections.forEach(function (s) {
+          var opt = elem("option", null, s.name);
+          opt.value = s.id;
+          moveSel.appendChild(opt);
+        });
+        moveSel.addEventListener("click", function (e) {
+          e.stopPropagation();
+        });
+        moveSel.addEventListener("change", function () {
+          var toSectionId = moveSel.value;
+          moveSel.selectedIndex = 0;
+          if (toSectionId) movePageTo(page, toSectionId);
+        });
+        actions.appendChild(moveSel);
+      }
+
+      var delBtn = elem("button", "btn btn-ghost btn-xs btn-danger", "✕");
+      delBtn.type = "button";
+      delBtn.title = "Delete page";
+      delBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        deletePageFlow(page);
+      });
+      actions.appendChild(delBtn);
+
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+  }
+
+  function renderEditor() {
+    var hasPage = !!state.page;
+    el.pageTitleInput.disabled = !hasPage;
+    el.pageBodyTextarea.disabled = !hasPage;
+    el.previewToggleBtn.disabled = !hasPage;
+
+    if (!hasPage) {
+      el.pageTitleInput.value = "";
+      el.pageBodyTextarea.value = "";
+      el.pagePreview.textContent = "";
+      el.editorPlaceholder.style.display = "flex";
+      el.editorMain.style.display = "none";
+      renderConflictBanner();
+      renderSaveStatus();
+      return;
+    }
+    el.editorPlaceholder.style.display = "none";
+    el.editorMain.style.display = "flex";
+    el.pageTitleInput.value = state.page.title;
+    el.pageBodyTextarea.value = state.page.body;
+    applyPreviewMode();
+    renderConflictBanner();
+    renderSaveStatus();
+  }
+
+  function applyPreviewMode() {
+    if (state.previewMode) {
+      el.pageBodyTextarea.style.display = "none";
+      el.pagePreview.style.display = "block";
+      renderMarkdownInto(el.pagePreview, el.pageBodyTextarea.value);
+      el.previewToggleBtn.textContent = "Edit";
+    } else {
+      el.pageBodyTextarea.style.display = "block";
+      el.pagePreview.style.display = "none";
+      el.previewToggleBtn.textContent = "Preview";
+    }
+  }
+
+  function renderSaveStatus() {
+    var s = el.saveStatus;
+    if (!state.page || state.conflict) {
+      s.textContent = "";
+      return;
+    }
+    if (state.saving) {
+      s.textContent = "Saving…";
+      return;
+    }
+    if (state.dirty) {
+      s.textContent = "Unsaved changes";
+      return;
+    }
+    s.textContent = "Saved";
+  }
+
+  function renderConflictBanner() {
+    var box = el.conflictBanner;
+    box.textContent = "";
+    if (!state.conflict) {
+      box.classList.remove("show");
+      return;
+    }
+    box.classList.add("show");
+
+    box.appendChild(
+      elem(
+        "div",
+        "conflict-msg",
+        "This page changed elsewhere. Choose how to resolve it — autosave is paused.",
+      ),
+    );
+
+    var compare = elem("div", "conflict-compare");
+
+    var serverCol = elem("div", "conflict-col");
+    serverCol.appendChild(elem("div", "conflict-col-label", "Server version"));
+    var serverPre = elem(
+      "pre",
+      "conflict-pre",
+      (state.conflict.serverPage.body || "").slice(0, 800),
+    );
+    serverCol.appendChild(serverPre);
+
+    var localCol = elem("div", "conflict-col");
+    localCol.appendChild(elem("div", "conflict-col-label", "Your version"));
+    var localPre = elem(
+      "pre",
+      "conflict-pre",
+      (state.conflict.localBody || "").slice(0, 800),
+    );
+    localCol.appendChild(localPre);
+
+    compare.appendChild(serverCol);
+    compare.appendChild(localCol);
+    box.appendChild(compare);
+
+    var actions = elem("div", "conflict-actions");
+    var reloadBtn = elem("button", "btn btn-primary btn-sm", "Reload");
+    reloadBtn.type = "button";
+    reloadBtn.title = "Discard your local edits and load the server version";
+    reloadBtn.addEventListener("click", resolveReload);
+
+    var overwriteBtn = elem(
+      "button",
+      "btn btn-ghost btn-danger btn-sm",
+      "Overwrite — discards the other change",
+    );
+    overwriteBtn.type = "button";
+    overwriteBtn.addEventListener("click", function () {
+      resolveOverwrite();
+    });
+
+    actions.appendChild(reloadBtn);
+    actions.appendChild(overwriteBtn);
+    box.appendChild(actions);
+  }
+
+  function renderSearchResults() {
+    var box = el.searchResults;
+    box.textContent = "";
+    if (!state.searchResults || state.searchResults.length === 0) {
+      box.classList.remove("show");
+      return;
+    }
+    box.classList.add("show");
+    state.searchResults.forEach(function (hit) {
+      var row = elem("button", "search-hit");
+      row.type = "button";
+      row.appendChild(elem("div", "search-hit-title", hit.title));
+      row.appendChild(elem("div", "search-hit-meta", hit.notebookName));
+      // textContent ONLY — never through renderMarkdownInto (a snippet cut
+      // mid-fence/mid-list would render as garbage).
+      row.appendChild(elem("div", "search-hit-snippet", hit.snippet));
+      row.addEventListener("click", function () {
+        openSearchHit(hit);
+      });
+      box.appendChild(row);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Modal helpers
+  // ---------------------------------------------------------------------------
+  function openOverlay(overlay) {
+    overlay.classList.add("show");
+  }
+  function closeOverlay(overlay) {
+    overlay.classList.remove("show");
+  }
+
+  document.querySelectorAll("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      closeOverlay(document.getElementById(btn.getAttribute("data-close")));
+    });
+  });
+  el.newNotebookOverlay.addEventListener("mousedown", function (e) {
+    if (e.target === el.newNotebookOverlay) closeOverlay(el.newNotebookOverlay);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeOverlay(el.newNotebookOverlay);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  el.notebookSelect.addEventListener("change", function () {
+    var id = el.notebookSelect.value;
+    if (id) loadNotebook(id);
+  });
+
+  el.newNotebookBtn.addEventListener("click", function () {
+    el.nbName.value = "";
+    el.nbTags.value = "";
+    openOverlay(el.newNotebookOverlay);
+    el.nbName.focus();
+  });
+
+  el.deleteNotebookBtn.addEventListener("click", function () {
+    deleteNotebookFlow();
+  });
+
+  el.newNotebookForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var name = el.nbName.value.trim();
+    if (!name) return;
+    var tags = parseTags(el.nbTags.value);
+    closeOverlay(el.newNotebookOverlay);
+    createNotebookFlow(name, tags);
+  });
+
+  el.newSectionBtn.addEventListener("click", function () {
+    createSectionFlow();
+  });
+
+  el.newPageBtn.addEventListener("click", function () {
+    createPageFlow();
+  });
+
+  el.previewToggleBtn.addEventListener("click", function () {
+    state.previewMode = !state.previewMode;
+    applyPreviewMode();
+  });
+
+  el.pageTitleInput.addEventListener("input", function () {
+    if (!state.page) return;
+    scheduleSave();
+  });
+  el.pageTitleInput.addEventListener("blur", function () {
+    if (!state.dirty || state.conflict) return;
+    if (state.saveTimer) {
+      clearTimeout(state.saveTimer);
+      state.saveTimer = null;
+    }
+    performSave();
+  });
+
+  el.pageBodyTextarea.addEventListener("input", function () {
+    if (!state.page) return;
+    scheduleSave();
+    // Live-update the preview only if it happens to be visible via a
+    // subsequent toggle; while editing, the textarea (not the preview) is
+    // shown, so no re-render is needed here.
+  });
+
+  el.searchInput.addEventListener("input", function () {
+    if (state.searchTimer) clearTimeout(state.searchTimer);
+    var q = el.searchInput.value.trim();
+    if (!q) {
+      state.searchResults = null;
+      renderSearchResults();
+      return;
+    }
+    state.searchTimer = setTimeout(function () {
+      runSearch(q);
+    }, 300);
+  });
+  el.searchInput.addEventListener("focus", function () {
+    if (state.searchResults && state.searchResults.length) {
+      el.searchResults.classList.add("show");
+    }
+  });
+  el.searchInput.addEventListener("blur", function () {
+    // Delay so a click on a result row registers before the panel hides.
+    setTimeout(function () {
+      el.searchResults.classList.remove("show");
+    }, 150);
+  });
+
+  // Warn before an accidental tab/iframe close with unsaved edits.
+  window.addEventListener("beforeunload", function (e) {
+    if (state.dirty && !state.conflict) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  loadNotebooks();
+</script>

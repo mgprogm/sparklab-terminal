@@ -30,12 +30,13 @@ import {
 import { cn } from "@sparklab/ui/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  AppWindow,
   ArrowLeftRight,
   Bot,
   FolderTree,
   Globe2,
   Menu,
+  Monitor,
+  NotebookText,
   SquareGanttChart,
   SquareKanban,
 } from "lucide-react";
@@ -47,6 +48,7 @@ import { FileExplorerDialog } from "./file-explorer-dialog";
 import { KanbanDialog } from "./kanban-dialog";
 import { LayoutMenu } from "./layout-menu";
 import { MunderDifflinDialog } from "./munder-difflin-dialog";
+import { NotesDialog } from "./notes-dialog";
 import { PmDialog } from "./pm-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
@@ -90,6 +92,10 @@ import {
   BrowserViewOverlay,
   useBrowserViewStore,
 } from "@/features/browser-view";
+import {
+  ComputerViewOverlay,
+  useComputerViewStore,
+} from "@/features/computer-view";
 
 export function TerminalShell() {
   const queryClient = useQueryClient();
@@ -123,6 +129,8 @@ export function TerminalShell() {
     setAgenticOpen,
     munderDifflinOpen,
     setMunderDifflinOpen,
+    notesOpen,
+    setNotesOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -131,6 +139,9 @@ export function TerminalShell() {
   const browserView = useBrowserViewStore((s) => s.view);
   const browserVisible = useBrowserViewStore((s) => s.visible);
   const showBrowser = useBrowserViewStore((s) => s.show);
+  const computerView = useComputerViewStore((s) => s.view);
+  const computerVisible = useComputerViewStore((s) => s.visible);
+  const showComputer = useComputerViewStore((s) => s.show);
 
   const {
     data: sessions = [],
@@ -202,6 +213,7 @@ export function TerminalShell() {
   useUrlFlagSync("pm", pmOpen, setPmOpen);
   useUrlFlagSync("agentic", agenticOpen, setAgenticOpen);
   useUrlFlagSync("munder-difflin", munderDifflinOpen, setMunderDifflinOpen);
+  useUrlFlagSync("notes", notesOpen, setNotesOpen);
 
   // ---- "Active session vanished → fall back" (grid-aware, D7) ----
   // Decision lives in resolvePaneSessions (pure, unit-tested) — the
@@ -626,21 +638,23 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Agentic AI Creator</TooltipContent>
           </Tooltip>
-          {/* Munder Difflin is gateway-global too — always enabled. */}
+          {/* Notes is gateway-global too (D7) — always enabled. */}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-7 shrink-0"
-                aria-label="Munder Difflin"
-                onClick={() => setMunderDifflinOpen(true)}
+                aria-label="Notes"
+                onClick={() => setNotesOpen(true)}
               >
-                <AppWindow className="size-3.5" />
+                <NotebookText className="size-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Munder Difflin</TooltipContent>
+            <TooltipContent>Notes</TooltipContent>
           </Tooltip>
+          {/* Munder Difflin header button is disabled/hidden — the viewer is
+              still reachable via the ?munder-difflin URL flag. */}
           {browserView && !browserVisible && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -655,6 +669,26 @@ export function TerminalShell() {
                 </Button>
               </TooltipTrigger>
               <TooltipContent>Reopen browser view</TooltipContent>
+            </Tooltip>
+          )}
+          {/* Same reopen affordance for the agent's virtual computer (CUA)
+              desktop: shown only when a current view exists but the user has
+              sent it "Back to terminal". Later computer_view frames keep the
+              hidden view fresh; this button brings it back. */}
+          {computerView && !computerVisible && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-chart-2 size-7 shrink-0"
+                  aria-label="Reopen computer view"
+                  onClick={showComputer}
+                >
+                  <Monitor className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reopen computer view</TooltipContent>
             </Tooltip>
           )}
           <span className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -691,6 +725,11 @@ export function TerminalShell() {
               Grid-global (unchanged) — covers the whole viewport regardless
               of layout mode. */}
           <BrowserViewOverlay />
+
+          {/* Same in-place read-only overlay pattern for the agent's virtual
+              computer (CUA) desktop. Renders only when a computer_view frame
+              has arrived; no-op otherwise. */}
+          <ComputerViewOverlay />
 
           {/* Agent Chat: amber attribution overlay + floating entry button,
               both anchored inside the terminal viewport. Minimal v1 (plan
@@ -772,6 +811,10 @@ export function TerminalShell() {
         open={munderDifflinOpen}
         onOpenChange={setMunderDifflinOpen}
       />
+
+      {/* Notes modal — gateway-global (D7), not session-scoped. Mounted once;
+          open state lives in the store (deep-linked via `?notes`). */}
+      <NotesDialog open={notesOpen} onOpenChange={setNotesOpen} />
     </div>
   );
 }

@@ -24,6 +24,9 @@ import { deleteChat, listChats, openChat } from "./history.js";
 import { browserResources } from "./browser-resource-limiter.js";
 import { browserHandoffMetrics } from "./browser-handoff-transport.js";
 import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
+import { computerResources } from "./computer-resource-limiter.js";
+import { computerPerformanceMetrics } from "./computer-performance-metrics.js";
+import { ComputerRuntime } from "./computer-runtime.js";
 import { isAllowedWebSocketOrigin } from "./agent-security.js";
 
 const server = createServer((req, res) => {
@@ -36,6 +39,8 @@ const server = createServer((req, res) => {
         service: "agent-service",
         browserResources: browserResources.snapshot(),
         browserPerformance: browserPerformanceMetrics.snapshot(),
+        computerResources: computerResources.snapshot(),
+        computerPerformance: computerPerformanceMetrics.snapshot(),
         browserHandoff: {
           configuredTransport: config.handoff.transport,
           mediaProviderAvailable: false,
@@ -401,6 +406,16 @@ function safeSend(ws: WebSocket, frame: AgentWsServerMessage): void {
 
 server.headersTimeout = 30_000;
 server.requestTimeout = 60_000;
+// Virtual Computer (CUA) — remove any desktop containers a prior hard crash
+// left running. No-op unless CUA_ENABLED=true; never blocks startup.
+void ComputerRuntime.sweepOrphans().catch(() => undefined);
+// A CUA desktop with no isolated egress network has an unrestricted route
+// off-box. Warn (not fatal — offline dev needs the default bridge); the
+// operator runbook in docs/VIRTUAL-COMPUTER.md sets CUA_EGRESS_NETWORK.
+if (config.cua.enabled && !config.cua.egressNetwork)
+  console.warn(
+    "[agent] WARNING: CUA enabled without CUA_EGRESS_NETWORK — the desktop has unrestricted network egress",
+  );
 void runs
   .recover()
   .then(() => {

@@ -40,7 +40,24 @@ const MODEL_LABELS: Record<AgentModel, string> = {
   "gpt-5.6-sol": "Sol",
   "gpt-5.6-terra": "Terra",
   "gpt-5.6-luna": "Luna",
+  "deepseek-v4-pro-byteplus": "DeepSeek V4 Pro",
+  "deepseek-v32-byteplus": "DeepSeek V3.2",
+  "glm-byteplus": "GLM-4.7",
 };
+
+/** Provider shown under the model name in the picker. */
+const MODEL_PROVIDER: Record<AgentModel, string> = {
+  "gpt-5.6-sol": "Azure",
+  "gpt-5.6-terra": "Azure",
+  "gpt-5.6-luna": "Azure",
+  "deepseek-v4-pro-byteplus": "BytePlus Ark",
+  "deepseek-v32-byteplus": "BytePlus Ark",
+  "glm-byteplus": "BytePlus Ark",
+};
+
+/** Reasoning effort is a GPT-5.6 control; BytePlus Ark models ignore it. */
+const modelSupportsEffort = (model: AgentModel): boolean =>
+  !model.endsWith("-byteplus");
 
 const EFFORT_LABELS: Record<AgentReasoningEffort, string> = {
   none: "None",
@@ -299,7 +316,10 @@ export function Composer({
                 >
                   <SlidersHorizontal className="size-3 shrink-0" />
                   <span>
-                    {MODEL_LABELS[model]} · {EFFORT_LABELS[reasoningEffort]}
+                    {MODEL_LABELS[model]}
+                    {modelSupportsEffort(model)
+                      ? ` · ${EFFORT_LABELS[reasoningEffort]}`
+                      : ""}
                   </span>
                   <ChevronDown className="size-3 shrink-0" />
                 </button>
@@ -311,23 +331,34 @@ export function Composer({
                     key={option}
                     onClick={() => setModel(option)}
                   >
-                    <span>{MODEL_LABELS[option]}</span>
-                    {model === option && <Check className="ml-auto size-3.5" />}
-                  </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel>Reasoning effort</DropdownMenuLabel>
-                {availableReasoningEfforts.map((option) => (
-                  <DropdownMenuItem
-                    key={option}
-                    onClick={() => setReasoningEffort(option)}
-                  >
-                    <span>{EFFORT_LABELS[option]}</span>
-                    {reasoningEffort === option && (
-                      <Check className="ml-auto size-3.5" />
+                    <span className="flex flex-col">
+                      <span>{MODEL_LABELS[option]}</span>
+                      <span className="text-muted-foreground text-[10px]">
+                        {MODEL_PROVIDER[option]}
+                      </span>
+                    </span>
+                    {model === option && (
+                      <Check className="ml-auto size-3.5 self-center" />
                     )}
                   </DropdownMenuItem>
                 ))}
+                {modelSupportsEffort(model) && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>Reasoning effort</DropdownMenuLabel>
+                    {availableReasoningEfforts.map((option) => (
+                      <DropdownMenuItem
+                        key={option}
+                        onClick={() => setReasoningEffort(option)}
+                      >
+                        <span>{EFFORT_LABELS[option]}</span>
+                        {reasoningEffort === option && (
+                          <Check className="ml-auto size-3.5" />
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

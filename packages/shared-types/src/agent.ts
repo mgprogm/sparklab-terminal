@@ -92,6 +92,12 @@ export const AgentModelSchema = z.enum([
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
+  // Models served by BytePlus Ark (OpenAI-compatible REST). The `-byteplus`
+  // suffix is load-bearing: the composer keys "no reasoning_effort" off it, and
+  // the agent service only lists these when ARK_API_KEY is configured.
+  "deepseek-v4-pro-byteplus",
+  "deepseek-v32-byteplus",
+  "glm-byteplus",
 ]);
 export type AgentModel = z.infer<typeof AgentModelSchema>;
 
@@ -495,6 +501,66 @@ export const AgentBrowserClosedSchema = z
   .strict();
 export type AgentBrowserClosed = z.infer<typeof AgentBrowserClosedSchema>;
 
+// --- Virtual Computer (CUA) -------------------------------------------------
+// Same transport rules as the browser view: screenshots ride only the live
+// WebSocket, are size- and dimension-bounded, and are deliberately absent from
+// persisted chat history. See docs/VIRTUAL-COMPUTER.md.
+export const MAX_COMPUTER_SCREENSHOT_BYTES = 4 * 1024 * 1024;
+export const MAX_COMPUTER_SCREENSHOT_BASE64_LENGTH =
+  Math.ceil(MAX_COMPUTER_SCREENSHOT_BYTES / 3) * 4;
+export const MAX_COMPUTER_VIEWPORT_DIMENSION = 4096;
+
+const ComputerIdSchema = z.string().min(1).max(128);
+const ComputerRevisionSchema = z.number().int().nonnegative().safe();
+
+export const AgentComputerScreenshotSchema = z
+  .object({
+    mediaType: z.enum(["image/png", "image/webp"]),
+    data: z
+      .string()
+      .min(1)
+      .max(MAX_COMPUTER_SCREENSHOT_BASE64_LENGTH)
+      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)
+      .refine((value) => {
+        const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+        return (
+          (value.length / 4) * 3 - padding <= MAX_COMPUTER_SCREENSHOT_BYTES
+        );
+      }, "Screenshot exceeds decoded byte limit"),
+  })
+  .strict();
+export type AgentComputerScreenshot = z.infer<
+  typeof AgentComputerScreenshotSchema
+>;
+
+/** Latest read-only desktop snapshot for the terminal overlay. */
+export const AgentComputerViewSchema = z
+  .object({
+    type: z.literal("computer_view"),
+    computerId: ComputerIdSchema,
+    revision: ComputerRevisionSchema,
+    viewport: z
+      .object({
+        width: z.number().int().min(1).max(MAX_COMPUTER_VIEWPORT_DIMENSION),
+        height: z.number().int().min(1).max(MAX_COMPUTER_VIEWPORT_DIMENSION),
+      })
+      .strict(),
+    status: z.string().max(200),
+    screenshot: AgentComputerScreenshotSchema,
+  })
+  .strict();
+export type AgentComputerView = z.infer<typeof AgentComputerViewSchema>;
+
+/** The owned desktop was destroyed; clients discard its last ephemeral view. */
+export const AgentComputerClosedSchema = z
+  .object({
+    type: z.literal("computer_closed"),
+    computerId: ComputerIdSchema,
+    revision: ComputerRevisionSchema,
+  })
+  .strict();
+export type AgentComputerClosed = z.infer<typeof AgentComputerClosedSchema>;
+
 export const BrowserHandoffReadySchema = z
   .object({
     type: z.literal("browser_handoff_ready"),
@@ -761,6 +827,8 @@ export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatHistorySchema,
   AgentBrowserViewSchema,
   AgentBrowserClosedSchema,
+  AgentComputerViewSchema,
+  AgentComputerClosedSchema,
   BrowserHandoffReadySchema,
   BrowserHandoffStateSchema,
 ]);

@@ -18,8 +18,8 @@ import type {
   AgentReasoningEffort,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
-import { azure, DEFAULT_MODEL, deploymentFor } from "./azure.js";
-import { CAPS } from "./config.js";
+import { DEFAULT_MODEL, resolveModel, type ResolvedModel } from "./azure.js";
+import { CAPS, config } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
 import { appendMessages, loadChat, reconstructTranscript } from "./history.js";
 import { systemPrompt } from "./system-prompt.js";
@@ -33,6 +33,11 @@ import {
   type ToolArgs,
 } from "./tools.js";
 import { BrowserRuntime, type BrowserAction } from "./browser-runtime.js";
+import {
+  ComputerRuntime,
+  type ComputerAction,
+  type ComputerTarget,
+} from "./computer-runtime.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { gateway } from "./gateway-client.js";
 
@@ -52,6 +57,11 @@ export class AgentLoop {
   private running = false;
   private ready: Promise<void>;
   private browser: BrowserRuntime;
+  // Virtual Computer (CUA) — spike. Independent per-loop lifetime, same as the
+  // browser: lazily started on the first computer_* call, torn down on
+  // interrupt / dispose, replaced on unexpected close. No handoff/broker/lease
+  // (that is docs/VIRTUAL-COMPUTER.md D4, a later phase).
+  private computer: ComputerRuntime;
 
   constructor(
     private send: Send,
@@ -60,8 +70,9 @@ export class AgentLoop {
     private readonly handoffs: BrowserHandoffBroker,
     private readonly user: string,
   ) {
-    this.browser = this.newBrowserRuntime();
     this.chatId = chatId;
+    this.browser = this.newBrowserRuntime();
+    this.computer = this.newComputerRuntime();
     this.ready = loadChat(chatId).then((history) => {
       this.history = history;
     });
@@ -121,6 +132,7 @@ export class AgentLoop {
     this.approvals.denyAll();
     if (this.browser.leaseState === "agent_active") void this.closeBrowser();
     else void this.handoffs.revokeForChat(this.chatId);
+    void this.closeComputer();
   }
 
   async dispose(): Promise<void> {
@@ -129,6 +141,7 @@ export class AgentLoop {
     if (this.browser.leaseState === "agent_active") await this.closeBrowser();
     // A pending or human-controlled browser is owned by the broker and may be
     // adopted by the same authenticated chat after a transient /agent reconnect.
+    await this.closeComputer();
   }
 
   requestBrowserHandoff(browserId: string): void {
@@ -196,8 +209,8 @@ export class AgentLoop {
       });
       return;
     }
-    const deployment = deploymentFor(model);
-    if (!deployment) {
+    const resolved = resolveModel(model);
+    if (!resolved) {
       this.send({
         type: "error",
         message: "The selected agent model is not configured on this service.",
@@ -232,15 +245,38 @@ export class AgentLoop {
 
         const system: ChatCompletionMessageParam = {
           role: "system",
-          content: systemPrompt(activeSessionId, this.browser.leaseState),
+          content: systemPrompt(
+            activeSessionId,
+            this.browser.leaseState,
+            config.cua.enabled,
+          ),
         };
 
         const { text: segmentText, toolCalls } = await this.streamOnce(
           [system, ...this.history],
           signal,
-          deployment,
+          resolved,
           reasoningEffort,
         );
+
+        // An empty first turn — no text, no tool calls — means the model gave
+        // us nothing to act on and the loop would otherwise exit silently.
+        // DeepSeek/Ark is the likely culprit (it can leak raw DSML tool markup
+        // instead of a real reply); we don't port a DSML workaround, just make
+        // the dead turn visible. Harmless for the Azure models too.
+        if (
+          !signal.aborted &&
+          !segmentText.trim() &&
+          toolCalls.length === 0 &&
+          modelCalls === 1
+        ) {
+          this.send({
+            type: "error",
+            message:
+              "The model returned an empty response. Try resending, or switch models.",
+          });
+          break;
+        }
 
         // Persist the assistant turn (content + any tool calls together).
         const assistantMsg: ChatCompletionMessageParam = {
@@ -298,10 +334,12 @@ export class AgentLoop {
 
           if (isWrite && !this.approvals.isAutoAllowed(tc.name, sessionId)) {
             this.send({ type: "status", state: "awaiting_approval" });
+            let approvalRequestId = "";
             const behavior = await this.approvals.request(
               tc.name,
               sessionId,
-              (requestId) =>
+              (requestId) => {
+                approvalRequestId = requestId;
                 this.send({
                   type: "approval_request",
                   requestId,
@@ -309,7 +347,8 @@ export class AgentLoop {
                   sessionId,
                   summary,
                   input: publicArgs,
-                }),
+                });
+              },
               // ONE_TIME_TOOLS (browser_act, browser_request_handoff,
               // run_codex, kanban_delete) are consequential enough that each
               // invocation is approved individually (no persistent
@@ -323,15 +362,27 @@ export class AgentLoop {
                 }),
             );
             if (behavior === "deny") {
-              resultContent =
-                "The user denied this action. Do not retry it; explain or offer an alternative.";
+              // The wire `behavior` is "deny" whether the human clicked Deny
+              // or just never responded before the 120s approval timeout —
+              // the two are NOT the same event, and telling the model "the
+              // user denied this" for a timeout is a lie the model then
+              // repeats to a human who never saw the choice (confirmed live,
+              // 2026-08-31: an approval sat un-actioned during unrelated
+              // investigation, timed out, and the model reported "you denied
+              // this action" to someone who hadn't).
+              const timedOut = this.approvals.wasTimedOut(approvalRequestId);
+              resultContent = timedOut
+                ? "This action was not approved within the 120-second approval window — the human did not respond (they may be away or busy), they did not explicitly deny it. Do not retry it without asking first; tell the human it timed out and ask whether to try again or do something else."
+                : "The user denied this action. Do not retry it; explain or offer an alternative.";
               ok = false;
               this.send({
                 type: "tool_result",
                 callId: tc.id,
                 tool: tc.name,
                 ok: false,
-                summary: "denied by user",
+                summary: timedOut
+                  ? "approval timed out (no response)"
+                  : "denied by user",
               });
               await this.appendToolResult(tc.id, resultContent, tc.name);
               continue;
@@ -458,11 +509,58 @@ export class AgentLoop {
           this.send({ type: "browser_view", ...result.snapshot });
         return result.content;
       }
+      if (tool === "computer_observe") {
+        const result = await this.computer.observe(signal);
+        if (result.snapshot)
+          this.send({ type: "computer_view", ...result.snapshot });
+        return result.content;
+      }
+      if (tool === "computer_act") {
+        const action = parseComputerAction(args);
+        if (typeof action === "string") return `error: ${action}`;
+        const result = await this.computer.act(action, signal);
+        if (result.snapshot)
+          this.send({ type: "computer_view", ...result.snapshot });
+        return result.content;
+      }
+      if (tool === "computer_list_windows")
+        return await this.computer.listWindows(signal);
+      if (tool === "computer_capture") {
+        if (!args.session_id) return "error: session_id is required";
+        if (
+          typeof args.path !== "string" ||
+          !args.path.startsWith("/") ||
+          args.path.length > 4096
+        ) {
+          return "error: path must be an absolute path of at most 4096 characters";
+        }
+        const result = await this.computer.observe(signal);
+        if (!result.snapshot)
+          return "error: computer did not return a screenshot";
+        this.send({ type: "computer_view", ...result.snapshot });
+        const bytes = Buffer.from(result.snapshot.screenshot.data, "base64");
+        const saved = await gateway.uploadSessionFile(
+          args.session_id,
+          args.path,
+          bytes,
+          result.snapshot.screenshot.mediaType,
+        );
+        return JSON.stringify({
+          saved: true,
+          path: saved.path,
+          size: saved.size,
+          mediaType: result.snapshot.screenshot.mediaType,
+          viewport: result.snapshot.viewport,
+        });
+      }
       return executeTool(tool, args, signal);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       if (tool.startsWith("browser_") && this.browser.isClosed) {
         this.browser = this.newBrowserRuntime();
+      }
+      if (tool.startsWith("computer_") && this.computer.isClosed) {
+        this.computer = this.newComputerRuntime();
       }
       return `error: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -490,24 +588,54 @@ export class AgentLoop {
     });
   }
 
+  private async closeComputer(): Promise<void> {
+    if (!this.computer.isActive && !this.computer.isClosed) return;
+    const closing = this.computer;
+    this.computer = this.newComputerRuntime();
+    const computerId = closing.computerId;
+    const revision = await closing.stop();
+    this.send({ type: "computer_closed", computerId, revision });
+  }
+
+  private newComputerRuntime(): ComputerRuntime {
+    return new ComputerRuntime(
+      (computerId, revision) => {
+        this.send({ type: "computer_closed", computerId, revision });
+        if (this.computer.computerId === computerId)
+          this.computer = this.newComputerRuntime();
+      },
+      { label: this.chatId },
+    );
+  }
+
   /** One streaming model call: relay text deltas, accumulate tool calls. */
   private async streamOnce(
     messages: ChatCompletionMessageParam[],
     signal: AbortSignal,
-    deployment: string,
+    resolved: ResolvedModel,
     reasoningEffort: AgentReasoningEffort,
   ): Promise<{ text: string; toolCalls: AccumulatedToolCall[] }> {
-    const stream = await azure.chat.completions.create(
-      {
-        model: deployment,
-        messages,
-        tools: TOOLS,
-        // openai@4's declaration predates GPT-5.6's `none`, `xhigh`, and
-        // `max` values; the Azure Chat Completions API receives this field
-        // unchanged and validates support for the selected deployment.
-        reasoning_effort: reasoningEffort as "low" | "medium" | "high",
-        stream: true,
-      },
+    const params: Record<string, unknown> = {
+      model: resolved.deployment,
+      messages,
+      tools: TOOLS,
+      stream: true,
+      // GPT-5.6 takes `reasoning_effort`; DeepSeek / Ark rejects it, and Ark
+      // instead takes a `thinking` flag (via `resolved.extraBody`).
+      ...(resolved.supportsReasoningEffort
+        ? // openai@4's declaration predates GPT-5.6's `none`, `xhigh`, and
+          // `max` values; the Azure Chat Completions API receives this field
+          // unchanged and validates support for the selected deployment.
+          { reasoning_effort: reasoningEffort }
+        : {}),
+      ...(resolved.extraBody ?? {}),
+    };
+    const stream = await resolved.client.chat.completions.create(
+      // `params` carries non-typed passthrough fields (reasoning_effort's
+      // GPT-5.6 values, Ark's `thinking`); the request body is sent unchanged.
+      params as unknown as Parameters<
+        typeof resolved.client.chat.completions.create
+      >[0],
       { signal },
     );
 
@@ -556,9 +684,13 @@ function parseArgs(raw: string): ToolArgs {
 }
 
 function redactToolArgs(tool: string, args: ToolArgs): ToolArgs {
-  return tool === "browser_act" && args.action === "type"
-    ? { ...args, text: "[redacted]" }
-    : args;
+  if (tool === "browser_act" && args.action === "type")
+    return { ...args, text: "[redacted]" };
+  // Keyed on kind, so it also covers the M3.1 element-target form
+  // (element_index + snapshot_id) of type_text.
+  if (tool === "computer_act" && args.kind === "type_text")
+    return { ...args, text: "[redacted]" };
+  return args;
 }
 
 export function sanitizePersistedToolArgs(
@@ -590,9 +722,15 @@ export function sanitizePersistedToolResult(
   tool: string,
   content: string,
 ): string {
-  return tool.startsWith("browser_")
-    ? "[browser result omitted from durable history]"
-    : content;
+  if (tool.startsWith("browser_"))
+    return "[browser result omitted from durable history]";
+  // computer_observe carries the window inventory (titles, geometry), the
+  // indexed AT-SPI element list, and a screenshot; computer_act echoes a fresh
+  // observation — never persisted (docs/VIRTUAL-COMPUTER.md: desktop state is
+  // ephemeral in chat).
+  if (tool.startsWith("computer_"))
+    return "[computer result omitted from durable history]";
+  return content;
 }
 
 function parseBrowserAction(args: ToolArgs): BrowserAction | string {
@@ -630,5 +768,100 @@ function parseBrowserAction(args: ToolArgs): BrowserAction | string {
         : `${args.action} requires a tab_id`;
     default:
       return "unknown browser action";
+  }
+}
+
+function parseComputerTarget(args: ToolArgs): ComputerTarget | string {
+  // M3.1: element target (from the latest computer_observe) is preferred; a
+  // screen-absolute desktop point is the fallback. Element branch first so a
+  // model that supplies both is routed to the element.
+  if (
+    Number.isInteger(args.element_index) &&
+    (args.element_index ?? -1) >= 0 &&
+    typeof args.snapshot_id === "string" &&
+    args.snapshot_id.length > 0
+  ) {
+    return {
+      elementIndex: args.element_index as number,
+      snapshotId: args.snapshot_id,
+    };
+  }
+  if (
+    Number.isInteger(args.x) &&
+    (args.x ?? -1) >= 0 &&
+    Number.isInteger(args.y) &&
+    (args.y ?? -1) >= 0
+  ) {
+    return { x: args.x as number, y: args.y as number };
+  }
+  return "target requires element_index + snapshot_id (preferred) or screen x + y";
+}
+
+export function parseComputerAction(args: ToolArgs): ComputerAction | string {
+  // hotkey is global — it takes no target. The driver rejects a chord shorter
+  // than 2 keys, so reject that here rather than spend a one-time approval.
+  if (args.kind === "hotkey") {
+    const keys = args.keys;
+    if (!Array.isArray(keys) || keys.length < 2 || keys.length > 8)
+      return 'hotkey requires a chord of 2 to 8 keys (modifier(s) + one non-modifier key, e.g. ["ctrl","l"])';
+    if (
+      keys.some((k) => typeof k !== "string" || k.length === 0 || k.length > 16)
+    )
+      return "hotkey keys must each be a short key name of 1 to 16 characters";
+    return { kind: "hotkey", keys };
+  }
+  const target = parseComputerTarget(args);
+  if (typeof target === "string") return target;
+  const isElement = "elementIndex" in target;
+  switch (args.kind) {
+    case "click":
+      return { kind: "click", target };
+    case "double_click":
+      return { kind: "double_click", target };
+    case "right_click":
+      return { kind: "right_click", target };
+    case "drag":
+      if (isElement)
+        return "drag cannot target an element_index — supply screen x,y for both the start and end points";
+      if (
+        !Number.isInteger(args.to_x) ||
+        (args.to_x ?? -1) < 0 ||
+        !Number.isInteger(args.to_y) ||
+        (args.to_y ?? -1) < 0
+      )
+        return "drag requires integer to_x and to_y of at least 0";
+      return {
+        kind: "drag",
+        target,
+        to: { x: args.to_x as number, y: args.to_y as number },
+      };
+    case "type_text":
+      return typeof args.text === "string" && args.text.length <= 10_000
+        ? { kind: "type_text", target, text: args.text }
+        : "type_text requires text of at most 10000 characters";
+    case "press_key":
+      if (isElement)
+        return "press_key cannot target an element_index — supply screen x,y (element targeting is for click and type_text)";
+      return typeof args.key === "string" &&
+        args.key.length > 0 &&
+        args.key.length <= 64
+        ? { kind: "press_key", target, key: args.key }
+        : "press_key requires a key name of at most 64 characters";
+    case "scroll":
+      if (isElement)
+        return "scroll cannot target an element_index — supply screen x,y (element targeting is for click and type_text)";
+      return args.direction === "up" ||
+        args.direction === "down" ||
+        args.direction === "left" ||
+        args.direction === "right"
+        ? {
+            kind: "scroll",
+            target,
+            direction: args.direction,
+            amount: args.amount === "page" ? "page" : "line",
+          }
+        : "scroll direction must be up, down, left, or right";
+    default:
+      return "unknown computer action kind";
   }
 }

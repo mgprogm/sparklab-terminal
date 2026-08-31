@@ -327,6 +327,137 @@ Body (`MoveCardRequest`): `{boardId, toColumnId, toIndex, rev}`. Splices the car
 
 `boardId` via query string or JSON body.
 
+### Notes endpoints: `/api/notes/*`
+
+A gateway-owned, OneNote-style hierarchical note tool (design:
+[`NOTES-TOOL-PLAN.md`](./NOTES-TOOL-PLAN.md)), a **separate** artifact from
+Kanban/PM. Notebook → Section → Page, each page a Markdown document, with
+optional subpages (`parentId`). Storage is **split** (D2, unlike Kanban's
+single whole-file rewrite): the tree — notebooks, sections, page metadata, and
+the ordering arrays — lives in `data/notes.json` (`src/notes.js`, atomic
+write, synchronous mutators ⇒ atomic, no mutex); each page **body** is one
+`data/notes-pages/<pageId>.md` file, also written atomically. `load()` sweeps
+any `.md` no longer referenced by the tree (crash-safety: create writes the
+body then splices the tree; delete splices the tree then unlinks the body —
+either order leaves at worst a harmless orphan file, never a dangling tree
+reference). **Ordering authority (D5) is `Section.pageIds[]` only** — a page's
+`sectionId` and indent `depth` are derived on GET and never persisted;
+`parentId` is a pure containment/indent edge, not an order. Moving a page
+moves its whole subtree contiguously.
+
+**Two independent revisions (D3)**: `page.rev` bumps only on that page's
+title/body change (`PATCH /api/notes/pages/:id`); `notebook.rev` bumps on any
+structural change — section add/rename/reorder/delete, page add/move/delete
+(`sections/:id/move`, `pages/:id/move`). A page-body edit never conflicts with
+an unrelated structural move, and vice versa. **A page-body 409 is surfaced,
+never auto-retried** (D4) — unlike a structural move, which callers MAY retry
+once, a body `PATCH` is a blind overwrite and a silent retry against a fresh
+`rev` would discard whatever the other writer just saved.
+
+Auth: the existing `gw_session` cookie **or** the shared artifact bearer
+(`GATEWAY_API_TOKEN`, legacy `KANBAN_API_TOKEN` fallback — same token already
+used by `/api/kanban/*` and `/api/pm/*`, no new token needed). GET routes are
+Origin-exempt; state-changing routes get the Origin/CSRF check.
+
+An MCP-server wrapper (dependency-free stdio) lives at `tools/notes-mcp/` — it
+exposes these endpoints as MCP tools for Claude Code / Codex via the bearer
+token. See `tools/notes-mcp/README.md` for the `claude mcp add` /
+`~/.codex/config.toml` setup.
+
+#### `GET /api/notes/notebooks` → 200
+
+`{ "notebooks": NotesNotebookSummary[] }` where a summary is
+`{id,name,tags,rev,updatedAt,sectionCount,pageCount}`.
+
+#### `GET /api/notes/notebooks/:nbId` → 200
+
+Full `NotesNotebook`: `{id,name,tags,rev,createdAt,updatedAt, sections:[{id,name,pageIds[],createdAt,updatedAt}], pages:[{id,title,tags,parentId,rev,createdAt,updatedAt,sectionId,depth}]}` — `pages` is a **flat** array in render order (section order, then each section's `pageIds` order); `sectionId`/`depth` are derived, never persisted. No bodies. Unknown notebook → `404`.
+
+#### `GET /api/notes/notebooks/:nbId/pages/:pageId` → 200
+
+`NotesPageContent` — the page's tree metadata plus its Markdown `body` (read
+from the `.md` file) and current `rev`. Unknown notebook/page → `404`.
+
+#### `GET /api/notes/search?q=…&limit=…` → 200
+
+`{ "results": NotesSearchHit[] }` — case-insensitive substring over titles and
+bodies (`{notebookId,notebookName,sectionId,pageId,title,snippet}`); `limit`
+defaults to 20, clamped 1–100; an empty `q` returns no results.
+
+#### `POST /api/notes/notebooks` → 201
+
+Body (`CreateNotebookRequest`): `{name, tags?}`. Seeds one section "Notes" +
+one empty "Untitled page" (OneNote-like first open). Returns the created
+notebook.
+
+#### `PATCH /api/notes/notebooks/:nbId` → 200
+
+Body (`UpdateNotebookRequest`): `{name?, tags?}` (at least one). Returns the
+notebook (structural `rev` bumped).
+
+#### `DELETE /api/notes/notebooks/:nbId` → 204
+
+Deletes the notebook and every page body in it.
+
+#### `POST /api/notes/notebooks/:nbId/sections` → 201
+
+Body (`CreateSectionRequest`): `{name}`. Appended at the end. Returns the
+notebook.
+
+#### `PATCH /api/notes/sections/:secId` → 200
+
+Body (`UpdateSectionRequest`): `{notebookId, name}`. Returns the notebook.
+
+#### `POST /api/notes/sections/:secId/move` → 200 / 409
+
+Body (`MoveSectionRequest`): `{notebookId, toIndex, rev}` — `rev` is the
+**notebook** revision. A stale `rev` → `409 { "error": "stale", "notebook": <current notebook> }`.
+
+#### `DELETE /api/notes/sections/:secId?notebookId=<id>&mode=<block|cascade>` → 204 / 422
+
+`notebookId` and `mode` via query string or JSON body. `mode:"block"`
+(default) rejects a non-empty section with `422 { "error": "..." }`;
+`mode:"cascade"` deletes the section and every page (+ body) in it.
+
+#### `POST /api/notes/notebooks/:nbId/pages` → 201
+
+Body (`CreatePageRequest`): `{sectionId, title?, parentId?, body?}`. When
+`parentId` is set the page joins the parent's section automatically (an
+explicit conflicting `sectionId` → `400`); a `parentId` cycle → `400`. Returns
+the created `NotesPageContent`.
+
+#### `PATCH /api/notes/pages/:pageId` → 200 / 409
+
+Body (`UpdatePageRequest`): `{notebookId, title?, body?, tags?, rev}` (at
+least one of `title`/`body`/`tags`; `rev` is **required** — the **page**
+revision). A stale `rev` → `409 { "error": "stale", "page": <current page, body included> }`.
+**Never auto-retried by any client** (D4) — the caller must show the conflict
+and let a human decide to reload or explicitly overwrite with the fresh `rev`.
+
+#### `POST /api/notes/pages/:pageId/append` → 200
+
+Body (`AppendPageRequest`): `{notebookId, markdown}`. Server-atomic: appends
+`"\n\n"+markdown` to the existing body and bumps `page.rev`. **No `rev`
+required** — additive, cannot clobber a concurrent edit.
+
+#### `POST /api/notes/pages/:pageId/move` → 200 / 409 / 400
+
+Body (`MovePageRequest`): `{notebookId, toSectionId, toIndex, toParentId?, rev}`
+— `rev` is the **notebook** revision. The page and its whole subtree move as
+one contiguous run (D5). A stale `rev` → `409 { "error": "stale", "notebook": <current notebook> }`;
+a `toParentId` that would create a cycle → `400`.
+
+#### `DELETE /api/notes/pages/:pageId?notebookId=<id>&mode=<orphan|cascade>` → 204
+
+`notebookId` and `mode` via query string or JSON body. `mode:"orphan"`
+(default) promotes the deleted page's children to its own parent (their
+bodies survive); `mode:"cascade"` deletes the whole subtree (+ bodies).
+
+Errors: `400` malformed/validation/cycle, `401` unauthorized, `403` forbidden
+origin, `404` unknown notebook/section/page, `409` `stale` (+ the current
+`page`/`notebook`), `422` a non-empty `block`-mode section delete, `413` body
+too large.
+
 ### Project-management endpoints: `/api/pm/*`
 
 A Kanban-first PM suite (design: [`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md), extended by [`PM-ARTIFACT-ENHANCEMENTS-PLAN.md`](./PM-ARTIFACT-ENHANCEMENTS-PLAN.md) — **implemented**, 2026-07-28), a **separate** artifact from Kanban. State in `data/pm.json` (`src/pm.js`, synchronous mutators ⇒ atomic, no mutex) plus a **separate collaboration sidecar** `src/pm-collab.js` (append-only JSONL for comments/activity + attachment blobs + a bounded notification JSON — never inline in `pm.json`, so comment/attachment volume never bloats the whole-file rewrite). Like Kanban: `Column.taskIds[]` is the sole ordering/status authority (`columnId` derived on GET). Auth: cookie **or** the shared bearer (`GATEWAY_API_TOKEN` / legacy `KANBAN_API_TOKEN`). GET Origin-exempt; writes Origin/CSRF-checked. Schemas: the `Pm*` block in `shared-types/src/terminal.ts`.

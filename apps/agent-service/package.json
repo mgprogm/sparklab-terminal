@@ -10,7 +10,9 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/*.test.ts",
-    "smoke": "node --env-file-if-exists=.env test/smoke.js"
+    "test:computer-e2e": "node --import tsx test/computer-e2e.js",
+    "smoke": "node --env-file-if-exists=.env test/smoke.js",
+    "test:computer-smoke": "node --env-file-if-exists=.env test/computer-smoke.js"
   },
   "dependencies": {
     "@sparklab/shared-types": "workspace:*",

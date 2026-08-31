@@ -1187,6 +1187,218 @@ export type MarkNotificationsReadRequest = z.infer<
 >;
 
 // ---------------------------------------------------------------------------
+// REST: Notes /api/notes/*
+// ---------------------------------------------------------------------------
+// A OneNote-style hierarchical note tool (docs/NOTES-TOOL-PLAN.md), a separate
+// artifact from Kanban/PM. SPLIT store (D2): the tree (notebooks -> sections ->
+// page METADATA + ordering arrays) lives in data/notes.json; each page BODY is
+// one data/notes-pages/<pageId>.md file. Ordering authority (D5) is
+// Notebook.sectionIds[] + Section.pageIds[] ONLY — a page carries no
+// sectionId/order; `sectionId` + `depth` are derived on GET. `parentId` is a
+// containment edge for subpages (cycle-rejected -> "cycle" -> 400); movePage
+// carries the whole subtree contiguously. TWO-TIER rev (D3): `page.rev` bumps
+// only on that page's title/body change (updatePage -> 409 "stale");
+// `notebook.rev` bumps on any structural change (moveSection / movePage -> 409
+// "stale"). A page-body 409 is surfaced, never auto-retried (D4). deleteSection
+// "block" (default) -> 422 "not_empty"; deletePage "orphan" (default) promotes
+// children.
+
+/** A page as it appears in the notebook tree — metadata only, NO body.
+ *  `sectionId` and `depth` are derived on GET (D5), never persisted. */
+export const NotesPageSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1).max(512),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+  /** Parent page id (containment/indent edge for subpages) or null for top level. */
+  parentId: z.string().nullable().default(null),
+  /** Per-page revision — bumped ONLY on this page's title/body change (D3). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  /** Derived on GET: the id of the section currently holding this page. */
+  sectionId: z.string().nullable().optional(),
+  /** Derived on GET: indent depth in the parentId forest (0 = top level). */
+  depth: z.number().int().optional(),
+});
+export type NotesPage = z.infer<typeof NotesPageSchema>;
+
+/** A page plus its Markdown body. Returned by GET .../pages/:id and by
+ *  create/update/append page. The body is read from the per-page .md file. */
+export const NotesPageContentSchema = NotesPageSchema.extend({
+  body: z.string(),
+});
+export type NotesPageContent = z.infer<typeof NotesPageContentSchema>;
+
+/** A section: an ordered list of pages. `pageIds` is the sole flat page-order
+ *  authority for the section (D5); indentation comes from each page's parentId. */
+export const NotesSectionSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(128),
+  pageIds: z.array(z.string()),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type NotesSection = z.infer<typeof NotesSectionSchema>;
+
+/** A full notebook tree. Returned by GET /api/notes/notebooks/:nbId. `sections`
+ *  is ordered; `pages` is a FLAT array in render order (section order, then each
+ *  section's pageIds order) with derived sectionId + depth. No bodies. */
+export const NotesNotebookSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)),
+  /** Structural revision — bumped on any section/page add/rename/reorder/move/delete (D3). */
+  rev: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  sections: z.array(NotesSectionSchema),
+  pages: z.array(NotesPageSchema),
+});
+export type NotesNotebook = z.infer<typeof NotesNotebookSchema>;
+
+/** Lightweight notebook row for the list view (no sections/pages payload). */
+export const NotesNotebookSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  tags: z.array(z.string()),
+  rev: z.number().int(),
+  updatedAt: z.number(),
+  sectionCount: z.number().int(),
+  pageCount: z.number().int(),
+});
+export type NotesNotebookSummary = z.infer<typeof NotesNotebookSummarySchema>;
+
+/** Response body for GET /api/notes/notebooks (200 OK). */
+export const NotesListResponseSchema = z.object({
+  notebooks: z.array(NotesNotebookSummarySchema),
+});
+export type NotesListResponse = z.infer<typeof NotesListResponseSchema>;
+
+/** One search result — a page whose title or body matched the query. */
+export const NotesSearchHitSchema = z.object({
+  notebookId: z.string(),
+  notebookName: z.string(),
+  sectionId: z.string(),
+  pageId: z.string(),
+  title: z.string(),
+  /** Whitespace-collapsed context window around the match (textContent only). */
+  snippet: z.string(),
+});
+export type NotesSearchHit = z.infer<typeof NotesSearchHitSchema>;
+
+/** Response body for GET /api/notes/search?q=…&limit=… (200 OK). */
+export const NotesSearchResponseSchema = z.object({
+  results: z.array(NotesSearchHitSchema),
+});
+export type NotesSearchResponse = z.infer<typeof NotesSearchResponseSchema>;
+
+/** Request body for POST /api/notes/notebooks (create; seeds a "Notes" section
+ *  + one empty "Untitled page"). */
+export const CreateNotebookRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  tags: z.array(z.string().min(1).max(64)).default([]),
+});
+export type CreateNotebookRequest = z.infer<typeof CreateNotebookRequestSchema>;
+
+/** Request body for PATCH /api/notes/notebooks/:nbId. */
+export const UpdateNotebookRequestSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+  })
+  .refine((b) => b.name !== undefined || b.tags !== undefined, {
+    message: "at least one of name/tags is required",
+  });
+export type UpdateNotebookRequest = z.infer<typeof UpdateNotebookRequestSchema>;
+
+/** Request body for POST /api/notes/notebooks/:nbId/sections. */
+export const CreateSectionRequestSchema = z.object({
+  name: z.string().min(1).max(128),
+});
+export type CreateSectionRequest = z.infer<typeof CreateSectionRequestSchema>;
+
+/** Request body for PATCH /api/notes/sections/:secId. `notebookId` locates it. */
+export const UpdateSectionRequestSchema = z.object({
+  notebookId: z.string(),
+  name: z.string().min(1).max(128),
+});
+export type UpdateSectionRequest = z.infer<typeof UpdateSectionRequestSchema>;
+
+/** Request body for POST /api/notes/sections/:secId/move. `rev` is the NOTEBOOK
+ *  revision the client observed; a mismatch is rejected 409 (stale). */
+export const MoveSectionRequestSchema = z.object({
+  notebookId: z.string(),
+  toIndex: z.number().int().min(0),
+  rev: z.number().int(),
+});
+export type MoveSectionRequest = z.infer<typeof MoveSectionRequestSchema>;
+
+/** Request body / query for DELETE /api/notes/sections/:secId. `mode` "block"
+ *  (default) rejects a non-empty section 422; "cascade" deletes its pages. */
+export const DeleteSectionRequestSchema = z.object({
+  notebookId: z.string(),
+  mode: z.enum(["block", "cascade"]).optional(),
+});
+export type DeleteSectionRequest = z.infer<typeof DeleteSectionRequestSchema>;
+
+/** Request body for POST /api/notes/notebooks/:nbId/pages. When `parentId` is
+ *  set the page joins the parent's section (cycle-checked -> 400). */
+export const CreatePageRequestSchema = z.object({
+  sectionId: z.string(),
+  title: z.string().min(1).max(512).optional(),
+  parentId: z.string().nullable().optional(),
+  body: z.string().max(1048576).optional(),
+});
+export type CreatePageRequest = z.infer<typeof CreatePageRequestSchema>;
+
+/** Request body for PATCH /api/notes/pages/:pageId. `rev` is the PAGE revision;
+ *  a mismatch is rejected 409 (stale) with the current page (body included) and
+ *  is NEVER auto-retried (D4). `notebookId` locates the page. */
+export const UpdatePageRequestSchema = z
+  .object({
+    notebookId: z.string(),
+    title: z.string().min(1).max(512).optional(),
+    body: z.string().max(1048576).optional(),
+    tags: z.array(z.string().min(1).max(64)).optional(),
+    rev: z.number().int(),
+  })
+  .refine(
+    (b) =>
+      b.title !== undefined || b.body !== undefined || b.tags !== undefined,
+    { message: "at least one of title/body/tags is required" },
+  );
+export type UpdatePageRequest = z.infer<typeof UpdatePageRequestSchema>;
+
+/** Request body for POST /api/notes/pages/:pageId/append. Server-atomic and
+ *  additive — no `rev` (D9). */
+export const AppendPageRequestSchema = z.object({
+  notebookId: z.string(),
+  markdown: z.string().min(1).max(1048576),
+});
+export type AppendPageRequest = z.infer<typeof AppendPageRequestSchema>;
+
+/** Request body for POST /api/notes/pages/:pageId/move. The page's whole subtree
+ *  moves contiguously (D5). `rev` is the NOTEBOOK revision (409 stale on
+ *  mismatch); `toParentId` is cycle-checked (400 cycle). */
+export const MovePageRequestSchema = z.object({
+  notebookId: z.string(),
+  toSectionId: z.string(),
+  toIndex: z.number().int().min(0),
+  toParentId: z.string().nullable().optional(),
+  rev: z.number().int(),
+});
+export type MovePageRequest = z.infer<typeof MovePageRequestSchema>;
+
+/** Request body / query for DELETE /api/notes/pages/:pageId. `mode` "orphan"
+ *  (default) promotes children (a child's parentId becomes the deleted page's
+ *  parentId); "cascade" deletes the whole subtree. */
+export const DeletePageRequestSchema = z.object({
+  notebookId: z.string(),
+  mode: z.enum(["orphan", "cascade"]).optional(),
+});
+export type DeletePageRequest = z.infer<typeof DeletePageRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // REST: Agentic AI Creator /api/agentic/*
 // ---------------------------------------------------------------------------
 // A third gateway-owned pluggable artifact (docs/AGENTIC-AI-CREATOR-PLAN.md),
@@ -1242,7 +1454,7 @@ export type Agent = z.infer<typeof AgentSchema>;
 /** Scoped access from an Agentic AI's agents to another artifact's MCP server. */
 export const ArtifactConnectionSchema = z.object({
   id: z.string(),
-  targetType: z.enum(["pm", "kanban"]),
+  targetType: z.enum(["pm", "kanban", "notes"]),
   scope: z.enum(["fixed", "runtime-selection"]),
   /** A specific project/board id, when scope = "fixed". */
   targetId: z.string().nullable().default(null),
@@ -1544,7 +1756,7 @@ export type UpdateAgentRequest = z.infer<typeof UpdateAgentRequestSchema>;
 
 /** Request body for POST /api/agentic/connections. */
 export const CreateConnectionRequestSchema = z.object({
-  targetType: z.enum(["pm", "kanban"]),
+  targetType: z.enum(["pm", "kanban", "notes"]),
   scope: z.enum(["fixed", "runtime-selection"]).default("fixed"),
   targetId: z.string().nullable().optional(),
 });

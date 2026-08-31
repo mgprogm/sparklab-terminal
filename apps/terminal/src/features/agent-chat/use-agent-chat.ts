@@ -21,6 +21,7 @@ import type { AgentModel, AgentReasoningEffort } from "@sparklab/shared-types";
 import { authKeys } from "@/features/auth";
 import { useBrowserHandoffStore } from "@/features/browser-handoff";
 import { useBrowserViewStore } from "@/features/browser-view";
+import { useComputerViewStore } from "@/features/computer-view";
 import { useTerminalStore } from "@/features/terminal/store";
 
 let conn: AgentConnection | null = null;
@@ -45,6 +46,7 @@ export function useAgentChat() {
       connectionTerminalSessionId = terminalSessionId;
       const ingest = useAgentStore.getState().ingest;
       const ingestBrowser = useBrowserViewStore.getState().ingest;
+      const ingestComputer = useComputerViewStore.getState().ingest;
       const ingestHandoff = useBrowserHandoffStore.getState().ingestControl;
       const setConnected = useAgentStore.getState().setConnected;
       conn = new AgentConnection(
@@ -61,6 +63,13 @@ export function useAgentChat() {
                 useBrowserHandoffStore.getState().browserId === frame.browserId
               )
                 useBrowserHandoffStore.getState().clear();
+              return;
+            }
+            if (
+              frame.type === "computer_view" ||
+              frame.type === "computer_closed"
+            ) {
+              ingestComputer(frame);
               return;
             }
             ingest(frame);
@@ -102,6 +111,7 @@ export function useAgentChat() {
         useAgentStore.getState().setConnected(false);
       }
       useBrowserViewStore.getState().clear();
+      useComputerViewStore.getState().clear();
       useBrowserHandoffStore.getState().clear();
       useAgentStore.getState().beginTerminalSwitch(null);
       return;
@@ -113,6 +123,7 @@ export function useAgentChat() {
     const resumeChatId =
       state.chatIdsByTerminal[activeSessionId] ?? state.legacyChatId;
     useBrowserViewStore.getState().clear();
+    useComputerViewStore.getState().clear();
     useBrowserHandoffStore.getState().clear();
     state.beginTerminalSwitch(activeSessionId, resumeChatId);
     openConnection(activeSessionId, resumeChatId ?? null);
@@ -162,6 +173,7 @@ export function useAgentChat() {
   const newChat = useCallback(() => {
     if (!activeSessionId) return;
     useBrowserViewStore.getState().clear();
+    useComputerViewStore.getState().clear();
     useBrowserHandoffStore.getState().clear();
     useAgentStore.getState().beginTerminalSwitch(activeSessionId);
     openConnection(activeSessionId, null, true);
@@ -173,6 +185,7 @@ export function useAgentChat() {
       if (!activeSessionId) return;
       if (chatId === useAgentStore.getState().chatId) return;
       useBrowserViewStore.getState().clear();
+      useComputerViewStore.getState().clear();
       useBrowserHandoffStore.getState().clear();
       // Clear now; chat_history will replace with the reconstructed transcript.
       // loadingChat keeps the panel on "Loading chat…" (not the new-chat empty

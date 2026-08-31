@@ -6,16 +6,36 @@ import {
   validateBrowserDestination,
 } from "./browser-security.js";
 
-/** A loopback forward proxy that resolves and checks every browser request before connecting by the checked IP. */
+/**
+ * A forward proxy that resolves and checks every browser request before
+ * connecting by the checked IP. Binds loopback by default (the browser path);
+ * `start(bindHost)` can bind it elsewhere so a container can reach it (CUA
+ * proxied-browsing, M3.5) — the public-only ruleset is identical either way.
+ */
 export class SafeBrowserProxy {
   private server: Server | null = null;
   private sockets = new Set<Socket>();
+  private boundPort: number | null = null;
 
   constructor(
     private readonly resolveHost: BrowserHostResolver = resolvePublicBrowserHost,
   ) {}
 
-  async start(): Promise<string> {
+  /** The bound TCP port. Throws before `start()` / after `close()`. */
+  get port(): number {
+    if (this.boundPort === null) throw new Error("browser proxy not started");
+    return this.boundPort;
+  }
+
+  /**
+   * Start listening. `bindHost` defaults to loopback — the browser path calls
+   * `start()` with no argument and its behaviour is unchanged. A caller that
+   * binds a non-loopback host (e.g. `0.0.0.0` so a Docker container can dial
+   * the bridge gateway) should compose the address it hands out from `.port`
+   * plus a host the peer can route to; the returned URL still resolves to
+   * loopback for a same-host caller.
+   */
+  async start(bindHost = "127.0.0.1"): Promise<string> {
     if (this.server) throw new Error("browser proxy already started");
     const server = createServer((req, res) => {
       void (async () => {
@@ -104,18 +124,22 @@ export class SafeBrowserProxy {
     server.on("connection", (socket) => this.trackSocket(socket));
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
+      server.listen(0, bindHost, resolve);
     });
     this.server = server;
     const address = server.address();
     if (!address || typeof address === "string")
       throw new Error("browser proxy did not bind TCP");
-    return `http://127.0.0.1:${address.port}`;
+    this.boundPort = address.port;
+    const urlHost =
+      bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
+    return `http://${urlHost}:${address.port}`;
   }
 
   async close(): Promise<void> {
     const server = this.server;
     this.server = null;
+    this.boundPort = null;
     if (!server) return;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear();

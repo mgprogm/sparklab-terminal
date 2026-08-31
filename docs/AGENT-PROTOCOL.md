@@ -13,26 +13,36 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST─�
 
 ## Configuration (`.env`, gitignored)
 
-| Var                                           | Purpose                                                          |
-| --------------------------------------------- | ---------------------------------------------------------------- |
-| `AZURE_OPENAI_ENDPOINT`                       | Azure AI Foundry resource endpoint                               |
-| `AZURE_OPENAI_API_KEY`                        | secret — never committed                                         |
-| `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                             |
-| `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                            |
-| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer     |
-| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer      |
-| `AGENT_PORT`                                  | listen port (default 3009)                                       |
-| `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                              |
-| `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                         |
-| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                |
-| `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools |
-| `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)               |
-| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                  |
+| Var                                           | Purpose                                                                                                                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `AZURE_OPENAI_ENDPOINT`                       | Azure AI Foundry resource endpoint                                                                                              |
+| `AZURE_OPENAI_API_KEY`                        | secret — never committed                                                                                                        |
+| `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                                                                                            |
+| `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                                                                                           |
+| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer                                                                    |
+| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer                                                                     |
+| `ARK_API_KEY`                                 | optional; enables the BytePlus Ark models (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`, `glm-byteplus`) in the composer |
+| `ARK_BASE_URL`                                | optional Ark base URL (default `https://ark.ap-southeast.bytepluses.com`)                                                       |
+| `ARK_DEEPSEEK_DEPLOYMENT`                     | optional Ark id for `deepseek-v4-pro-byteplus` (default `deepseek-v4-pro-260425`)                                               |
+| `ARK_DEEPSEEK_V32_DEPLOYMENT`                 | optional Ark id for `deepseek-v32-byteplus` (default `deepseek-v3-2-251201`)                                                    |
+| `ARK_GLM_DEPLOYMENT`                          | optional Ark id for `glm-byteplus` (default `glm-4-7-251222`)                                                                   |
+| `AGENT_PORT`                                  | listen port (default 3009)                                                                                                      |
+| `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                                                                                             |
+| `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                                                                                        |
+| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                                                                               |
+| `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools                                                                |
+| `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)                                                                              |
+| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                                                                                 |
 
 The service fails fast at startup if any required Azure var is missing.
 The composer sends an allowlisted public model id and reasoning effort for each
 turn; the service maps it to a private deployment name and only advertises
-models configured on that service.
+models configured on that service. Most models run on Azure OpenAI; the
+optional `*-byteplus` ids (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`,
+`glm-byteplus`) route to BytePlus Ark instead (OpenAI-compatible REST, Bearer
+auth, no `reasoning_effort` — the composer hides the effort control for any
+`-byteplus` model; DeepSeek also gets `thinking` disabled). A first-turn empty
+reply surfaces an `error` frame rather than silently ending the turn.
 
 Each WebSocket includes `terminalSessionId` in its query string. With no other
 chat selector, the service resumes the newest chat linked to that terminal. An
@@ -74,54 +84,60 @@ is reserved for the terminal's `/attach`). Schemas live in
 
 ### Server → client
 
-| type                | fields                                                                  | meaning                                                   |
-| ------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------- |
-| `chat_started`      | `chatId`, `terminalSessionId`                                           | identifies the chat and its owning terminal               |
-| `chat_history`      | `chatId`, `entries[]`                                                   | resumed transcript (user/assistant/tool); client REPLACES |
-| `chat_list`         | `chats[]` (`id`,`title`,`updatedAt`,`messageCount`,`terminalSessionId`) | terminal-scoped past-chat list                            |
-| `assistant_delta`   | `text`                                                                  | streamed token chunk                                      |
-| `assistant_message` | `text`                                                                  | finalized assistant segment                               |
-| `tool_use`          | `callId`, `tool`, `sessionId?`, `summary`, `input`                      | a tool is being invoked                                   |
-| `tool_result`       | `callId`, `tool`, `ok`, `summary?`                                      | tool finished                                             |
-| `approval_request`  | `requestId`, `tool`, `sessionId?`, `summary`, `input`                   | a write awaits approval                                   |
-| `status`            | `state` (`idle`/`thinking`/`acting`/`awaiting_approval`)                | coarse activity                                           |
-| `error`             | `message`                                                               | channel error                                             |
-| `pong`              | —                                                                       | heartbeat reply                                           |
-| `browser_view`      | `browserId`, `revision`, `url`, `title`, `viewport`, `screenshot`       | bounded ephemeral browser snapshot                        |
-| `browser_closed`    | `browserId`, `revision`                                                 | discard the matching browser view                         |
+| type                | fields                                                                  | meaning                                                    |
+| ------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `chat_started`      | `chatId`, `terminalSessionId`                                           | identifies the chat and its owning terminal                |
+| `chat_history`      | `chatId`, `entries[]`                                                   | resumed transcript (user/assistant/tool); client REPLACES  |
+| `chat_list`         | `chats[]` (`id`,`title`,`updatedAt`,`messageCount`,`terminalSessionId`) | terminal-scoped past-chat list                             |
+| `assistant_delta`   | `text`                                                                  | streamed token chunk                                       |
+| `assistant_message` | `text`                                                                  | finalized assistant segment                                |
+| `tool_use`          | `callId`, `tool`, `sessionId?`, `summary`, `input`                      | a tool is being invoked                                    |
+| `tool_result`       | `callId`, `tool`, `ok`, `summary?`                                      | tool finished                                              |
+| `approval_request`  | `requestId`, `tool`, `sessionId?`, `summary`, `input`                   | a write awaits approval                                    |
+| `status`            | `state` (`idle`/`thinking`/`acting`/`awaiting_approval`)                | coarse activity                                            |
+| `error`             | `message`                                                               | channel error                                              |
+| `pong`              | —                                                                       | heartbeat reply                                            |
+| `browser_view`      | `browserId`, `revision`, `url`, `title`, `viewport`, `screenshot`       | bounded ephemeral browser snapshot                         |
+| `browser_closed`    | `browserId`, `revision`                                                 | discard the matching browser view                          |
+| `computer_view`     | `computerId`, `revision`, `viewport`, `status`, `screenshot`            | bounded ephemeral desktop snapshot (never in chat history) |
+| `computer_closed`   | `computerId`, `revision`                                                | close tombstone; a later `computer_view` cannot reopen     |
 
 ## Tools
 
 The model's entire capability surface (no built-in shell). Reads run
 immediately; writes pause the loop at the approval gate.
 
-| Tool                                | Kind      | Backing                                                                           |
-| ----------------------------------- | --------- | --------------------------------------------------------------------------------- |
-| `list_sessions`                     | read      | `GET /api/sessions`                                                               |
-| `read_screen`                       | read      | `GET /api/sessions/:id/screen`                                                    |
-| `wait_idle`                         | read      | polls `/screen` until a shell prompt / quiescence                                 |
-| `type_text`                         | **write** | `POST /api/sessions/:id/keys {text}` — never executes                             |
-| `press_keys`                        | **write** | `POST …/keys {keys}` (whitelist)                                                  |
-| `schedule_terminal_action`          | **write** | `POST /api/terminal-actions` — one-time persisted named-key action                |
-| `schedule_terminal_input`           | **write** | `POST /api/terminal-actions` — one-time encrypted literal text + named-key action |
-| `start_autonomous_terminal_monitor` | **write** | persisted deterministic screen-triggered text/key/command automation              |
-| `list_scheduled_terminal_actions`   | read      | `GET /api/terminal-actions`                                                       |
-| `cancel_scheduled_terminal_action`  | **write** | `DELETE /api/terminal-actions/:id`                                                |
-| `run_command`                       | **write** | type + Enter + `wait_idle` (one approval)                                         |
-| `create_session`                    | **write** | `POST /api/sessions`                                                              |
-| `run_codex`                         | **write** | `POST …/codex` — `codex exec` in the session cwd                                  |
-| `browser_observe`                   | read      | Browser Use MCP page state + bounded snapshot                                     |
-| `browser_list_tabs`                 | read      | Browser Use MCP tab list                                                          |
-| `browser_act`                       | **write** | one structured navigate/click/type/scroll/tab action                              |
-| `browser_capture`                   | **write** | capture viewport + save through session-scoped gateway `fs/upload`                |
-| `browser_request_handoff`           | **write** | offer the live isolated browser for private human authentication                  |
-| `kanban_list`                       | read      | `GET /api/kanban/boards`                                                          |
-| `kanban_get`                        | read      | `GET /api/kanban/boards/:id`                                                      |
-| `kanban_create`                     | **write** | `POST /api/kanban/boards`                                                         |
-| `kanban_add_card`                   | **write** | `POST /api/kanban/boards/:id/cards`                                               |
-| `kanban_update_card`                | **write** | `PATCH /api/kanban/cards/:id`                                                     |
-| `kanban_move`                       | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409)               |
-| `kanban_delete`                     | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)                |
+| Tool                                | Kind      | Backing                                                                                                                                   |
+| ----------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_sessions`                     | read      | `GET /api/sessions`                                                                                                                       |
+| `read_screen`                       | read      | `GET /api/sessions/:id/screen`                                                                                                            |
+| `wait_idle`                         | read      | polls `/screen` until a shell prompt / quiescence                                                                                         |
+| `type_text`                         | **write** | `POST /api/sessions/:id/keys {text}` — never executes                                                                                     |
+| `press_keys`                        | **write** | `POST …/keys {keys}` (whitelist)                                                                                                          |
+| `schedule_terminal_action`          | **write** | `POST /api/terminal-actions` — one-time persisted named-key action                                                                        |
+| `schedule_terminal_input`           | **write** | `POST /api/terminal-actions` — one-time encrypted literal text + named-key action                                                         |
+| `start_autonomous_terminal_monitor` | **write** | persisted deterministic screen-triggered text/key/command automation                                                                      |
+| `list_scheduled_terminal_actions`   | read      | `GET /api/terminal-actions`                                                                                                               |
+| `cancel_scheduled_terminal_action`  | **write** | `DELETE /api/terminal-actions/:id`                                                                                                        |
+| `run_command`                       | **write** | type + Enter + `wait_idle` (one approval)                                                                                                 |
+| `create_session`                    | **write** | `POST /api/sessions`                                                                                                                      |
+| `run_codex`                         | **write** | `POST …/codex` — `codex exec` in the session cwd                                                                                          |
+| `browser_observe`                   | read      | Browser Use MCP page state + bounded snapshot                                                                                             |
+| `browser_list_tabs`                 | read      | Browser Use MCP tab list                                                                                                                  |
+| `browser_act`                       | **write** | one structured navigate/click/type/scroll/tab action                                                                                      |
+| `browser_capture`                   | **write** | capture viewport + save through session-scoped gateway `fs/upload`                                                                        |
+| `browser_request_handoff`           | **write** | offer the live isolated browser for private human authentication                                                                          |
+| `computer_observe`                  | read      | disposable-desktop viewport + `snapshotId` + window inventory + indexed element list + bounded snapshot                                   |
+| `computer_list_windows`             | read      | disposable-desktop window inventory + running apps, no screenshot                                                                         |
+| `computer_act`                      | **write** | one desktop input action (`click`/`double_click`/`right_click`/`drag`/`type_text`/`press_key`/`scroll`/`hotkey`) by element or screen x,y |
+| `computer_capture`                  | **write** | capture desktop screenshot + save through session-scoped gateway `fs/upload`                                                              |
+| `kanban_list`                       | read      | `GET /api/kanban/boards`                                                                                                                  |
+| `kanban_get`                        | read      | `GET /api/kanban/boards/:id`                                                                                                              |
+| `kanban_create`                     | **write** | `POST /api/kanban/boards`                                                                                                                 |
+| `kanban_add_card`                   | **write** | `POST /api/kanban/boards/:id/cards`                                                                                                       |
+| `kanban_update_card`                | **write** | `PATCH /api/kanban/cards/:id`                                                                                                             |
+| `kanban_move`                       | **write** | `POST /api/kanban/cards/:id/move` (auto-manages `rev`, retries 409)                                                                       |
+| `kanban_delete`                     | **write** | `DELETE /api/kanban/boards/:id` — board delete (one-time approval)                                                                        |
 
 Kanban tools drive the gateway's `/api/kanban/*` board API (design:
 [`KANBAN-PLAN.md`](./KANBAN-PLAN.md)). Approval tiers (D9): reads run
@@ -151,6 +167,19 @@ deleting individual cards stays a human action in the board UI.
 | `pm_list_activity` | read | `GET /api/pm/projects/:id/activity` |
 | `pm_watch_task` / `pm_unwatch_task` | **write** | `POST /api/pm/tasks/:id/watch`\|`unwatch` (idempotent) |
 | `pm_list_attachments` | read | `GET /api/pm/tasks/:id/attachments` |
+| `notes_list` | read | `GET /api/notes/notebooks` |
+| `notes_get_notebook` | read | `GET /api/notes/notebooks/:id` |
+| `notes_get_page` | read | `GET /api/notes/notebooks/:id/pages/:pageId` |
+| `notes_search` | read | `GET /api/notes/search?q=&limit=` |
+| `notes_create_notebook` | **write** | `POST /api/notes/notebooks` — seeds one section "Notes" + one "Untitled page" |
+| `notes_create_section` | **write** | `POST /api/notes/notebooks/:id/sections` |
+| `notes_create_page` | **write** | `POST /api/notes/notebooks/:id/pages` (`section_id` for top-level, or `parent_id` for a subpage) |
+| `notes_append_to_page` | **write** | `POST /api/notes/pages/:id/append` — additive, no `rev` to manage |
+| `notes_move_page` | **write** | `POST /api/notes/pages/:id/move` (auto-manages the **notebook** `rev`, retries once on 409) |
+| `notes_update_page` | **write** | `PATCH /api/notes/pages/:id` — blind title/body/tags replace (one-time approval, **never retried** on 409) |
+| `notes_delete_page` | **write** | `DELETE /api/notes/pages/:id` — `mode` "orphan" (default) \| "cascade" (one-time approval) |
+| `notes_delete_section` | **write** | `DELETE /api/notes/sections/:id` — `mode` "block" (default) \| "cascade" (one-time approval) |
+| `notes_delete_notebook` | **write** | `DELETE /api/notes/notebooks/:id` — irreversible (one-time approval) |
 
 The PM tools drive the project-management artifact's `/api/pm/*` API (design:
 [`PM-TOOL-PLAN.md`](./PM-TOOL-PLAN.md), extended by
@@ -172,6 +201,33 @@ Attachment **upload** and all notification management are deliberately
 **not** exposed as agent tools (binary upload and notification triage stay
 human actions in the artifact UI); `pm_list_attachments` (metadata only) is
 the one read exposed for attachments.
+
+The Notes tools drive the gateway's `/api/notes/*` OneNote-style note tool
+(design: [`NOTES-TOOL-PLAN.md`](./NOTES-TOOL-PLAN.md)) — a separate artifact
+from Kanban/PM. Approval tiers (D9) are **deliberately inverted** from the
+naive "writes allow-always, deletes one-time" reading, because the risk runs
+the other way for notes: reads are auto; the additive/structural writes
+(`notes_create_notebook`, `notes_create_section`, `notes_create_page`,
+`notes_append_to_page`, `notes_move_page`) are approvable **allow-always**;
+`notes_update_page` (a blind full title/body/tags replace) is in
+`ONE_TIME_TOOLS` — re-approved on **every** call, because an allow-always
+overwrite could silently destroy pages of human writing, whereas
+`notes_append_to_page` is server-atomic and additive so it **cannot clobber**
+and carries no `rev`. The three deletes (`notes_delete_page`,
+`notes_delete_section`, `notes_delete_notebook`) are also one-time. Two
+**independent** revisions gate concurrency: `notes_move_page` manages the
+**notebook** (structural) `rev` itself and retries once on a `409` — safe,
+because a move is a re-derived splice, mirroring `kanban_move`/`pm_move_task`.
+`notes_update_page` manages the **page** (body) `rev` itself but **never
+retries** a `409` — a body `PATCH` is a blind overwrite, so a stale write is
+surfaced back to the model as an error (naming the current server page)
+instead of silently discarding whatever the other writer just saved.
+**`notes_delete_page` is a deliberate divergence (D10)** from Kanban/PM's "no
+card/task-delete tool" precedent — a notebook accretes many disposable pages
+and routing every one through a human is disproportionate friction; it is
+mitigated by the one-time approval, a `mode:"orphan"` default (children are
+promoted, not cascaded), and the store's orphan-`.md` sweep leaving an
+accidental delete recoverable until the next `load()`.
 
 Calling `browser_request_handoff` again while the same chat's handoff is
 pending or active republishes that handoff state and reopens the Browser View.
@@ -209,6 +265,48 @@ alone. See [`BROWSER-HANDOFF-OPERATIONS.md`](./BROWSER-HANDOFF-OPERATIONS.md).
 
 There is no `kill_session` — destroying a session stays a human-only action in
 the UI (the gateway's single `DELETE` call site).
+
+### Virtual Computer
+
+`computer_observe` / `computer_act` / `computer_list_windows` /
+`computer_capture` are added to the tool set **only when `CUA_ENABLED=true`**
+(mirroring browser tools gated by `BROWSER_USE_PROJECT`); with CUA unset the
+model never sees them, no computer frames are emitted, and nothing else changes.
+They drive one per-chat disposable Linux (XFCE) desktop container the agent owns
+(design + decisions: [`VIRTUAL-COMPUTER.md`](./VIRTUAL-COMPUTER.md), plan:
+[`VIRTUAL-COMPUTER-REMAINING.md`](./VIRTUAL-COMPUTER-REMAINING.md)). Approval
+tiers match `browser_observe` / `browser_act`: `computer_observe` and
+`computer_list_windows` are auto-approved reads (`computer_observe` returns the
+viewport, `snapshotId`, window inventory, an indexed AT-SPI element list, and a
+bounded screenshot; `computer_list_windows` returns the window inventory +
+running apps as text, no screenshot); `computer_act` and `computer_capture` are
+writes in `ONE_TIME_TOOLS`, re-approved on **every** call (no `allow_always`, a
+forged one is coerced to a single allow). `computer_act` performs exactly one
+input — `click` / `double_click` / `right_click` / `drag` / `type_text` /
+`press_key` / `scroll` / `hotkey` — targeted by an element (`element_index` +
+`snapshot_id` from the latest observation; `click` / `double_click` /
+`right_click` / `type_text`) or by screen-absolute `x,y`. Delivery is in the
+background (no window raised or focused) **except** `double_click` /
+`right_click`, which briefly activate the target window and restore the prior
+one (the only mode the driver offers for those two on X11). `computer_capture`
+writes the current desktop screenshot to `session_id` + `path` through the
+existing session-scoped gateway `fs/upload` route. `describeCall` redacts
+`type_text` content on the approval card. Each `computer_observe`, and each successful
+`computer_act`, publishes a `computer_view` frame (bounded screenshot,
+monotonically increasing `revision`, later revisions replace earlier ones) to
+the read-only `features/computer-view/` overlay; screenshots are **never**
+written to chat JSONL history. `computer_closed` records a close tombstone at
+its `revision` so a late `computer_view` cannot reopen the view. Teardown is
+total on Stop / disconnect / shutdown.
+
+Desktop egress: by default the container has whatever route its docker network
+gives it; `CUA_EGRESS_NETWORK` on an `--internal` network is the only mode with
+a hard zero-egress guarantee (the desktop then cannot browse). Opt-in
+`CUA_PROXY_BROWSING=true` (mutually exclusive with the above) routes
+proxy-env-aware tools + policy-driven Firefox through the same public-only
+SafeProxy the browser tools use — **not a containment boundary** (the container
+keeps a default route off-box; non-proxy-aware apps egress freely). See
+`docs/VIRTUAL-COMPUTER.md` "Proxied browsing".
 
 ## Safety
 
