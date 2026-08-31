@@ -45,6 +45,12 @@
  * proxy env/policy egresses freely. `--internal` (`CUA_EGRESS_NETWORK`, which
  * is mutually exclusive with this) stays the only mode with a hard guarantee.
  * See docs/VIRTUAL-COMPUTER.md "Proxied browsing".
+ *
+ * The per-runtime proxy is served on the agent-service event loop (like
+ * browser-runtime.ts's), but it serves a container that keeps running
+ * independently — so any SYNCHRONOUS blocking in this process stalls the
+ * container's egress mid-request. Every path that talks to the container here
+ * (`dockerCapture` / `execInContainer`) is async; keep it that way.
  */
 import {
   spawn as nodeSpawn,
