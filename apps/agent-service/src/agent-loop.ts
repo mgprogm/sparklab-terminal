@@ -17,8 +17,14 @@ import type {
   AgentModel,
   AgentReasoningEffort,
   AgentWsServerMessage,
+  CodexRunResponse,
 } from "@sparklab/shared-types";
-import { DEFAULT_MODEL, resolveModel, type ResolvedModel } from "./azure.js";
+import {
+  DEFAULT_MODEL,
+  isCodexCliModel,
+  resolveModel,
+  type ResolvedModel,
+} from "./azure.js";
 import { CAPS, config } from "./config.js";
 import { ApprovalManager } from "./approvals.js";
 import { appendMessages, loadChat, reconstructTranscript } from "./history.js";
@@ -39,7 +45,7 @@ import {
   type ComputerTarget,
 } from "./computer-runtime.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
-import { gateway } from "./gateway-client.js";
+import { gateway, GatewayError } from "./gateway-client.js";
 
 type Send = (frame: AgentWsServerMessage) => void;
 
@@ -209,6 +215,15 @@ export class AgentLoop {
       });
       return;
     }
+
+    // "Codex CLI" is not a chat-completions model — route the whole turn to the
+    // Codex CLI via the gateway (Option B). It has its own agentic loop and
+    // tools; the agent-service tool set is not offered for these turns.
+    if (isCodexCliModel(model)) {
+      await this.runCodexProviderTurn(text, activeSessionId);
+      return;
+    }
+
     const resolved = resolveModel(model);
     if (!resolved) {
       this.send({
@@ -416,6 +431,134 @@ export class AgentLoop {
           await this.appendToolResult(tc.id, resultContent, tc.name);
         }
       }
+    } catch (err) {
+      if (!(err instanceof Error && err.name === "AbortError")) {
+        this.send({
+          type: "error",
+          message:
+            err instanceof Error ? err.message : "unexpected agent error",
+        });
+      }
+    } finally {
+      this.running = false;
+      this.abort = null;
+      this.send({ type: "status", state: "idle" });
+    }
+  }
+
+  /**
+   * One turn when the selected "model" is the Codex CLI (Option B). Each user
+   * message is handed to `codex exec` (non-interactive) through the gateway,
+   * rooted at the selected terminal's cwd. Mirrors `run_codex`: one individual
+   * approval per turn (never allow-always), and the sandbox `mode` is the real
+   * write boundary. Turns are independent — no prior chat is sent to Codex.
+   * Persists a plain user + assistant pair so replay/recovery need no new shape.
+   */
+  private async runCodexProviderTurn(
+    text: string,
+    activeSessionId?: string,
+  ): Promise<void> {
+    if (!config.codex.providerEnabled) {
+      this.send({
+        type: "error",
+        message: "The Codex CLI provider is not enabled on this service.",
+      });
+      return;
+    }
+    const sessionId = activeSessionId;
+    if (!sessionId) {
+      this.send({
+        type: "error",
+        message:
+          "Codex CLI needs a target terminal session — select or open one, then send again.",
+      });
+      return;
+    }
+
+    this.running = true;
+    this.abort = new AbortController();
+    const signal = this.abort.signal;
+    const mode = config.codex.providerMode;
+
+    try {
+      const userMsg: ChatCompletionMessageParam = {
+        role: "user",
+        content: text,
+      };
+      this.history.push(userMsg);
+      await appendMessages(this.chatId, [userMsg]);
+
+      const summary = `run Codex [${mode}]: ${
+        text.length > 120 ? `${text.slice(0, 120)}…` : text
+      }`;
+      const publicInput = { session_id: sessionId, prompt: text, mode };
+
+      // Per-turn one-time approval, reusing the `run_codex` tool identity so the
+      // approval card + policy treat it identically.
+      this.send({ type: "status", state: "awaiting_approval" });
+      let approvalRequestId = "";
+      const behavior = await this.approvals.request(
+        "run_codex",
+        sessionId,
+        (requestId) => {
+          approvalRequestId = requestId;
+          this.send({
+            type: "approval_request",
+            requestId,
+            tool: "run_codex",
+            sessionId,
+            summary,
+            input: publicInput,
+          });
+        },
+        false, // one-time — no persistent allow-always for a Codex run
+        (requestId, resolvedBehavior) =>
+          this.send({
+            type: "approval_resolved",
+            requestId,
+            behavior: resolvedBehavior,
+          }),
+      );
+
+      if (signal.aborted) return;
+
+      if (behavior === "deny") {
+        const timedOut = this.approvals.wasTimedOut(approvalRequestId);
+        const notice = timedOut
+          ? "The Codex run was not approved within the 120-second window (no response), so nothing ran. Send again if you'd like to retry."
+          : "You declined the Codex run, so nothing ran.";
+        const assistantMsg: ChatCompletionMessageParam = {
+          role: "assistant",
+          content: notice,
+        };
+        this.history.push(assistantMsg);
+        await appendMessages(this.chatId, [assistantMsg]);
+        this.send({ type: "assistant_message", text: notice });
+        return;
+      }
+
+      this.send({ type: "status", state: "acting" });
+      let reply: string;
+      try {
+        const result = await gateway.runCodex(
+          sessionId,
+          { prompt: text, mode },
+          { signal },
+        );
+        reply = formatCodexProviderReply(result);
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") throw err;
+        reply = codexProviderErrorMessage(err);
+      }
+
+      if (signal.aborted) return;
+      const assistantMsg: ChatCompletionMessageParam = {
+        role: "assistant",
+        content: reply,
+      };
+      this.history.push(assistantMsg);
+      await appendMessages(this.chatId, [assistantMsg]);
+      this.send({ type: "assistant_message", text: reply });
     } catch (err) {
       if (!(err instanceof Error && err.name === "AbortError")) {
         this.send({
@@ -731,6 +874,38 @@ export function sanitizePersistedToolResult(
   if (tool.startsWith("computer_"))
     return "[computer result omitted from durable history]";
   return content;
+}
+
+/**
+ * Render a Codex CLI run result as the assistant reply for a Codex-provider
+ * turn. A short italic status line (mode / exit / duration / truncation) sits
+ * above Codex's own output so the human sees what ran without a tool card.
+ * Pure — unit-tested in agent-loop.test.ts.
+ */
+export function formatCodexProviderReply(result: CodexRunResponse): string {
+  const seconds = (result.durationMs / 1000).toFixed(1);
+  const exit =
+    result.exitCode === null ? "exit unknown" : `exit ${result.exitCode}`;
+  const meta = [
+    `Codex CLI · ${result.mode} · ${exit} · ${seconds}s`,
+    result.truncated ? " · output truncated" : "",
+  ].join("");
+  const body = result.output.trim() || "(Codex produced no output.)";
+  return `_${meta}_\n\n${body}`;
+}
+
+/** Map a gateway failure from a Codex-provider run to a human-readable reply. */
+function codexProviderErrorMessage(err: unknown): string {
+  if (err instanceof GatewayError) {
+    if (err.status === 503)
+      return "Codex CLI is not available on that server — it may not be installed, or the CLI could not start.";
+    if (err.status === 504)
+      return "Codex CLI did not finish before the time limit. Try a smaller, more specific task.";
+    return `The Codex run failed (${err.status}): ${err.message}`;
+  }
+  return `The Codex run failed: ${
+    err instanceof Error ? err.message : String(err)
+  }`;
 }
 
 function parseBrowserAction(args: ToolArgs): BrowserAction | string {

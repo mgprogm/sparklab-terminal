@@ -26,6 +26,8 @@ Browser chat panel ──WS /agent (JSON)──► agent-service ──REST─�
 | `ARK_DEEPSEEK_DEPLOYMENT`                     | optional Ark id for `deepseek-v4-pro-byteplus` (default `deepseek-v4-pro-260425`)                                               |
 | `ARK_DEEPSEEK_V32_DEPLOYMENT`                 | optional Ark id for `deepseek-v32-byteplus` (default `deepseek-v3-2-251201`)                                                    |
 | `ARK_GLM_DEPLOYMENT`                          | optional Ark id for `glm-byteplus` (default `glm-4-7-251222`)                                                                   |
+| `CODEX_PROVIDER_ENABLED`                      | optional; when `true`, adds the `codex-cli` entry to the composer (routes each turn to the Codex CLI, not a chat model)         |
+| `CODEX_PROVIDER_MODE`                         | sandbox policy for `codex-cli` turns: `workspace-write` (default) or `read-only`                                                |
 | `AGENT_PORT`                                  | listen port (default 3009)                                                                                                      |
 | `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                                                                                             |
 | `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                                                                                        |
@@ -43,6 +45,34 @@ optional `*-byteplus` ids (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`,
 auth, no `reasoning_effort` — the composer hides the effort control for any
 `-byteplus` model; DeepSeek also gets `thinking` disabled). A first-turn empty
 reply surfaces an `error` frame rather than silently ending the turn.
+
+### `codex-cli` — the Codex CLI as a picker entry (Option B)
+
+`codex-cli` is **not** a chat-completions model. It appears in the composer only
+when the service is started with `CODEX_PROVIDER_ENABLED=true`, and the composer
+hides the reasoning-effort control for it (keyed on the exact id). Picking it
+changes what a user turn does:
+
+- The loop **does not** call any model or offer the agent-service tool set.
+  Instead it hands the user's message text to the gateway's
+  `POST /api/sessions/:id/codex` route (the same route `run_codex` uses), rooted
+  at the **selected terminal's** working directory, on that terminal's server.
+- `mode` is `CODEX_PROVIDER_MODE` (`workspace-write` default, or `read-only`),
+  clamped by the gateway to those two safe values — danger modes are unreachable.
+- Every turn is **approved individually**, reusing the `run_codex` approval card
+  identity (no persistent allow-always). Deny / 120 s timeout runs nothing and
+  posts a short notice.
+- Turns are **independent**: Codex is given only the current message, never the
+  prior chat. Codex runs its own agentic loop and tools inside its sandbox.
+- The turn is **non-streaming** — a `status: acting` frame, then one
+  `assistant_message` whose text is a one-line italic status header (mode / exit
+  code / duration / truncation) above Codex's own output. It persists as a plain
+  user + assistant pair, so replay and run-recovery need no new message shape.
+- `503` from the route → "Codex CLI is not available on that server"; `504` →
+  "did not finish before the time limit". No target terminal → an `error` frame.
+- Codex's credentials come from the **gateway host's** environment
+  (`OPENAI_*` / `CODEX_*` or `codex login`), exactly as for `run_codex` — this
+  service never stores or forwards them beyond the existing Azure-config headers.
 
 Each WebSocket includes `terminalSessionId` in its query string. With no other
 chat selector, the service resumes the newest chat linked to that terminal. An

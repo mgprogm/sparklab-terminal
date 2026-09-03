@@ -98,6 +98,13 @@ export const AgentModelSchema = z.enum([
   "deepseek-v4-pro-byteplus",
   "deepseek-v32-byteplus",
   "glm-byteplus",
+  // Not a chat-completions model at all: picking this routes each user turn to
+  // the Codex CLI coding agent (via the gateway's `POST /api/sessions/:id/codex`
+  // route), rooted at the selected terminal's cwd. Listed only when the agent
+  // service is started with CODEX_PROVIDER_ENABLED=true. Has no reasoning_effort
+  // (the composer keys that off the exact id), each turn is approved like
+  // `run_codex`, and turns are independent — Codex does not see earlier chat.
+  "codex-cli",
 ]);
 export type AgentModel = z.infer<typeof AgentModelSchema>;
 

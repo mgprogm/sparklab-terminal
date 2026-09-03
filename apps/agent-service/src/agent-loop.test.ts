@@ -9,6 +9,7 @@ const {
   sanitizePersistedToolArgs,
   sanitizePersistedToolResult,
   parseComputerAction,
+  formatCodexProviderReply,
 } = await import("./agent-loop.js");
 
 test("browser arguments omit typed secrets and URL tokens from history", () => {
@@ -89,6 +90,34 @@ test("computer_* results (screenshot + AX tree) never become durable tool result
     sanitizePersistedToolResult("computer_act", content),
     "[computer result omitted from durable history]",
   );
+});
+
+test("formatCodexProviderReply: status line above Codex output", () => {
+  const reply = formatCodexProviderReply({
+    mode: "workspace-write",
+    cwd: "/srv/app",
+    exitCode: 0,
+    output: "  patched src/index.ts  \n",
+    truncated: false,
+    durationMs: 12_340,
+  });
+  assert.match(reply, /^_Codex CLI · workspace-write · exit 0 · 12\.3s_\n\n/);
+  assert.match(reply, /patched src\/index\.ts/);
+  assert.doesNotMatch(reply, /truncated/);
+});
+
+test("formatCodexProviderReply: null exit, truncation, and empty output", () => {
+  const reply = formatCodexProviderReply({
+    mode: "read-only",
+    cwd: "/srv/app",
+    exitCode: null,
+    output: "   ",
+    truncated: true,
+    durationMs: 500,
+  });
+  assert.match(reply, /exit unknown/);
+  assert.match(reply, /output truncated/);
+  assert.match(reply, /\(Codex produced no output\.\)/);
 });
 
 test("parseComputerAction: element target preferred, x,y fallback, element rejected for press_key/scroll (M3.1)", () => {
