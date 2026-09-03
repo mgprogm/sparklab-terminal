@@ -11,6 +11,7 @@ process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 delete process.env.GPT56TERRA_DEPLOYMENT;
 delete process.env.GPT56LUNA_DEPLOYMENT;
 delete process.env.ARK_API_KEY;
+delete process.env.CODEX_PROVIDER_ENABLED;
 
 const { resolveModel, availableModels } = await import("./azure.js");
 
@@ -37,4 +38,8 @@ test("a configured Azure deployment resolves to the azure branch", () => {
 test("an unconfigured Azure deployment does not resolve", () => {
   assert.equal(resolveModel("gpt-5.6-luna"), undefined);
   assert.ok(!availableModels().includes("gpt-5.6-luna"));
+});
+
+test("codex-cli is hidden without CODEX_PROVIDER_ENABLED", () => {
+  assert.ok(!availableModels().includes("codex-cli"));
 });

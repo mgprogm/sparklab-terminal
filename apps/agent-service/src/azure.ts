@@ -64,6 +64,14 @@ const arkModels: {
   },
 ];
 
+/**
+ * `codex-cli` is not a chat-completions model — it has no provider client and
+ * `resolveModel` returns undefined for it. The agent loop checks this BEFORE
+ * calling `resolveModel` and takes a dedicated gateway-Codex path instead.
+ */
+export const isCodexCliModel = (model: AgentModel): boolean =>
+  model === "codex-cli";
+
 // Prefer BytePlus Ark's DeepSeek V4 Pro as the default when it's configured
 // (independent of the Azure GPT-5.6 deployments, which have had outages);
 // fall back to the Azure default on installs without ARK_API_KEY set.
@@ -77,6 +85,7 @@ export const availableModels = (): AgentModel[] => {
     (model) => deployments[model] !== undefined,
   );
   if (byteplus) out.push(...arkModels.map((m) => m.id));
+  if (config.codex.providerEnabled) out.push("codex-cli");
   return out;
 };
 

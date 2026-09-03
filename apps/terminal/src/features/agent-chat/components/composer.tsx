@@ -43,6 +43,7 @@ const MODEL_LABELS: Record<AgentModel, string> = {
   "deepseek-v4-pro-byteplus": "DeepSeek V4 Pro",
   "deepseek-v32-byteplus": "DeepSeek V3.2",
   "glm-byteplus": "GLM-4.7",
+  "codex-cli": "Codex CLI",
 };
 
 /** Provider shown under the model name in the picker. */
@@ -53,11 +54,15 @@ const MODEL_PROVIDER: Record<AgentModel, string> = {
   "deepseek-v4-pro-byteplus": "BytePlus Ark",
   "deepseek-v32-byteplus": "BytePlus Ark",
   "glm-byteplus": "BytePlus Ark",
+  "codex-cli": "OpenAI Codex",
 };
 
-/** Reasoning effort is a GPT-5.6 control; BytePlus Ark models ignore it. */
+/**
+ * Reasoning effort is a GPT-5.6 control; BytePlus Ark models ignore it, and
+ * "Codex CLI" is not a chat-completions model at all.
+ */
 const modelSupportsEffort = (model: AgentModel): boolean =>
-  !model.endsWith("-byteplus");
+  !model.endsWith("-byteplus") && model !== "codex-cli";
 
 const EFFORT_LABELS: Record<AgentReasoningEffort, string> = {
   none: "None",

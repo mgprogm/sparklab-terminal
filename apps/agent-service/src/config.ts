@@ -146,6 +146,24 @@ export const config = {
     ),
     glm: optional("ARK_GLM_DEPLOYMENT", "glm-4-7-251222"),
   },
+  // Optional "Codex CLI" model-picker entry. When enabled, choosing it in the
+  // Agent chat routes each user turn to the Codex CLI (via the gateway's
+  // `POST /api/sessions/:id/codex` route) instead of a chat-completions model.
+  // `mode` is the sandbox policy every turn runs under, clamped to the two safe
+  // values (danger modes are unreachable through the gateway route regardless).
+  // Default `workspace-write` because the intent of the entry is "let Codex do
+  // work"; every turn is still individually approved, like `run_codex`.
+  codex: {
+    providerEnabled: optional("CODEX_PROVIDER_ENABLED", "false") === "true",
+    providerMode: (() => {
+      const m = optional("CODEX_PROVIDER_MODE", "workspace-write");
+      if (m !== "read-only" && m !== "workspace-write")
+        throw new Error(
+          'CODEX_PROVIDER_MODE must be "read-only" or "workspace-write"',
+        );
+      return m;
+    })() as "read-only" | "workspace-write",
+  },
   port: Number(optional("AGENT_PORT", "3009")),
   host: optional("AGENT_HOST", "127.0.0.1"),
   gatewayUrl: optional("GATEWAY_URL", "http://127.0.0.1:3007").replace(

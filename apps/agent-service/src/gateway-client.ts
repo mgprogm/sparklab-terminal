@@ -270,6 +270,7 @@ class GatewayClient {
   async runCodex(
     sessionId: string,
     body: { prompt: string; mode?: CodexSandboxMode },
+    opts: { signal?: AbortSignal } = {},
   ): Promise<CodexRunResponse> {
     // Codex runs as a child of the gateway, not this service, so it would not
     // otherwise see the Azure credential already loaded by agent-service.
@@ -289,6 +290,7 @@ class GatewayClient {
           ...azureHeaders,
         },
         body: JSON.stringify(body),
+        signal: opts.signal,
       }),
     );
   }
