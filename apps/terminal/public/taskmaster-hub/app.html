@@ -129,8 +129,31 @@
     padding: 1px 8px;
     white-space: nowrap;
   }
+  .chip.stale {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
   .readonly {
     color: var(--mute);
+  }
+  #task-filter {
+    max-width: 200px;
+  }
+  .exec-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .exec-row {
+    align-items: center;
+    color: var(--mute);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 12px;
+    gap: 6px;
+  }
+  .exec-row.stale {
+    color: var(--danger);
   }
   .banner {
     background: rgba(224, 122, 106, 0.12);
@@ -474,6 +497,13 @@
   <span id="current-tag" class="tag"></span>
   <span id="loading-indicator" class="loading-indicator" role="status"></span>
   <button id="switch-tag" class="btn" type="button">Switch tag</button>
+  <input
+    id="task-filter"
+    class="field"
+    type="search"
+    placeholder="Filter tasks…"
+    autocomplete="off"
+  />
   <span class="grow"></span>
   <button id="add-project" class="btn btn-primary" type="button">
     Add project
@@ -562,6 +592,7 @@
     hasLoadedProjectData: false,
     pollTimer: null,
     otherFilter: "collapsed",
+    taskFilter: "",
   };
   var STATUS = [
     "pending",
@@ -577,6 +608,7 @@
     removeProject: document.getElementById("remove-project"),
     currentTag: document.getElementById("current-tag"),
     switchTag: document.getElementById("switch-tag"),
+    taskFilter: document.getElementById("task-filter"),
     addProject: document.getElementById("add-project"),
     projectForm: document.getElementById("project-form"),
     projectName: document.getElementById("project-name"),
@@ -690,6 +722,47 @@
     el.content.setAttribute("aria-busy", String(refreshing));
   }
 
+  var HUMAN_AGENT_ID = "human";
+  // Matches the gateway's documented default (TASKMASTER_CLAIM_TTL_MS); not
+  // surfaced by the API today, so this is a display-only approximation.
+  var CLAIM_TTL_MS_CLIENT = 30 * 60 * 1000;
+  function findExecution(taskId) {
+    var runs = (state.overview && state.overview.executions) || [];
+    return runs.find(function (r) {
+      return String(r.taskId) === String(taskId);
+    });
+  }
+  function executionLabel(run) {
+    return (
+      (run.agentRole || "Developer") +
+      " · " +
+      run.agentName +
+      " · " +
+      (run.agentTool || "Agent Chat") +
+      " · " +
+      run.status
+    );
+  }
+  function formatElapsed(ms) {
+    if (ms < 60000) return "just now";
+    var m = Math.floor(ms / 60000);
+    if (m < 60) return m + "m";
+    return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  }
+  function isStaleClaim(run) {
+    return Date.now() - run.claimedAt > CLAIM_TTL_MS_CLIENT * 0.8;
+  }
+  function setPending(btn, label) {
+    if (btn.dataset.originalText === undefined)
+      btn.dataset.originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = label;
+  }
+  function clearPending(btn) {
+    if (btn.dataset.originalText !== undefined)
+      btn.textContent = btn.dataset.originalText;
+  }
+
   function renderProjectSelect() {
     el.projectSelect.textContent = "";
     if (!state.projects.length) {
@@ -719,6 +792,7 @@
       state.projectId && state.currentTag ? "tag: " + state.currentTag : "";
     el.currentTag.style.display = state.projectId ? "inline-flex" : "none";
     el.switchTag.disabled = !state.projectId;
+    el.taskFilter.disabled = !state.projectId;
     renderAddTaskGate();
   }
   function renderAddTaskGate() {
@@ -886,7 +960,8 @@
     }
     var hub = elem("div", "hub"),
       tasks = elem("div", "tasks"),
-      readyTasks = state.tasks.filter(isReadyTask);
+      visibleTasks = state.tasks.filter(matchesTaskFilter),
+      readyTasks = visibleTasks.filter(isReadyTask);
     tasks.appendChild(renderOverview());
     tasks.appendChild(renderNextTile());
     var statusStack = elem("div", "status-stack");
@@ -896,7 +971,7 @@
       statusStack.appendChild(
         renderBucket(
           status,
-          state.tasks.filter(function (task) {
+          visibleTasks.filter(function (task) {
             return (
               task.status === status &&
               (status !== "pending" || !isReadyTask(task))
@@ -905,7 +980,7 @@
         ),
       );
     });
-    statusStack.appendChild(renderOtherBucket());
+    statusStack.appendChild(renderOtherBucket(visibleTasks));
     tasks.appendChild(statusStack);
     hub.appendChild(tasks);
     el.content.appendChild(hub);
@@ -931,29 +1006,24 @@
     });
     box.appendChild(grid);
     var runs = (state.overview && state.overview.executions) || [];
-    if (runs.length)
-      box.appendChild(
-        elem(
-          "div",
-          "empty",
-          runs
-            .map(function (run) {
-              return (
-                run.taskId +
-                " · " +
-                (run.agentRole || "Developer") +
-                " · " +
-                run.agentName +
-                " · " +
-                (run.agentTool || "Agent Chat") +
-                " · " +
-                run.status
-              );
-            })
-            .join("\n"),
-        ),
-      );
-    else box.appendChild(elem("div", "empty", "No agent has claimed a task."));
+    if (runs.length) {
+      var list = elem("div", "exec-list");
+      runs.forEach(function (run) {
+        var stale = isStaleClaim(run),
+          row = elem("div", "exec-row" + (stale ? " stale" : ""));
+        row.appendChild(elem("span", "task-id", "#" + run.taskId));
+        row.appendChild(document.createTextNode(executionLabel(run)));
+        row.appendChild(
+          elem(
+            "span",
+            "chip" + (stale ? " stale" : ""),
+            formatElapsed(Date.now() - run.claimedAt),
+          ),
+        );
+        list.appendChild(row);
+      });
+      box.appendChild(list);
+    } else box.appendChild(elem("div", "empty", "No agent has claimed a task."));
     return box;
   }
   function renderNextTile() {
@@ -967,7 +1037,7 @@
       var button = elem("button", "btn btn-primary", "Set in-progress");
       button.type = "button";
       button.addEventListener("click", function () {
-        button.disabled = true;
+        setPending(button, "Updating…");
         api(
           "POST",
           projectPath(state.projectId) +
@@ -981,6 +1051,7 @@
           })
           .catch(handleMutationError)
           .finally(function () {
+            clearPending(button);
             button.disabled = false;
           });
       });
@@ -1004,6 +1075,13 @@
       state.tasks.find(function (task) {
         return String(task.id) === String(id);
       }) || null
+    );
+  }
+  function matchesTaskFilter(task) {
+    if (!state.taskFilter) return true;
+    return (
+      String(task.id).toLowerCase().indexOf(state.taskFilter) >= 0 ||
+      (task.title || "").toLowerCase().indexOf(state.taskFilter) >= 0
     );
   }
   function isReadyTask(task) {
@@ -1053,8 +1131,8 @@
       done: "Done",
     }[status] || status;
   }
-  function renderOtherBucket() {
-    var others = state.tasks.filter(function (task) {
+  function renderOtherBucket(visibleTasks) {
+    var others = visibleTasks.filter(function (task) {
       return ["deferred", "cancelled", "blocked"].indexOf(task.status) >= 0;
     });
     var section = elem("section", "bucket bucket-status"),
@@ -1136,27 +1214,23 @@
   function renderCard(task, showStatus) {
     var card = elem("article", "card"),
       meta = elem("div", "card-meta"),
-      runs = (state.overview && state.overview.executions) || [],
-      run = runs.find(function (item) {
-        return String(item.taskId) === String(task.id);
-      });
+      run = findExecution(task.id);
     meta.appendChild(elem("span", "task-id", String(task.id)));
     if (showStatus)
       meta.appendChild(elem("span", "chip status-chip", task.status));
-    if (run)
+    if (run) {
+      var stale = isStaleClaim(run);
+      meta.appendChild(
+        elem("span", "chip" + (stale ? " stale" : ""), executionLabel(run)),
+      );
       meta.appendChild(
         elem(
           "span",
-          "chip",
-          (run.agentRole || "Developer") +
-            " · " +
-            run.agentName +
-            " · " +
-            (run.agentTool || "Agent Chat") +
-            " · " +
-            run.status,
+          "chip" + (stale ? " stale" : ""),
+          formatElapsed(Date.now() - run.claimedAt),
         ),
       );
+    }
     card.appendChild(meta);
     card.appendChild(elem("div", "card-title", task.title || "Untitled task"));
     var details = elem("div", "card-meta");
@@ -1241,7 +1315,8 @@
     el.detail.appendChild(head);
     var statusSection = elem("section", "section");
     statusSection.appendChild(elem("h3", null, "Status"));
-    var select = elem("select", "field");
+    var select = elem("select", "field"),
+      statusNote = elem("span", "binary-note", "");
     STATUS.forEach(function (status) {
       var option = elem("option", null, status);
       option.value = status;
@@ -1250,6 +1325,7 @@
     });
     select.addEventListener("change", function () {
       select.disabled = true;
+      statusNote.textContent = "Updating…";
       api(
         "POST",
         projectPath(state.projectId) +
@@ -1266,10 +1342,13 @@
         .catch(handleMutationError)
         .finally(function () {
           select.disabled = false;
+          statusNote.textContent = "";
         });
     });
     statusSection.appendChild(select);
+    statusSection.appendChild(statusNote);
     el.detail.appendChild(statusSection);
+    el.detail.appendChild(renderExecutionSection(task));
     var dependencies = renderDependencies(task);
     if (dependencies) {
       var dependencySection = elem("section", "section");
@@ -1308,6 +1387,123 @@
     );
     el.detail.appendChild(section);
   }
+  function renderExecutionSection(task) {
+    var section = elem("section", "section");
+    section.appendChild(elem("h3", null, "Execution"));
+    var run = findExecution(task.id);
+    if (!run) {
+      if (["pending", "in-progress"].indexOf(task.status) < 0) {
+        section.appendChild(elem("div", "empty", "Task is not actionable."));
+        return section;
+      }
+      var claimButton = elem("button", "btn btn-primary", "Claim this task");
+      claimButton.type = "button";
+      claimButton.addEventListener("click", function () {
+        setPending(claimButton, "Claiming…");
+        api("POST", projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id) + "/claim", {
+          agentId: HUMAN_AGENT_ID,
+          agentName: "You",
+          agentRole: "Human",
+          agentTool: "Task Master Hub",
+        })
+          .then(function () {
+            return refreshProjectData();
+          })
+          .then(renderDetail)
+          .catch(function (e) {
+            if (e && e.status === 409 && e.body && e.body.code === "dependencies_unmet")
+              showBanner("This task's dependencies aren't complete yet.");
+            else handleMutationError(e);
+          })
+          .finally(function () {
+            clearPending(claimButton);
+            claimButton.disabled = false;
+          });
+      });
+      section.appendChild(claimButton);
+      return section;
+    }
+    var stale = isStaleClaim(run),
+      claimLine = elem("div", "exec-row" + (stale ? " stale" : ""));
+    claimLine.appendChild(document.createTextNode(executionLabel(run)));
+    claimLine.appendChild(
+      elem(
+        "span",
+        "chip" + (stale ? " stale" : ""),
+        formatElapsed(Date.now() - run.claimedAt),
+      ),
+    );
+    section.appendChild(claimLine);
+    if (run.agentId !== HUMAN_AGENT_ID) {
+      section.appendChild(
+        elem("div", "binary-note", "Claimed by an agent — it must release the task before you can claim it."),
+      );
+      return section;
+    }
+    var noteField = elem("textarea", "field");
+    noteField.placeholder = "Blocked note (required to mark blocked)";
+    noteField.value = run.note || "";
+    section.appendChild(noteField);
+    var actionRow = elem("div", "action-row");
+    function transition(status, button) {
+      setPending(button, "Updating…");
+      var body = { agentId: HUMAN_AGENT_ID, status: status };
+      if (status === "blocked") body.note = noteField.value.trim();
+      api(
+        "PATCH",
+        projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id) + "/execution",
+        body,
+      )
+        .then(function () {
+          return refreshProjectData();
+        })
+        .then(renderDetail)
+        .catch(function (e) {
+          if (e && e.status === 400 && e.body && e.body.error === "blocked status requires a note")
+            showBanner("Add a note before marking this task blocked.");
+          else handleMutationError(e);
+        })
+        .finally(function () {
+          clearPending(button);
+          button.disabled = false;
+        });
+    }
+    var transitions = {
+      working: [["blocked", "Mark blocked"], ["review", "Mark review"]],
+      blocked: [["working", "Mark working"]],
+      review: [["working", "Mark working"], ["blocked", "Mark blocked"]],
+    }[run.status] || [];
+    transitions.forEach(function (item) {
+      var button = elem("button", "btn", item[1]);
+      button.type = "button";
+      button.addEventListener("click", function () {
+        transition(item[0], button);
+      });
+      actionRow.appendChild(button);
+    });
+    var releaseButton = elem("button", "btn btn-danger", "Release");
+    releaseButton.type = "button";
+    releaseButton.addEventListener("click", function () {
+      setPending(releaseButton, "Releasing…");
+      api(
+        "DELETE",
+        projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id) + "/execution",
+        { agentId: HUMAN_AGENT_ID },
+      )
+        .then(function () {
+          return refreshProjectData();
+        })
+        .then(renderDetail)
+        .catch(handleMutationError)
+        .finally(function () {
+          clearPending(releaseButton);
+          releaseButton.disabled = false;
+        });
+    });
+    actionRow.appendChild(releaseButton);
+    section.appendChild(actionRow);
+    return section;
+  }
   function renderLegacyActions(task) {
     var section = elem("section", "section");
     section.appendChild(elem("h3", null, "Task Master actions"));
@@ -1334,7 +1530,7 @@
       event.preventDefault();
       var value = dependsOn.value.trim();
       if (!value || !binary) return;
-      depButton.disabled = true;
+      setPending(depButton, "Adding…");
       api("POST", projectPath(state.projectId) + "/dependencies", {
         id: task.id,
         dependsOn: value,
@@ -1356,6 +1552,7 @@
           else handleMutationError(e);
         })
         .finally(function () {
+          clearPending(depButton);
           depButton.disabled = !isBinary();
         });
     });
@@ -1372,7 +1569,7 @@
     expand.disabled = !binary;
     expand.title = binary ? "" : "Requires the task-master binary";
     expand.addEventListener("click", function () {
-      expand.disabled = true;
+      setPending(expand, "Expanding…");
       var body = {};
       if (research.checked) body.research = true;
       api(
@@ -1390,6 +1587,7 @@
         })
         .catch(handleMutationError)
         .finally(function () {
+          clearPending(expand);
           expand.disabled = !isBinary();
         });
     });
@@ -1410,7 +1608,7 @@
       event.preventDefault();
       var value = prompt.value.trim();
       if (!value || !binary) return;
-      promptButton.disabled = true;
+      setPending(promptButton, "Updating…");
       api(
         "PATCH",
         projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id),
@@ -1424,6 +1622,7 @@
         })
         .catch(handleMutationError)
         .finally(function () {
+          clearPending(promptButton);
           promptButton.disabled = !isBinary();
         });
     });
@@ -1434,6 +1633,10 @@
   el.projectSelect.addEventListener("change", function () {
     if (el.projectSelect.value)
       selectProject(el.projectSelect.value, false).catch(handleError);
+  });
+  el.taskFilter.addEventListener("input", function () {
+    state.taskFilter = el.taskFilter.value.trim().toLowerCase();
+    renderContent();
   });
   el.addProject.addEventListener("click", function () {
     el.projectForm.classList.add("show");
@@ -1531,7 +1734,7 @@
         .filter(Boolean),
       submit = el.addTaskForm.querySelector('button[type="submit"]');
     if (!prompt || !isBinary()) return;
-    submit.disabled = true;
+    setPending(submit, "Adding…");
     var body = {
       prompt: prompt,
       ...(priority ? { priority: priority } : {}),
@@ -1547,6 +1750,7 @@
       })
       .catch(handleMutationError)
       .finally(function () {
+        clearPending(submit);
         submit.disabled = !isBinary();
       });
   });
