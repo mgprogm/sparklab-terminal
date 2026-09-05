@@ -222,6 +222,43 @@
   #add-task-panel.hidden {
     display: none;
   }
+  #rollup-panel {
+    align-items: center;
+    border-bottom: 1px solid var(--hairline);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px;
+  }
+  #rollup-panel.hidden {
+    display: none;
+  }
+  .rollup-strip {
+    border-bottom: 1px solid var(--hairline);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px 16px;
+  }
+  .rollup-strip.hidden {
+    display: none;
+  }
+  .rollup-row {
+    align-items: center;
+    cursor: pointer;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .rollup-row:hover .rollup-name {
+    color: var(--ink);
+  }
+  .rollup-name {
+    color: var(--body);
+    font-size: 13px;
+    font-weight: 500;
+    min-width: 140px;
+  }
   #content {
     display: flex;
     flex: 1 1 auto;
@@ -665,6 +702,16 @@
     Updating…
   </span>
 </div>
+<div id="rollup-panel" class="hidden">
+  <button id="rollup-refresh" class="btn" type="button">
+    Refresh project rollup
+  </button>
+  <span id="rollup-loading" class="loading-indicator" role="status">
+    <span class="loading-spinner"></span>
+    Refreshing…
+  </span>
+</div>
+<div id="rollup-strip" class="rollup-strip hidden"></div>
 <div id="content"></div>
 
 <div id="detail-overlay" class="overlay">
@@ -697,6 +744,8 @@
     bulkTargetStatus: "in-progress",
     bulkRunning: false,
     bulkResults: null,
+    rollup: null,
+    rollupRunning: false,
   };
   var STATUS = [
     "pending",
@@ -732,6 +781,10 @@
     addTaskCancel: document.getElementById("add-task-cancel"),
     banner: document.getElementById("banner"),
     loadingIndicator: document.getElementById("loading-indicator"),
+    rollupPanel: document.getElementById("rollup-panel"),
+    rollupRefresh: document.getElementById("rollup-refresh"),
+    rollupLoading: document.getElementById("rollup-loading"),
+    rollupStrip: document.getElementById("rollup-strip"),
     content: document.getElementById("content"),
     detailOverlay: document.getElementById("detail-overlay"),
     detail: document.getElementById("detail"),
@@ -867,6 +920,11 @@
   }
 
   function renderProjectSelect() {
+    el.rollupPanel.classList.toggle("hidden", !state.projects.length);
+    if (!state.projects.length) {
+      state.rollup = null;
+      renderRollupStrip();
+    }
     el.projectSelect.textContent = "";
     if (!state.projects.length) {
       var none = elem("option", null, "No projects");
@@ -889,6 +947,72 @@
         option.style.color = "#aea69c";
       el.projectSelect.appendChild(option);
     });
+  }
+  function renderRollupStrip() {
+    el.rollupLoading.classList.toggle("show", state.rollupRunning);
+    el.rollupRefresh.disabled = state.rollupRunning;
+    el.rollupStrip.textContent = "";
+    if (!state.rollup) {
+      el.rollupStrip.classList.add("hidden");
+      return;
+    }
+    el.rollupStrip.classList.remove("hidden");
+    state.rollup.forEach(function (entry) {
+      var row = elem("div", "rollup-row");
+      row.appendChild(elem("span", "rollup-name", entry.name));
+      if (entry.loading) {
+        row.appendChild(elem("span", "loading-spinner"));
+      } else if (entry.error) {
+        row.appendChild(elem("span", "chip stale", entry.error));
+      } else {
+        var c = entry.counts || {};
+        [
+          ["ready", "ready"],
+          ["inProgress", "in progress"],
+          ["blocked", "blocked"],
+          ["done", "done"],
+        ].forEach(function (item) {
+          row.appendChild(
+            elem("span", "chip", (c[item[0]] || 0) + " " + item[1]),
+          );
+        });
+      }
+      row.addEventListener("click", function () {
+        if (entry.id === state.projectId) return;
+        selectProject(entry.id, false).catch(handleError);
+      });
+      el.rollupStrip.appendChild(row);
+    });
+  }
+  async function refreshRollup() {
+    if (state.rollupRunning || !state.projects.length) return;
+    state.rollupRunning = true;
+    state.rollup = state.projects.map(function (project) {
+      return {
+        id: project.id,
+        name: project.name || project.path,
+        loading: true,
+        counts: null,
+        error: null,
+      };
+    });
+    renderRollupStrip();
+    await Promise.all(
+      state.rollup.map(function (entry) {
+        return api("GET", projectPath(entry.id) + "/overview")
+          .then(function (data) {
+            entry.loading = false;
+            entry.counts = (data && data.counts) || {};
+          })
+          .catch(function (e) {
+            entry.loading = false;
+            entry.error = (e && e.message) || "Failed to load";
+          })
+          .finally(renderRollupStrip);
+      }),
+    );
+    state.rollupRunning = false;
+    renderRollupStrip();
   }
   function renderTag() {
     el.currentTag.textContent =
@@ -1896,6 +2020,9 @@
   el.taskFilter.addEventListener("input", function () {
     state.taskFilter = el.taskFilter.value.trim().toLowerCase();
     renderContent();
+  });
+  el.rollupRefresh.addEventListener("click", function () {
+    void refreshRollup();
   });
   el.addProject.addEventListener("click", function () {
     el.projectForm.classList.add("show");

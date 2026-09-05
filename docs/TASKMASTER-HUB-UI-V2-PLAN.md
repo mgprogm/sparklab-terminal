@@ -217,6 +217,16 @@ here.
 
 - **Manual cross-project rollup strip** (D4): counts per registered
   project, fetched only on an explicit refresh action, never polled.
+  **Built and verified (2026-09-06).** A static `#rollup-panel` (outside
+  `#content`, so it isn't touched by the 5s poll) holds a "Refresh project
+  rollup" button; clicking it fires `GET /overview` for every registered
+  project in parallel (`Promise.all`, safe here since these are reads, not
+  the bulk feature's writes) and renders one row per project with live
+  per-row loading/error state as each resolves independently — one
+  project's failure never blocks the others. Clicking a row switches the
+  active project (`selectProject`). Verified live with 3 projects (2 real
+  success rows + 1 forced-failure row rendering its own error chip without
+  affecting the other two) and the click-to-switch behavior.
 - **Sequential bulk status-change queue** (D3): multi-select within a
   bucket, apply, a visible per-item progress list — built entirely on the
   existing single-task status route, no new backend endpoint. **Built and
