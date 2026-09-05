@@ -167,12 +167,28 @@
     display: block;
   }
   .loading-indicator {
+    align-items: center;
     color: var(--mute);
     display: none;
     font-size: 12px;
+    gap: 6px;
   }
   .loading-indicator.show {
-    display: inline;
+    display: inline-flex;
+  }
+  .loading-spinner {
+    animation: spin 0.7s linear infinite;
+    border: 2px solid var(--hairline);
+    border-radius: 50%;
+    border-top-color: var(--body);
+    flex: none;
+    height: 13px;
+    width: 13px;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .project-form,
   .tag-form {
@@ -495,7 +511,6 @@
     Remove project
   </button>
   <span id="current-tag" class="tag"></span>
-  <span id="loading-indicator" class="loading-indicator" role="status"></span>
   <button id="switch-tag" class="btn" type="button">Switch tag</button>
   <input
     id="task-filter"
@@ -566,6 +581,11 @@
     <button class="btn btn-primary" type="submit">Add task</button>
     <button id="add-task-cancel" class="btn" type="button">Cancel</button>
   </form>
+  <span class="grow"></span>
+  <span id="loading-indicator" class="loading-indicator" role="status">
+    <span class="loading-spinner"></span>
+    Updating…
+  </span>
 </div>
 <div id="content"></div>
 
@@ -717,7 +737,6 @@
   }
   function setRefreshState(refreshing) {
     state.refreshing = refreshing;
-    el.loadingIndicator.textContent = refreshing ? "Updating…" : "";
     el.loadingIndicator.classList.toggle("show", refreshing);
     el.content.setAttribute("aria-busy", String(refreshing));
   }
