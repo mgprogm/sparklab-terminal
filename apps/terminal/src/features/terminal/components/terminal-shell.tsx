@@ -34,6 +34,7 @@ import {
   Bot,
   FolderTree,
   Globe2,
+  ListChecks,
   Menu,
   Monitor,
   NotebookText,
@@ -53,6 +54,7 @@ import { PmDialog } from "./pm-dialog";
 import { SessionList } from "./session-list";
 import { SessionSidebar } from "./session-sidebar";
 import { SettingsDialog } from "./settings-dialog";
+import { TaskmasterHubDialog } from "./taskmaster-hub-dialog";
 import { TerminalFooter } from "./terminal-footer";
 import { TerminalGrid } from "./terminal-grid";
 import { TerminalSwitcher } from "./terminal-switcher";
@@ -131,6 +133,8 @@ export function TerminalShell() {
     setMunderDifflinOpen,
     notesOpen,
     setNotesOpen,
+    taskmasterHubOpen,
+    setTaskmasterHubOpen,
   } = useTerminalStore();
 
   // Agent panel open state lives in the agent-chat store (persisted there).
@@ -214,6 +218,7 @@ export function TerminalShell() {
   useUrlFlagSync("agentic", agenticOpen, setAgenticOpen);
   useUrlFlagSync("munder-difflin", munderDifflinOpen, setMunderDifflinOpen);
   useUrlFlagSync("notes", notesOpen, setNotesOpen);
+  useUrlFlagSync("taskmaster", taskmasterHubOpen, setTaskmasterHubOpen);
 
   // ---- "Active session vanished → fall back" (grid-aware, D7) ----
   // Decision lives in resolvePaneSessions (pure, unit-tested) — the
@@ -653,6 +658,21 @@ export function TerminalShell() {
             </TooltipTrigger>
             <TooltipContent>Notes</TooltipContent>
           </Tooltip>
+          {/* Task Master Hub is gateway-global too — always enabled. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0"
+                aria-label="Task Master Hub"
+                onClick={() => setTaskmasterHubOpen(true)}
+              >
+                <ListChecks className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Task Master Hub</TooltipContent>
+          </Tooltip>
           {/* Munder Difflin header button is disabled/hidden — the viewer is
               still reachable via the ?munder-difflin URL flag. */}
           {browserView && !browserVisible && (
@@ -798,6 +818,11 @@ export function TerminalShell() {
       {/* Project management modal — gateway-global, not session-scoped.
           Mounted once; open state lives in the store (deep-linked via `?pm`). */}
       <PmDialog open={pmOpen} onOpenChange={setPmOpen} />
+
+      <TaskmasterHubDialog
+        open={taskmasterHubOpen}
+        onOpenChange={setTaskmasterHubOpen}
+      />
 
       {/* Agentic AI Creator modal — gateway-global (D8), not session-scoped.
           Mounted once; open state lives in the store (deep-linked via

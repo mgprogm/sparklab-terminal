@@ -78,6 +78,16 @@ export const WRITE_TOOLS = new Set([
   "notes_delete_page",
   "notes_delete_section",
   "notes_delete_notebook",
+  // Task Master Hub writes (D7 in docs/TASKMASTER-HUB-PLAN.md). set_status and
+  // add_dependency are routine/low-blast-radius and may be allowed-always;
+  // add_task/update_task/expand additionally invoke task-master's own AI
+  // provider and can rewrite substantial task content — same risk class as
+  // run_codex, coerced one-time.
+  "taskmaster_set_status",
+  "taskmaster_add_dependency",
+  "taskmaster_add_task",
+  "taskmaster_update_task",
+  "taskmaster_expand",
 ]);
 
 /**
@@ -118,6 +128,12 @@ export const ONE_TIME_TOOLS = new Set([
   "notes_delete_page",
   "notes_delete_section",
   "notes_delete_notebook",
+  // Task Master Hub AI-mutation writes invoke task-master's own provider and
+  // can rewrite substantial task content — same risk class as run_codex, so
+  // they are coerced one-time and always re-approved.
+  "taskmaster_add_task",
+  "taskmaster_update_task",
+  "taskmaster_expand",
 ]);
 
 const NAMED_KEYS = AgentNamedKeySchema.options;
@@ -1443,6 +1459,194 @@ export const TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // --- Task Master Hub -----------------------------------------------------
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_list_projects",
+      description:
+        "List all registered Task Master Hub projects (id, name, serverId, path, binaryMode). Read-only. Call this first to discover which projects exist before listing or mutating tasks in one.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_list",
+      description:
+        "List a project's tasks (summary: id, title, status, priority, dependencies, blocks, complexity, updatedAt — NOT the full details/testStrategy text). Read-only. Operates on the project's CURRENT tag only.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: {
+            type: "string",
+            description: "Task Master Hub project id (tmp-...).",
+          },
+        },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_show",
+      description:
+        "Get one task's full detail (title, status, details, testStrategy, subtasks). Read-only.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: {
+            type: "string",
+            description: 'Task id, e.g. "3" or "3.2" for a subtask.',
+          },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_next",
+      description:
+        "Get the next unblocked task to work on in a project's current tag. Read-only. The response distinguishes an empty tag (no tasks at all) from a tag whose tasks are all done/blocked — read hasAnyTasks alongside found.",
+      parameters: {
+        type: "object",
+        properties: { project_id: { type: "string" } },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_set_status",
+      description:
+        "Set a task's status. Requires user approval (routine — safe to allow-always).",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          status: {
+            type: "string",
+            enum: [
+              "pending",
+              "in-progress",
+              "done",
+              "deferred",
+              "cancelled",
+              "blocked",
+              "review",
+            ],
+          },
+        },
+        required: ["project_id", "task_id", "status"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_add_dependency",
+      description:
+        "Make one task depend on another within the same project. Rejected with a circular-dependency error if it would create a cycle. Requires user approval (routine — safe to allow-always).",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          id: {
+            type: "string",
+            description: "The task that will gain the dependency.",
+          },
+          depends_on: {
+            type: "string",
+            description: "The task it will depend on.",
+          },
+        },
+        required: ["project_id", "id", "depends_on"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_add_task",
+      description:
+        "Add a new task by describing it in natural language — task-master's own AI provider expands the prompt into a structured task. This is an AI-mutation tool (same risk class as run_codex): it invokes the project's configured AI provider and can add substantial content. Requires user approval EVERY time (no allow-always).",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          prompt: { type: "string", minLength: 1, maxLength: 4000 },
+          priority: { type: "string", enum: ["low", "medium", "high"] },
+          dependencies: {
+            type: "array",
+            items: { type: "string" },
+            description: "Ids of existing tasks this new task depends on.",
+          },
+        },
+        required: ["project_id", "prompt"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_update_task",
+      description:
+        "Rewrite/refine an existing task by describing the change in natural language — task-master's own AI provider applies it. AI-mutation tool, same risk class as run_codex. Requires user approval EVERY time (no allow-always).",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          prompt: { type: "string", minLength: 1, maxLength: 4000 },
+        },
+        required: ["project_id", "task_id", "prompt"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_expand",
+      description:
+        "Break a task into subtasks using task-master's own AI provider. Optional research mode uses a research-tier model where configured. AI-mutation tool, same risk class as run_codex. Requires user approval EVERY time (no allow-always).",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          research: {
+            type: "boolean",
+            description: "Use task-master's research-tier model.",
+          },
+          num: {
+            type: "integer",
+            minimum: 1,
+            description:
+              "Target subtask count; omit for the provider's default.",
+          },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 // --- Virtual Computer (CUA) — spike (docs/VIRTUAL-COMPUTER.md) --------------
@@ -1597,7 +1801,13 @@ export interface ToolArgs {
   due_date?: number | null;
   end_date?: number | null;
   sprint_id?: string | null;
-  depends_on?: string[];
+  depends_on?: string[] | string;
+  // Task Master Hub
+  id?: string;
+  status?: string;
+  dependencies?: string[];
+  research?: boolean;
+  num?: number;
   // PM columns
   wip_limit?: number | null;
   transitions?: string[] | null;
@@ -1805,6 +2015,24 @@ export function describeCall(tool: string, args: ToolArgs): string {
       return `delete Notes section ${args.section_id ?? ""}${args.mode === "cascade" ? " (cascade: deletes its pages too)" : ""}`.trimEnd();
     case "notes_delete_notebook":
       return `delete Notes notebook ${args.notebook_id ?? ""}`.trimEnd();
+    case "taskmaster_list_projects":
+      return "list Task Master Hub projects";
+    case "taskmaster_list":
+      return `list tasks for project ${args.project_id ?? ""}`.trimEnd();
+    case "taskmaster_show":
+      return `show task ${args.task_id ?? ""} in project ${args.project_id ?? ""}`.trimEnd();
+    case "taskmaster_next":
+      return `get next task for project ${args.project_id ?? ""}`.trimEnd();
+    case "taskmaster_set_status":
+      return `set task ${args.task_id ?? ""} to status ${args.status ?? ""}`.trimEnd();
+    case "taskmaster_add_dependency":
+      return `make task ${args.id ?? ""} depend on ${args.depends_on ?? ""}`.trimEnd();
+    case "taskmaster_add_task":
+      return `add task via AI prompt: ${truncate(String(args.prompt ?? ""))}`;
+    case "taskmaster_update_task":
+      return `update task ${args.task_id ?? ""} via AI prompt: ${truncate(String(args.prompt ?? ""))}`;
+    case "taskmaster_expand":
+      return `expand task ${args.task_id ?? ""}${args.research ? " (research)" : ""}${args.num ? ` into ~${args.num} subtasks` : ""}`.trimEnd();
     default:
       return tool;
   }
@@ -2159,7 +2387,9 @@ export async function executeTool(
           ...(args.due_date !== undefined ? { dueDate: args.due_date } : {}),
           ...(args.sprint_id !== undefined ? { sprintId: args.sprint_id } : {}),
           ...(args.column_id ? { columnId: args.column_id } : {}),
-          ...(args.depends_on ? { dependsOn: args.depends_on } : {}),
+          ...(args.depends_on
+            ? { dependsOn: args.depends_on as string[] }
+            : {}),
         });
         return JSON.stringify(t);
       }
@@ -2185,7 +2415,9 @@ export async function executeTool(
             : {}),
           ...(args.due_date !== undefined ? { dueDate: args.due_date } : {}),
           ...(args.sprint_id !== undefined ? { sprintId: args.sprint_id } : {}),
-          ...(args.depends_on ? { dependsOn: args.depends_on } : {}),
+          ...(args.depends_on
+            ? { dependsOn: args.depends_on as string[] }
+            : {}),
         });
         return JSON.stringify(t);
       }
@@ -2345,6 +2577,87 @@ export async function executeTool(
           args.task_id,
         );
         return JSON.stringify(attachments);
+      }
+      // --- Task Master Hub -------------------------------------------------
+      case "taskmaster_list_projects": {
+        const projects = await gateway.listTaskmasterProjects();
+        return JSON.stringify(projects);
+      }
+      case "taskmaster_list": {
+        if (!args.project_id) return "error: project_id is required";
+        const r = await gateway.listTaskmasterTasks(args.project_id);
+        return JSON.stringify(r);
+      }
+      case "taskmaster_show": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        const t = await gateway.getTaskmasterTask(
+          args.project_id,
+          args.task_id,
+        );
+        return JSON.stringify(t);
+      }
+      case "taskmaster_next": {
+        if (!args.project_id) return "error: project_id is required";
+        const r = await gateway.getTaskmasterNext(args.project_id);
+        return JSON.stringify(r);
+      }
+      case "taskmaster_set_status": {
+        if (!args.project_id || !args.task_id || !args.status)
+          return "error: project_id, task_id and status are required";
+        const t = await gateway.setTaskmasterStatus(
+          args.project_id,
+          args.task_id,
+          args.status,
+        );
+        return JSON.stringify(t);
+      }
+      case "taskmaster_add_dependency": {
+        if (!args.project_id || !args.id || !args.depends_on)
+          return "error: project_id, id and depends_on are required";
+        const r = await gateway.addTaskmasterDependency(args.project_id, {
+          id: args.id,
+          dependsOn: String(args.depends_on),
+        });
+        if (r.cycle) {
+          return `error: this would create a circular dependency (${args.id} depends on ${args.depends_on}): ${r.message}`;
+        }
+        return JSON.stringify(r.task);
+      }
+      case "taskmaster_add_task": {
+        if (!args.project_id || !args.prompt)
+          return "error: project_id and prompt are required";
+        const r = await gateway.addTaskmasterTask(args.project_id, {
+          prompt: args.prompt,
+          ...(args.priority ? { priority: args.priority } : {}),
+          ...(args.dependencies ? { dependencies: args.dependencies } : {}),
+        });
+        return JSON.stringify(r);
+      }
+      case "taskmaster_update_task": {
+        if (!args.project_id || !args.task_id || !args.prompt)
+          return "error: project_id, task_id and prompt are required";
+        const t = await gateway.updateTaskmasterTask(
+          args.project_id,
+          args.task_id,
+          {
+            prompt: args.prompt,
+          },
+        );
+        return JSON.stringify(t);
+      }
+      case "taskmaster_expand": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        const t = await gateway.expandTaskmasterTask(
+          args.project_id,
+          args.task_id,
+          {
+            ...(args.research === true ? { research: true } : {}),
+            ...(Number.isInteger(args.num) ? { num: args.num } : {}),
+          },
+        );
+        return JSON.stringify(t);
       }
       // --- Notes (docs/NOTES-TOOL-PLAN.md) --------------------------------
       case "notes_list": {
