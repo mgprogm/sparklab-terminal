@@ -24,7 +24,7 @@ export function TaskmasterHubDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
+      <DialogContent className="flex h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-2rem)]">
         <DialogHeader className="border-border gap-1.5 border-b px-4 py-3 text-left">
           <div className="flex items-center gap-2">
             <ListChecks className="text-muted-foreground size-4 shrink-0" />
@@ -42,7 +42,7 @@ export function TaskmasterHubDialog({
           src="/taskmaster-hub/app.html"
           title="Task Master Hub"
           sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
-          className="h-full w-full border-0"
+          className="min-h-0 w-full flex-1 border-0"
         />
       </DialogContent>
     </Dialog>
