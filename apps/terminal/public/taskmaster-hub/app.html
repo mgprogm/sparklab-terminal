@@ -377,6 +377,37 @@
   .status-chip {
     color: var(--status-other);
   }
+  .progress-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin: 2px 0 8px;
+  }
+  .progress-cell {
+    border-radius: 2px;
+    display: inline-block;
+    height: 12px;
+    width: 12px;
+  }
+  .progress-cell.status-pending {
+    background: var(--status-pending);
+  }
+  .progress-cell.status-in-progress {
+    background: var(--status-in-progress);
+  }
+  .progress-cell.status-review {
+    background: var(--status-review);
+  }
+  .progress-cell.status-done {
+    background: var(--status-done);
+  }
+  .progress-cell.status-deferred,
+  .progress-cell.status-cancelled {
+    background: var(--status-other);
+  }
+  .progress-cell.status-blocked {
+    background: var(--danger);
+  }
   .other-controls {
     margin-left: auto;
     max-width: 150px;
@@ -613,6 +644,8 @@
     pollTimer: null,
     otherFilter: "collapsed",
     taskFilter: "",
+    nextSubtasksTaskId: null,
+    nextSubtasks: null,
   };
   var STATUS = [
     "pending",
@@ -899,6 +932,8 @@
     state.project = currentProject();
     state.tasks = [];
     state.next = null;
+    state.nextSubtasksTaskId = null;
+    state.nextSubtasks = null;
     state.currentTag = null;
     state.detailTaskId = null;
     state.detailTask = null;
@@ -1045,14 +1080,58 @@
     } else box.appendChild(elem("div", "empty", "No agent has claimed a task."));
     return box;
   }
+  function ensureNextSubtasksLoaded(taskId) {
+    if (state.nextSubtasksTaskId === taskId) return;
+    state.nextSubtasksTaskId = taskId;
+    state.nextSubtasks = null;
+    var id = state.projectId;
+    api("GET", projectPath(id) + "/tasks/" + encodeURIComponent(taskId))
+      .then(function (task) {
+        if (state.projectId !== id || state.nextSubtasksTaskId !== taskId) return;
+        state.nextSubtasks = Array.isArray(task.subtasks) ? task.subtasks : [];
+        renderContent();
+      })
+      .catch(function () {
+        if (state.projectId !== id || state.nextSubtasksTaskId !== taskId) return;
+        state.nextSubtasks = [];
+        renderContent();
+      });
+  }
   function renderNextTile() {
     var box = elem("section", "next-tile"),
       head = elem("div", "next-title", "Next task");
     box.appendChild(head);
     var next = state.next;
     if (next && next.found === true && next.task) {
-      box.appendChild(elem("div", "task-id", String(next.task.id)));
+      ensureNextSubtasksLoaded(next.task.id);
+      var subtasks =
+        state.nextSubtasksTaskId === next.task.id ? state.nextSubtasks : null;
+      var idRow = elem("div", "card-meta");
+      idRow.appendChild(elem("div", "task-id", String(next.task.id)));
+      if (subtasks && subtasks.length) {
+        var done = subtasks.filter(function (s) {
+            return s.status === "done";
+          }).length,
+          pct = Math.round((done / subtasks.length) * 100);
+        idRow.appendChild(elem("span", "chip", pct + "%"));
+      }
+      box.appendChild(idRow);
       box.appendChild(elem("div", "card-title", next.task.title));
+      if (subtasks && subtasks.length) {
+        var grid = elem("div", "progress-grid");
+        grid.setAttribute("aria-label", "Subtask progress");
+        subtasks.forEach(function (subtask) {
+          var cell = elem("span", "progress-cell " + statusClass(subtask.status));
+          cell.title =
+            String(subtask.id) +
+            " · " +
+            (subtask.title || "Untitled") +
+            " · " +
+            (subtask.status || "pending");
+          grid.appendChild(cell);
+        });
+        box.appendChild(grid);
+      }
       var button = elem("button", "btn btn-primary", "Set in-progress");
       button.type = "button";
       button.addEventListener("click", function () {

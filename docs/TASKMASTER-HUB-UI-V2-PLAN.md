@@ -12,6 +12,17 @@
 > client-side TTL estimate, and the filter surviving a live 5s poll tick
 > with focus and value intact.
 >
+> **Addendum (same day):** the Next Task tile also gained a subtask
+> progress indicator — a `done/total` percentage chip next to the task id
+> and a small color-coded grid (one cell per subtask, native `title`
+> tooltip per cell) below the title. Designed by a forked design-teammate
+> agent (grounded in the real summary-vs-full data split and the 5s poll
+> constraint), reviewed and implemented by the coordinator, and verified via
+> the same isolated dev-browser stack: correct percentage math, correct
+> per-status cell coloring, correct tooltip content, and exactly one detail
+> fetch per next-task id across multiple poll ticks (no refetch storm).
+> This was a feature addition, not part of the original Phase A scope.
+>
 > Phases B/C below remain unbuilt. Extends
 > [`TASKMASTER-HUB-PLAN.md`](./TASKMASTER-HUB-PLAN.md) (CLI compatibility,
 > data model, v1 build record) and
