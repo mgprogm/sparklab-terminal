@@ -21,6 +21,7 @@ import { gateway } from "./gateway-client.js";
 import { AgentRunManager, type AgentRun } from "./agent-run-manager.js";
 import { BrowserHandoffBroker } from "./browser-handoff-broker.js";
 import { deleteChat, listChats, openChat } from "./history.js";
+import { getOpenRouterCatalog } from "./openrouter-catalog.js";
 import { browserResources } from "./browser-resource-limiter.js";
 import { browserHandoffMetrics } from "./browser-handoff-transport.js";
 import { browserPerformanceMetrics } from "./browser-performance-metrics.js";
@@ -154,6 +155,7 @@ wss.on("connection", (ws: WebSocket, req) => {
           msg.data.activeSessionId,
           msg.data.model,
           msg.data.reasoningEffort,
+          msg.data.openrouterModelId,
         );
         break;
       case "approval_response":
@@ -168,6 +170,11 @@ wss.on("connection", (ws: WebSocket, req) => {
       case "list_chats":
         void listChats(connectedTerminalSessionId).then((chats) =>
           send({ type: "chat_list", chats }),
+        );
+        break;
+      case "openrouter_models_request":
+        void getOpenRouterCatalog().then(({ models, fetchedAt }) =>
+          send({ type: "openrouter_models_response", models, fetchedAt }),
         );
         break;
       case "delete_chat":

@@ -21,6 +21,7 @@ import type {
   AgentReplayEntry,
   AgentStatusState,
   AgentWsServerMessage,
+  OpenRouterCatalogModel,
 } from "@sparklab/shared-types";
 
 /** Fold a server-reconstructed replay entry into a UI transcript entry. */
@@ -102,6 +103,34 @@ interface AgentState {
   setReasoningEffort: (effort: AgentReasoningEffort) => void;
   availableModels: AgentModel[];
   availableReasoningEfforts: AgentReasoningEffort[];
+
+  /**
+   * The live OpenRouter model catalog for the composer's search picker.
+   * Ephemeral (not persisted) — refetched per session via
+   * `openrouter_models_request`; empty until first requested or when
+   * OpenRouter isn't configured on the service.
+   */
+  openrouterCatalog: OpenRouterCatalogModel[];
+  openrouterCatalogLoading: boolean;
+  openrouterCatalogFetchedAt: number | null;
+  setOpenRouterCatalogLoading: (loading: boolean) => void;
+  /**
+   * The specific OpenRouter catalog model selected for the next turn. The
+   * composer only reaches OpenRouter through the search picker (there is no
+   * plain "use the fixed default" row), so this is set once a result is
+   * selected and stays set thereafter — null only for a chat that has never
+   * used OpenRouter, or stale state persisted from before this field
+   * existed. Persisted (unlike the catalog itself) so a page reload doesn't
+   * silently lose the selection.
+   */
+  openrouterModelId: string | null;
+  openrouterModelLabel: string | null;
+  openrouterModelSupportedEfforts: AgentReasoningEffort[] | null;
+  selectOpenRouterModel: (
+    id: string,
+    label: string,
+    supportedEfforts: AgentReasoningEffort[] | null,
+  ) => void;
 
   /** Per-session auto-approve for writes (non-persistent). */
   autoApprove: Record<string, boolean>;
@@ -195,6 +224,27 @@ export const useAgentStore = create<AgentState>()(
         "max",
       ],
 
+      openrouterCatalog: [],
+      openrouterCatalogLoading: false,
+      openrouterCatalogFetchedAt: null,
+      setOpenRouterCatalogLoading: (loading) =>
+        set({ openrouterCatalogLoading: loading }),
+      openrouterModelId: null,
+      openrouterModelLabel: null,
+      openrouterModelSupportedEfforts: null,
+      selectOpenRouterModel: (id, label, supportedEfforts) =>
+        set((s) => ({
+          model: "openrouter-gpt-latest",
+          openrouterModelId: id,
+          openrouterModelLabel: label,
+          openrouterModelSupportedEfforts: supportedEfforts,
+          // Don't silently keep an effort this model doesn't support.
+          reasoningEffort:
+            supportedEfforts && !supportedEfforts.includes(s.reasoningEffort)
+              ? supportedEfforts[0]
+              : s.reasoningEffort,
+        })),
+
       autoApprove: {},
       setAutoApprove: (sessionId, on) =>
         set((s) => ({ autoApprove: { ...s.autoApprove, [sessionId]: on } })),
@@ -239,6 +289,14 @@ export const useAgentStore = create<AgentState>()(
 
           case "chat_list":
             set({ chats: frame.chats, chatsLoading: false });
+            break;
+
+          case "openrouter_models_response":
+            set({
+              openrouterCatalog: frame.models,
+              openrouterCatalogFetchedAt: frame.fetchedAt,
+              openrouterCatalogLoading: false,
+            });
             break;
 
           case "chat_history":
@@ -500,6 +558,9 @@ export const useAgentStore = create<AgentState>()(
         legacyChatId: s.legacyChatId,
         model: s.model,
         reasoningEffort: s.reasoningEffort,
+        openrouterModelId: s.openrouterModelId,
+        openrouterModelLabel: s.openrouterModelLabel,
+        openrouterModelSupportedEfforts: s.openrouterModelSupportedEfforts,
       }),
       version: 1,
       migrate: (persisted, version) => {

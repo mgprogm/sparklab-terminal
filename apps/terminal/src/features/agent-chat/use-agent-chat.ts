@@ -135,8 +135,15 @@ export function useAgentChat() {
       sessionId?: string,
       model?: AgentModel,
       reasoningEffort?: AgentReasoningEffort,
+      openrouterModelId?: string,
     ) => {
-      conn?.sendUserMessage(text, sessionId, model, reasoningEffort);
+      conn?.sendUserMessage(
+        text,
+        sessionId,
+        model,
+        reasoningEffort,
+        openrouterModelId,
+      );
     },
     [],
   );
@@ -236,3 +243,5 @@ export const finishBrowserHandoff = (handoffId: string) =>
   conn?.finishBrowserHandoff(handoffId);
 export const cancelBrowserHandoff = (handoffId: string) =>
   conn?.cancelBrowserHandoff(handoffId);
+/** Lazily requests the live OpenRouter catalog (composer search picker). */
+export const requestOpenRouterModels = () => conn?.requestOpenRouterModels();

@@ -80,6 +80,7 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   const resolveApproval = useAgentStore((s) => s.resolveApproval);
   const setAutoApprove = useAgentStore((s) => s.setAutoApprove);
   const addUserMessage = useAgentStore((s) => s.addUserMessage);
+  const openrouterModelId = useAgentStore((s) => s.openrouterModelId);
   const recoveryPending = entries.some(
     (entry) => entry.kind === "recovery" && entry.state === "pending",
   );
@@ -144,7 +145,18 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
     reasoningEffort?: AgentReasoningEffort,
   ) => {
     addUserMessage(text);
-    sendUserMessage(text, target, model, reasoningEffort);
+    sendUserMessage(
+      text,
+      target,
+      model,
+      reasoningEffort,
+      // Only meaningful for the OpenRouter provider slot — a stale catalog
+      // id from a previous selection must never leak onto a turn using a
+      // different model.
+      model === "openrouter-gpt-latest"
+        ? (openrouterModelId ?? undefined)
+        : undefined,
+    );
   };
 
   const handleRespond = (

@@ -11,23 +11,25 @@ process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
 delete process.env.GPT56TERRA_DEPLOYMENT;
 delete process.env.GPT56LUNA_DEPLOYMENT;
 delete process.env.ARK_API_KEY;
+delete process.env.OPENROUTER_API_KEY;
+delete process.env.OPENROUTER_MODEL;
 delete process.env.CODEX_PROVIDER_ENABLED;
 
 const { resolveModel, availableModels } = await import("./azure.js");
 
-test("BytePlus models are hidden and unresolvable without ARK_API_KEY", () => {
+test("BytePlus models are hidden and unresolvable without ARK_API_KEY", async () => {
   for (const id of [
     "deepseek-v4-pro-byteplus",
     "deepseek-v32-byteplus",
     "glm-byteplus",
   ] as const) {
-    assert.equal(resolveModel(id), undefined, id);
+    assert.equal(await resolveModel(id), undefined, id);
     assert.ok(!availableModels().includes(id), id);
   }
 });
 
-test("a configured Azure deployment resolves to the azure branch", () => {
-  const resolved = resolveModel("gpt-5.6-sol");
+test("a configured Azure deployment resolves to the azure branch", async () => {
+  const resolved = await resolveModel("gpt-5.6-sol");
   assert.ok(resolved);
   assert.equal(resolved.deployment, "test-deployment");
   assert.equal(resolved.supportsReasoningEffort, true);
@@ -35,11 +37,16 @@ test("a configured Azure deployment resolves to the azure branch", () => {
   assert.ok(availableModels().includes("gpt-5.6-sol"));
 });
 
-test("an unconfigured Azure deployment does not resolve", () => {
-  assert.equal(resolveModel("gpt-5.6-luna"), undefined);
+test("an unconfigured Azure deployment does not resolve", async () => {
+  assert.equal(await resolveModel("gpt-5.6-luna"), undefined);
   assert.ok(!availableModels().includes("gpt-5.6-luna"));
 });
 
 test("codex-cli is hidden without CODEX_PROVIDER_ENABLED", () => {
   assert.ok(!availableModels().includes("codex-cli"));
+});
+
+test("OpenRouter is hidden and unresolvable without OPENROUTER_API_KEY", async () => {
+  assert.ok(!availableModels().includes("openrouter-gpt-latest"));
+  assert.equal(await resolveModel("openrouter-gpt-latest"), undefined);
 });

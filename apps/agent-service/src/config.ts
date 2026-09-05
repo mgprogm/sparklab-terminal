@@ -146,6 +146,25 @@ export const config = {
     ),
     glm: optional("ARK_GLM_DEPLOYMENT", "glm-4-7-251222"),
   },
+  openrouter: {
+    baseUrl: optional(
+      "OPENROUTER_BASE_URL",
+      "https://openrouter.ai/api/v1",
+    ).replace(/\/$/, ""),
+    apiKey: process.env.OPENROUTER_API_KEY?.trim() || "",
+    model: optional("OPENROUTER_MODEL", "~openai/gpt-latest"),
+    referer: process.env.OPENROUTER_HTTP_REFERER?.trim() || "",
+    title: process.env.OPENROUTER_APP_TITLE?.trim() || "",
+    // How long a fetched OpenRouter /models catalog is served before the next
+    // request triggers a refetch. A failed refetch serves the last-known-good
+    // list rather than erroring (see openrouter-catalog.ts) — this TTL only
+    // controls freshness, never availability.
+    catalogTtlMs: positiveInt(
+      "OPENROUTER_CATALOG_TTL_MS",
+      10 * 60 * 1000,
+      24 * 60 * 60 * 1000,
+    ),
+  },
   // Optional "Codex CLI" model-picker entry. When enabled, choosing it in the
   // Agent chat routes each user turn to the Codex CLI (via the gateway's
   // `POST /api/sessions/:id/codex` route) instead of a chat-completions model.

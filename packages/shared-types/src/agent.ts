@@ -98,6 +98,7 @@ export const AgentModelSchema = z.enum([
   "deepseek-v4-pro-byteplus",
   "deepseek-v32-byteplus",
   "glm-byteplus",
+  "openrouter-gpt-latest",
   // Not a chat-completions model at all: picking this routes each user turn to
   // the Codex CLI coding agent (via the gateway's `POST /api/sessions/:id/codex`
   // route), rooted at the selected terminal's cwd. Listed only when the agent
@@ -128,6 +129,15 @@ export const AgentUserMessageSchema = z.object({
   model: AgentModelSchema.optional(),
   /** Reasoning budget for this turn. */
   reasoningEffort: AgentReasoningEffortSchema.optional(),
+  /**
+   * Only meaningful when `model === "openrouter-gpt-latest"`: selects one
+   * specific OpenRouter catalog entry (e.g. "openai/gpt-6-astra") for this
+   * turn instead of the service's configured default. The service validates
+   * this against its freshly-fetched model catalog before ever sending it
+   * upstream — an unknown id is treated as "model not configured", never
+   * forwarded verbatim. Omit to keep today's fixed-default behavior.
+   */
+  openrouterModelId: z.string().min(1).max(200).optional(),
 });
 export type AgentUserMessage = z.infer<typeof AgentUserMessageSchema>;
 
@@ -184,6 +194,19 @@ export const AgentDeleteChatSchema = z.object({
 });
 export type AgentDeleteChat = z.infer<typeof AgentDeleteChatSchema>;
 
+/**
+ * User opens the OpenRouter model search picker. The server replies with an
+ * `openrouter_models_response` carrying its cached catalog (empty when
+ * OpenRouter isn't configured on this service). No payload — search/filter
+ * happens client-side over the full returned list.
+ */
+export const AgentOpenRouterModelsRequestSchema = z.object({
+  type: z.literal("openrouter_models_request"),
+});
+export type AgentOpenRouterModelsRequest = z.infer<
+  typeof AgentOpenRouterModelsRequestSchema
+>;
+
 const HandoffIdSchema = z.string().uuid();
 
 /** Request manual control of an already-running isolated browser. */
@@ -222,6 +245,7 @@ export const AgentWsClientMessageSchema = z.discriminatedUnion("type", [
   AgentPingSchema,
   AgentListChatsSchema,
   AgentDeleteChatSchema,
+  AgentOpenRouterModelsRequestSchema,
   BrowserHandoffRequestSchema,
   BrowserHandoffFinishSchema,
   BrowserHandoffCancelSchema,
@@ -250,6 +274,61 @@ export const AgentCapabilitiesSchema = z.object({
   defaultReasoningEffort: AgentReasoningEffortSchema,
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
+
+/**
+ * One reduced OpenRouter catalog entry, as served by `openrouter_models_response`.
+ * Field names are camelCase per this repo's shared-types convention even
+ * though OpenRouter's own JSON (`GET /models`) is snake_case — the reduction
+ * happens server-side in agent-service, never in the browser. `reasoning` is
+ * present only for models OpenRouter itself reports a `reasoning` block for;
+ * its `supportedEfforts` deliberately reuses `AgentReasoningEffortSchema`'s
+ * vocabulary (OpenRouter's own `low|medium|high|xhigh|max` values line up
+ * with it directly, `none` excepted since OpenRouter has no such value).
+ */
+export const OpenRouterCatalogModelSchema = z.object({
+  /** The exact upstream id to send as `model` (e.g. "openai/gpt-6-astra"). */
+  id: z.string(),
+  name: z.string(),
+  contextLength: z.number().int().nonnegative(),
+  pricing: z.object({
+    /** Per-token cost, as OpenRouter reports it: a decimal string, e.g. "0.00001". */
+    prompt: z.string(),
+    completion: z.string(),
+  }),
+  reasoning: z
+    .object({
+      supportedEfforts: z.array(AgentReasoningEffortSchema).min(1),
+      /** True when this model requires *some* non-"none" reasoning effort. */
+      mandatory: z.boolean(),
+      /**
+       * OpenRouter's own recommended default for this model, when it reports
+       * one. Used as the upgrade target when `mandatory` is true and a turn
+       * requested "none" — deliberately NOT `supportedEfforts[0]`, since that
+       * array's order is OpenRouter's own (often costliest-first) and not a
+       * recommendation.
+       */
+      defaultEffort: AgentReasoningEffortSchema.optional(),
+    })
+    .optional(),
+});
+export type OpenRouterCatalogModel = z.infer<
+  typeof OpenRouterCatalogModelSchema
+>;
+
+/**
+ * Reply to `openrouter_models_request`: the service's cached OpenRouter
+ * catalog (possibly stale on a recent upstream fetch failure, never absent
+ * once fetched once), or an empty list when OpenRouter isn't configured.
+ */
+export const AgentOpenRouterModelsResponseSchema = z.object({
+  type: z.literal("openrouter_models_response"),
+  models: z.array(OpenRouterCatalogModelSchema),
+  /** When the served list was fetched from OpenRouter (epoch ms). */
+  fetchedAt: z.number(),
+});
+export type AgentOpenRouterModelsResponse = z.infer<
+  typeof AgentOpenRouterModelsResponseSchema
+>;
 
 /** Incremental chunk of the assistant's in-progress reply. */
 export const AgentAssistantDeltaSchema = z.object({
@@ -817,6 +896,7 @@ export type BrowserHandoffServerControl = z.infer<
 export const AgentWsServerMessageSchema = z.discriminatedUnion("type", [
   AgentChatStartedSchema,
   AgentCapabilitiesSchema,
+  AgentOpenRouterModelsResponseSchema,
   AgentAssistantDeltaSchema,
   AgentAssistantMessageSchema,
   AgentToolUseSchema,

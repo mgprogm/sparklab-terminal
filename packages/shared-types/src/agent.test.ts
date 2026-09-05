@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AgentBrowserClosedSchema,
   AgentBrowserViewSchema,
+  AgentUserMessageSchema,
   AgentWsServerMessageSchema,
   MAX_BROWSER_SCREENSHOT_BASE64_LENGTH,
   AgentWsClientMessageSchema,
@@ -10,6 +11,7 @@ import {
   BrowserHandoffInputSchema,
   BrowserHandoffPostAuthClientMessageSchema,
   BrowserHandoffServerControlSchema,
+  OpenRouterCatalogModelSchema,
 } from "./agent";
 
 describe("browser handoff contracts", () => {
@@ -245,5 +247,97 @@ describe("browser agent frames", () => {
         },
       }),
     ).toThrow();
+  });
+});
+
+describe("OpenRouter dynamic catalog contracts", () => {
+  it("openrouterModelId on user_message is optional and bounded", () => {
+    expect(
+      AgentUserMessageSchema.parse({ type: "user_message", text: "hi" }),
+    ).not.toHaveProperty("openrouterModelId");
+    expect(
+      AgentUserMessageSchema.parse({
+        type: "user_message",
+        text: "hi",
+        model: "openrouter-gpt-latest",
+        openrouterModelId: "openai/gpt-6-astra",
+      }),
+    ).toMatchObject({ openrouterModelId: "openai/gpt-6-astra" });
+    expect(() =>
+      AgentUserMessageSchema.parse({
+        type: "user_message",
+        text: "hi",
+        openrouterModelId: "a".repeat(201),
+      }),
+    ).toThrow();
+    expect(() =>
+      AgentUserMessageSchema.parse({
+        type: "user_message",
+        text: "hi",
+        openrouterModelId: "",
+      }),
+    ).toThrow();
+  });
+
+  it("OpenRouterCatalogModelSchema accepts a model with and without reasoning", () => {
+    const withReasoning = OpenRouterCatalogModelSchema.parse({
+      id: "openai/gpt-6-astra",
+      name: "OpenAI: GPT-6 Astra",
+      contextLength: 1_050_000,
+      pricing: { prompt: "0.00001", completion: "0.00005" },
+      reasoning: {
+        supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+        mandatory: true,
+      },
+    });
+    expect(withReasoning.reasoning?.mandatory).toBe(true);
+
+    const withoutReasoning = OpenRouterCatalogModelSchema.parse({
+      id: "z-ai/glm-5.2:free",
+      name: "GLM 5.2 (free)",
+      contextLength: 128_000,
+      pricing: { prompt: "0", completion: "0" },
+    });
+    expect(withoutReasoning.reasoning).toBeUndefined();
+  });
+
+  it("rejects a reasoning block with an empty supportedEfforts array", () => {
+    expect(() =>
+      OpenRouterCatalogModelSchema.parse({
+        id: "a/b",
+        name: "n",
+        contextLength: 1,
+        pricing: { prompt: "0", completion: "0" },
+        reasoning: { supportedEfforts: [], mandatory: false },
+      }),
+    ).toThrow();
+  });
+
+  it("openrouter_models_request / _response round-trip through the WS unions", () => {
+    expect(
+      AgentWsClientMessageSchema.parse({ type: "openrouter_models_request" }),
+    ).toMatchObject({ type: "openrouter_models_request" });
+
+    const response = AgentWsServerMessageSchema.parse({
+      type: "openrouter_models_response",
+      fetchedAt: 1_777_000_000_000,
+      models: [
+        {
+          id: "z-ai/glm-5.2:free",
+          name: "GLM 5.2 (free)",
+          contextLength: 128_000,
+          pricing: { prompt: "0", completion: "0" },
+        },
+      ],
+    });
+    expect(response).toMatchObject({ type: "openrouter_models_response" });
+
+    expect(
+      AgentWsServerMessageSchema.parse({
+        type: "openrouter_models_response",
+        fetchedAt: Date.now(),
+        models: [],
+      }),
+    ).toMatchObject({ models: [] });
   });
 });

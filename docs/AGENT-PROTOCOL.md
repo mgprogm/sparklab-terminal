@@ -28,28 +28,34 @@ or CLI callers, interactive Claude/Codex sessions, or the separate
 
 ## Configuration (`.env`, gitignored)
 
-| Var                                           | Purpose                                                                                                                         |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `AZURE_OPENAI_ENDPOINT`                       | Azure AI Foundry resource endpoint                                                                                              |
-| `AZURE_OPENAI_API_KEY`                        | secret — never committed                                                                                                        |
-| `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                                                                                            |
-| `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                                                                                           |
-| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer                                                                    |
-| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer                                                                     |
-| `ARK_API_KEY`                                 | optional; enables the BytePlus Ark models (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`, `glm-byteplus`) in the composer |
-| `ARK_BASE_URL`                                | optional Ark base URL (default `https://ark.ap-southeast.bytepluses.com`)                                                       |
-| `ARK_DEEPSEEK_DEPLOYMENT`                     | optional Ark id for `deepseek-v4-pro-byteplus` (default `deepseek-v4-pro-260425`)                                               |
-| `ARK_DEEPSEEK_V32_DEPLOYMENT`                 | optional Ark id for `deepseek-v32-byteplus` (default `deepseek-v3-2-251201`)                                                    |
-| `ARK_GLM_DEPLOYMENT`                          | optional Ark id for `glm-byteplus` (default `glm-4-7-251222`)                                                                   |
-| `CODEX_PROVIDER_ENABLED`                      | optional; when `true`, adds the `codex-cli` entry to the composer (routes each turn to the Codex CLI, not a chat model)         |
-| `CODEX_PROVIDER_MODE`                         | sandbox policy for `codex-cli` turns: `workspace-write` (default) or `read-only`                                                |
-| `AGENT_PORT`                                  | listen port (default 3009)                                                                                                      |
-| `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                                                                                             |
-| `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                                                                                        |
-| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                                                                               |
-| `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools                                                                |
-| `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)                                                                              |
-| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                                                                                 |
+| Var                                           | Purpose                                                                                                                                                                      |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AZURE_OPENAI_ENDPOINT`                       | Azure AI Foundry resource endpoint                                                                                                                                           |
+| `AZURE_OPENAI_API_KEY`                        | secret — never committed                                                                                                                                                     |
+| `AZURE_OPENAI_API_VERSION`                    | pinned, default `2025-04-01-preview`                                                                                                                                         |
+| `GPT56SOL_DEPLOYMENT`                         | model deployment name (`gpt-5.6-sol`)                                                                                                                                        |
+| `GPT56TERRA_DEPLOYMENT`                       | optional deployment; enables `gpt-5.6-terra` in the composer                                                                                                                 |
+| `GPT56LUNA_DEPLOYMENT`                        | optional deployment; enables `gpt-5.6-luna` in the composer                                                                                                                  |
+| `ARK_API_KEY`                                 | optional; enables the BytePlus Ark models (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`, `glm-byteplus`) in the composer                                              |
+| `ARK_BASE_URL`                                | optional Ark base URL (default `https://ark.ap-southeast.bytepluses.com`)                                                                                                    |
+| `ARK_DEEPSEEK_DEPLOYMENT`                     | optional Ark id for `deepseek-v4-pro-byteplus` (default `deepseek-v4-pro-260425`)                                                                                            |
+| `ARK_DEEPSEEK_V32_DEPLOYMENT`                 | optional Ark id for `deepseek-v32-byteplus` (default `deepseek-v3-2-251201`)                                                                                                 |
+| `ARK_GLM_DEPLOYMENT`                          | optional Ark id for `glm-byteplus` (default `glm-4-7-251222`)                                                                                                                |
+| `OPENROUTER_API_KEY`                          | optional secret; enables the single `openrouter-gpt-latest` model in the composer — unset (the default) means no OpenRouter code path runs and no request ever leaves for it |
+| `OPENROUTER_BASE_URL`                         | optional OpenRouter base URL (default `https://openrouter.ai/api/v1`)                                                                                                        |
+| `OPENROUTER_MODEL`                            | optional upstream model id for `openrouter-gpt-latest` (default `~openai/gpt-latest`, OpenRouter's tilde-alias syntax for "always the newest flagship")                      |
+| `OPENROUTER_HTTP_REFERER`                     | optional `HTTP-Referer` attribution header (OpenRouter app rankings only — omit for no attribution)                                                                          |
+| `OPENROUTER_APP_TITLE`                        | optional `X-OpenRouter-Title` attribution header (same purpose as above)                                                                                                     |
+| `OPENROUTER_CATALOG_TTL_MS`                   | optional cache TTL (ms) for the fetched OpenRouter model catalog (default 10 min); see "dynamic model search" below                                                          |
+| `CODEX_PROVIDER_ENABLED`                      | optional; when `true`, adds the `codex-cli` entry to the composer (routes each turn to the Codex CLI, not a chat model)                                                      |
+| `CODEX_PROVIDER_MODE`                         | sandbox policy for `codex-cli` turns: `workspace-write` (default) or `read-only`                                                                                             |
+| `AGENT_PORT`                                  | listen port (default 3009)                                                                                                                                                   |
+| `GATEWAY_URL`                                 | gateway base URL (loopback in prod)                                                                                                                                          |
+| `ALLOWED_ORIGINS`                             | browser origins allowed to open `/agent`                                                                                                                                     |
+| `GATEWAY_AUTH_USER` / `GATEWAY_AUTH_PASSWORD` | gateway login (omit in open mode)                                                                                                                                            |
+| `BROWSER_USE_PROJECT`                         | trusted local Browser Use checkout; unset disables browser tools                                                                                                             |
+| `BROWSER_USE_HEADLESS`                        | run the isolated browser headless (default `true`)                                                                                                                           |
+| `BROWSER_USE_EXECUTABLE_PATH`                 | optional explicit sandboxed Chromium executable                                                                                                                              |
 
 The service fails fast at startup if any required Azure var is missing.
 The composer sends an allowlisted public model id and reasoning effort for each
@@ -60,6 +66,150 @@ optional `*-byteplus` ids (`deepseek-v4-pro-byteplus`, `deepseek-v32-byteplus`,
 auth, no `reasoning_effort` — the composer hides the effort control for any
 `-byteplus` model; DeepSeek also gets `thinking` disabled). A first-turn empty
 reply surfaces an `error` frame rather than silently ending the turn.
+
+### `openrouter-gpt-latest` — the optional OpenRouter provider
+
+A third opt-in chat-completions provider, structurally identical to BytePlus
+Ark (OpenAI-compatible REST, its own client built only when configured).
+`AgentModelSchema` still exposes exactly one enum member for it,
+`openrouter-gpt-latest` — that stays true even now that a turn can target
+**any** model in OpenRouter's live catalog (design record:
+[OPENROUTER-DYNAMIC-MODELS-PLAN.md](OPENROUTER-DYNAMIC-MODELS-PLAN.md)). The
+enum member means "route this turn through OpenRouter"; _which_ upstream
+model is a per-turn parameter (`openrouterModelId`), not a new enum value —
+this keeps every `Record<AgentModel, ...>` in the composer exhaustive and
+keeps every already-persisted chat turn (made before this existed) replaying
+identically.
+
+- **Availability**: the model is absent from `availableModels()` — and
+  therefore hidden in the composer and unresolvable if sent anyway — unless
+  `OPENROUTER_API_KEY` is set. Server capabilities are the only source of
+  truth; the frontend never decides this on its own.
+- **Fixed default vs. a searched model**: a `user_message` frame's
+  `openrouterModelId` field is optional. Omitted, behavior is **exactly**
+  the original fixed-default provider: `OPENROUTER_MODEL` (default
+  `~openai/gpt-latest`, OpenRouter's tilde-alias syntax that always resolves
+  to the current flagship without a redeploy) is sent as `model`, with
+  `supportsReasoningEffort: false` (unchanged from before this catalog work).
+  Given, it selects one specific catalog entry for that turn instead — see
+  "Dynamic model search" below.
+- **Reasoning effort (fixed-default path)**: not supported (same as the
+  `-byteplus` models) when no `openrouterModelId` is given — the composer
+  hides the effort control for the bare id and no `reasoning_effort` field is
+  sent. Once a specific catalog model is selected, its own
+  `reasoning.supportedEfforts` decides this instead (see below).
+- **Attribution headers**: `OPENROUTER_HTTP_REFERER` / `OPENROUTER_APP_TITLE`
+  set the optional `HTTP-Referer` / `X-OpenRouter-Title` headers OpenRouter
+  uses for its own public app rankings and analytics. They carry no user
+  content — no prompt text, no session id, no chat id — and are omitted
+  entirely when unset. `OPENROUTER_API_KEY` itself is sent only as the
+  request's own `Authorization: Bearer` header, exactly like every other
+  provider's key; it is never logged, never returned from `/health` or any
+  capabilities response, and never appears in an `error` frame (the SDK's
+  upstream error message does not echo request headers).
+- **Failure behavior**: identical to any other provider — an upstream error
+  (rate limit, malformed stream, timeout) is caught by the same top-level
+  `try`/`catch` in `handleUserMessage` and surfaces as one `error` frame with
+  the SDK's message, never a stack trace or the request body.
+- **Rollback / disable immediately**: unset `OPENROUTER_API_KEY` (or remove it
+  from `.env`) and restart the service — the model disappears from
+  `availableModels()`, any client still holding the id gets a clean "not
+  configured" `error` frame instead of a request ever leaving for OpenRouter,
+  and no other provider path is touched. There is no feature flag beyond the
+  key's presence; that absence _is_ the kill switch.
+- **Operational signal**: OpenRouter failures show up the same way any
+  provider failure does — as `error` frames in the chat and, upstream of
+  that, as non-2xx responses from `POST {OPENROUTER_BASE_URL}/chat/completions`
+  in whatever HTTP logging the deployment already has for the agent-service
+  process. There is no separate health check; `resolveModel()` returning
+  `undefined` (key unset) is indistinguishable from "never configured" by
+  design.
+- **Tests (fixed-default path)**: `apps/agent-service/src/openrouter.test.ts`
+  (resolution when configured, no `openrouterModelId` given), `azure.test.ts`
+  (hidden/unresolvable when `OPENROUTER_API_KEY` is unset), and
+  `apps/agent-service/src/agent-loop-openrouter.test.ts` (streamed text,
+  a full tool-call round-trip, and an upstream-error frame — via a local
+  mock SSE server, proving the shared loop treats this provider exactly like
+  any other opaque `ResolvedModel`).
+
+#### Dynamic model search (search any OpenRouter model per turn)
+
+The composer's model picker has a "Search OpenRouter models…" entry (shown
+under the same `OPENROUTER_API_KEY`-configured gate) that searches OpenRouter's
+**full live catalog**, not a curated subset — a deliberate reversal of an
+earlier non-goal, justified because this app is single-user: the
+`OPENROUTER_API_KEY` is that one user's own key, so "any model reachable"
+never becomes a multi-party cost/abuse surface. Full rationale and the
+schema-shape decision (why `AgentModelSchema` stays closed instead of adding
+per-model enum members): [OPENROUTER-DYNAMIC-MODELS-PLAN.md](OPENROUTER-DYNAMIC-MODELS-PLAN.md).
+
+- **Catalog fetch/cache**: `apps/agent-service/src/openrouter-catalog.ts`
+  fetches `GET {OPENROUTER_BASE_URL}/models` (bounded 5 s timeout), reduces
+  each entry to `{id, name, contextLength, pricing, reasoning?}` (camelCase;
+  `reasoning` — `supportedEfforts`, `mandatory`, `defaultEffort` — is present
+  only for models OpenRouter itself reports a `reasoning` block for), and
+  caches the result for `OPENROUTER_CATALOG_TTL_MS` (default 10 min). A
+  refetch failure serves the **last-known-good** cached list rather than
+  erroring or emptying it; concurrent callers past the TTL coalesce onto one
+  in-flight fetch. Zero fetch attempts, empty list, when
+  `OPENROUTER_API_KEY` is unset.
+- **Delivery — a WS frame pair, not a REST endpoint**: the composer sends
+  `{type: "openrouter_models_request"}` on the existing authenticated
+  `/agent` socket (once, on first opening the search UI) and gets back
+  `{type: "openrouter_models_response", models, fetchedAt}`. This
+  deliberately avoids a second, differently-authenticated REST surface and
+  avoids bloating the once-per-connect `agent_capabilities` frame with a
+  catalog of hundreds of entries.
+- **Per-turn selection**: `user_message` gained an optional
+  `openrouterModelId` field (e.g. `"openai/gpt-6-astra"`). `resolveModel()`
+  validates it against the cached catalog **before** it can ever reach the
+  upstream request body — a miss resolves `undefined` (the same "model not
+  configured" `error` frame as any other unresolvable model); it is never
+  forwarded to OpenRouter unchecked.
+- **Per-model reasoning effort**: when the selected catalog model has a
+  `reasoning` block, `supportsReasoningEffort` becomes `true` and the
+  composer's effort menu narrows to exactly that model's
+  `supportedEfforts` (OpenRouter's own `low|medium|high|xhigh|max` vocabulary
+  lines up directly with `AgentReasoningEffortSchema`, `none` excepted). If
+  that model's `reasoning.mandatory` is true and a turn still requests
+  `"none"` (e.g. a stale client), the loop **upgrades** the effective effort
+  to that model's `reasoning.defaultEffort` (falling back to
+  `supportedEfforts[0]` only if OpenRouter reported no default) rather than
+  sending `"none"` to a model that would reject or ignore it.
+- **Frontend**: `apps/terminal/src/features/agent-chat/components/composer.tsx`
+  — a plain controlled search input (no new dependency) filters the cached
+  catalog client-side by id/name substring; each result shows name, id
+  (monospace), and a per-1M-token price hint (or "free"). Selecting a result
+  updates the trigger label to that model's own name (the static "GPT Latest"
+  row's checkmark is suppressed while a catalog model is selected; picking
+  "GPT Latest" again reverts to the fixed default).
+- **Tests (dynamic path)**: `openrouter-catalog.test.ts` +
+  `openrouter-catalog-unconfigured.test.ts` (fetch/reduce/TTL/stale-fallback/
+  unconfigured-empty, against a local mock server),
+  `azure-openrouter-catalog.test.ts` (`resolveModel` hit/miss/
+  mandatory-reasoning-fallback), `agent-loop-openrouter-catalog.test.ts`
+  (full-loop proof: a valid id sends that exact `model` upstream, an unknown
+  id never reaches the completions endpoint at all, and a mandatory-reasoning
+  model's `"none"` request is upgraded in the real outgoing body),
+  `composer-openrouter-search.test.tsx` (search row visibility, filtering,
+  effort-menu narrowing).
+- **Live-verified** (2026-09-05, against the real production deployment and
+  the real OpenRouter API, not just mocks): searched the live catalog,
+  filtered it, selected a real model, and completed a real turn against a
+  free model (`nvidia/nemotron-3.5-lightning:free`) that returned the exact
+  expected reply — see task 3.5's record for the full walkthrough.
+- **Deployment**: this feature touches all three tiers (`shared-types`,
+  `agent-service`, the composer), so unlike the fixed-default provider's
+  env-only rollout, a deployed local-prod stack needs **both**
+  `./build-prod.sh` **and** a `prod-agent` restart (never a raw `pnpm build`
+  — see [LOCAL-PROD.md](LOCAL-PROD.md)). Rollback is independent of the base
+  provider: the WS handler branch and the composer's search row can be
+  reverted on their own — the base fixed-model provider keeps working
+  unchanged whenever `openrouterModelId` is simply never sent. Verify both
+  states after any restart: with `OPENROUTER_API_KEY` unset, the search row
+  must not appear and `openrouter_models_request` must reply with an empty
+  list; with it set, search must return real results and a turn against a
+  selected model must complete.
 
 ### `codex-cli` — the Codex CLI as a picker entry (Option B)
 

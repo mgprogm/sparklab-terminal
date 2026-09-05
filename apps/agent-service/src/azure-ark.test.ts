@@ -26,8 +26,8 @@ test("all three BytePlus models are listed when ARK_API_KEY is set", () => {
   }
 });
 
-test("DeepSeek V4 Pro resolves to the Ark branch with thinking disabled", () => {
-  const r = resolveModel("deepseek-v4-pro-byteplus");
+test("DeepSeek V4 Pro resolves to the Ark branch with thinking disabled", async () => {
+  const r = await resolveModel("deepseek-v4-pro-byteplus");
   assert.ok(r);
   assert.equal(r.deployment, "deepseek-v4-pro-260425");
   assert.equal(r.supportsReasoningEffort, false);
@@ -35,24 +35,24 @@ test("DeepSeek V4 Pro resolves to the Ark branch with thinking disabled", () => 
   assert.notEqual(r.client, azure);
 });
 
-test("DeepSeek V3.2 resolves with its own default deployment id", () => {
-  const r = resolveModel("deepseek-v32-byteplus");
+test("DeepSeek V3.2 resolves with its own default deployment id", async () => {
+  const r = await resolveModel("deepseek-v32-byteplus");
   assert.ok(r);
   assert.equal(r.deployment, "deepseek-v3-2-251201");
   assert.equal(r.supportsReasoningEffort, false);
   assert.deepEqual(r.extraBody, { thinking: { type: "disabled" } });
 });
 
-test("GLM resolves to the Ark branch with no extra body", () => {
-  const r = resolveModel("glm-byteplus");
+test("GLM resolves to the Ark branch with no extra body", async () => {
+  const r = await resolveModel("glm-byteplus");
   assert.ok(r);
   assert.equal(r.deployment, "glm-4-7-251222");
   assert.equal(r.supportsReasoningEffort, false);
   assert.equal(r.extraBody, undefined);
 });
 
-test("Azure models still resolve normally alongside Ark", () => {
-  const r = resolveModel("gpt-5.6-sol");
+test("Azure models still resolve normally alongside Ark", async () => {
+  const r = await resolveModel("gpt-5.6-sol");
   assert.ok(r);
   assert.equal(r.client, azure);
   assert.equal(r.supportsReasoningEffort, true);

@@ -15,8 +15,9 @@
  *     request body.
  */
 import OpenAI, { AzureOpenAI } from "openai";
-import type { AgentModel } from "@sparklab/shared-types";
+import type { AgentModel, AgentReasoningEffort } from "@sparklab/shared-types";
 import { config } from "./config.js";
+import { getOpenRouterCatalog } from "./openrouter-catalog.js";
 
 export const azure = new AzureOpenAI({
   endpoint: config.azure.endpoint,
@@ -35,6 +36,20 @@ const byteplus: OpenAI | undefined = config.byteplus.apiKey
   ? new OpenAI({
       baseURL: `${config.byteplus.baseUrl}/api/v3`,
       apiKey: config.byteplus.apiKey,
+    })
+  : undefined;
+const openrouter: OpenAI | undefined = config.openrouter.apiKey
+  ? new OpenAI({
+      baseURL: config.openrouter.baseUrl,
+      apiKey: config.openrouter.apiKey,
+      defaultHeaders: {
+        ...(config.openrouter.referer
+          ? { "HTTP-Referer": config.openrouter.referer }
+          : {}),
+        ...(config.openrouter.title
+          ? { "X-OpenRouter-Title": config.openrouter.title }
+          : {}),
+      },
     })
   : undefined;
 
@@ -85,6 +100,7 @@ export const availableModels = (): AgentModel[] => {
     (model) => deployments[model] !== undefined,
   );
   if (byteplus) out.push(...arkModels.map((m) => m.id));
+  if (openrouter) out.push("openrouter-gpt-latest");
   if (config.codex.providerEnabled) out.push("codex-cli");
   return out;
 };
@@ -98,14 +114,56 @@ export interface ResolvedModel {
   supportsReasoningEffort: boolean;
   /** Extra JSON body params merged into the request (Ark's `thinking` flag). */
   extraBody?: Record<string, unknown>;
+  /**
+   * Set only for an OpenRouter catalog model whose `reasoning.mandatory` is
+   * true: the effort to send instead of a requested "none" (that model would
+   * otherwise reject or ignore "none"). The caller upgrades the turn's
+   * effective effort to this value rather than sending "none" verbatim.
+   */
+  mandatoryReasoningFallback?: AgentReasoningEffort;
 }
 
 /**
  * Resolve an allowlisted public model id to its provider client + deployment.
  * Returns undefined when the model has no provider configured (the caller
  * surfaces a clean "model not configured" error).
+ *
+ * `openrouterModelId` is only meaningful for `"openrouter-gpt-latest"`: when
+ * given, it is validated against the live/cached OpenRouter catalog before
+ * ever becoming the `deployment` sent upstream — an id that isn't in the
+ * catalog resolves to `undefined` exactly like any other unconfigured model,
+ * never forwarded verbatim. Omitted, behavior is unchanged from the
+ * fixed-default provider (`config.openrouter.model`, no reasoning effort).
  */
-export function resolveModel(model: AgentModel): ResolvedModel | undefined {
+export async function resolveModel(
+  model: AgentModel,
+  openrouterModelId?: string,
+): Promise<ResolvedModel | undefined> {
+  if (model === "openrouter-gpt-latest") {
+    if (!openrouter) return undefined;
+    if (!openrouterModelId) {
+      return {
+        client: openrouter,
+        deployment: config.openrouter.model,
+        supportsReasoningEffort: false,
+      };
+    }
+    const { models } = await getOpenRouterCatalog();
+    const found = models.find((m) => m.id === openrouterModelId);
+    if (!found) return undefined;
+    return {
+      client: openrouter,
+      deployment: found.id,
+      supportsReasoningEffort: found.reasoning !== undefined,
+      ...(found.reasoning?.mandatory
+        ? {
+            mandatoryReasoningFallback:
+              found.reasoning.defaultEffort ??
+              found.reasoning.supportedEfforts[0],
+          }
+        : {}),
+    };
+  }
   const ark = arkModels.find((m) => m.id === model);
   if (ark) {
     if (!byteplus) return undefined;

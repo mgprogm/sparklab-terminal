@@ -208,6 +208,13 @@ export class AgentLoop {
     activeSessionId?: string,
     model: AgentModel = DEFAULT_MODEL,
     reasoningEffort: AgentReasoningEffort = "medium",
+    /**
+     * Only meaningful when `model === "openrouter-gpt-latest"`: selects one
+     * specific catalog entry for this turn instead of the configured
+     * default. Validated against the live OpenRouter catalog by
+     * `resolveModel` — an unknown id resolves like any unconfigured model.
+     */
+    openrouterModelId?: string,
   ): Promise<void> {
     await this.ready;
     if (this.running) {
@@ -226,7 +233,7 @@ export class AgentLoop {
       return;
     }
 
-    const resolved = resolveModel(model);
+    const resolved = await resolveModel(model, openrouterModelId);
     if (!resolved) {
       this.send({
         type: "error",
@@ -234,6 +241,13 @@ export class AgentLoop {
       });
       return;
     }
+    // A model whose reasoning is mandatory (e.g. some OpenRouter catalog
+    // entries) rejects/ignores an effort of "none" — transparently upgrade
+    // rather than send a value that model can't honor.
+    const effectiveReasoningEffort: AgentReasoningEffort =
+      resolved.mandatoryReasoningFallback && reasoningEffort === "none"
+        ? resolved.mandatoryReasoningFallback
+        : reasoningEffort;
     this.running = true;
     this.abort = new AbortController();
     const signal = this.abort.signal;
@@ -273,7 +287,7 @@ export class AgentLoop {
           [system, ...this.history],
           signal,
           resolved,
-          reasoningEffort,
+          effectiveReasoningEffort,
         );
 
         // An empty first turn — no text, no tool calls — means the model gave
@@ -435,11 +449,7 @@ export class AgentLoop {
       }
     } catch (err) {
       if (!(err instanceof Error && err.name === "AbortError")) {
-        this.send({
-          type: "error",
-          message:
-            err instanceof Error ? err.message : "unexpected agent error",
-        });
+        this.send({ type: "error", message: describeStreamError(err) });
       }
     } finally {
       this.running = false;
@@ -848,6 +858,50 @@ export class AgentLoop {
       .filter((tc) => tc.name && tc.id);
     return { text, toolCalls };
   }
+}
+
+function stringField(obj: unknown, key: string): string | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  const v = (obj as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * Turns a raw upstream chat-completions error into a clearer chat message.
+ * A 429 in particular gets a specific, actionable explanation instead of the
+ * SDK's bare "<status> <body message>" string — a provider's own body
+ * message for a rate limit is frequently as unhelpful as OpenRouter's own
+ * "Provider returned error" (it means the upstream inference provider
+ * behind the requested model rate-limited it, not OpenRouter itself; any
+ * `error.metadata.raw`/`provider_name` OpenRouter attaches is surfaced when
+ * present). Applies to every provider — Azure/Ark can 429 too — since none
+ * of them give a friendlier body message on their own.
+ */
+export function describeStreamError(err: unknown): string {
+  if (!(err instanceof Error)) return "unexpected agent error";
+  const status = (err as { status?: unknown }).status;
+  if (status !== 429) return err.message;
+
+  const body = (err as { error?: unknown }).error;
+  const metadata =
+    body && typeof body === "object"
+      ? (body as { metadata?: unknown }).metadata
+      : undefined;
+  const raw = stringField(metadata, "raw");
+  const providerName = stringField(metadata, "provider_name");
+  const bodyMessage = stringField(body, "message");
+
+  return [
+    "Rate limited (429) by the model provider.",
+    providerName ? `Upstream provider: ${providerName}.` : undefined,
+    raw ??
+      (bodyMessage && bodyMessage !== "Provider returned error"
+        ? bodyMessage
+        : undefined),
+    "Free or low-cost models often share a low request rate across all users of that provider, so this can happen even on a fresh account — wait a bit and try again, or pick a different model.",
+  ]
+    .filter((p): p is string => Boolean(p))
+    .join(" ");
 }
 
 function parseArgs(raw: string): ToolArgs {

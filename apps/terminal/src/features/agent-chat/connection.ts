@@ -191,6 +191,7 @@ export class AgentConnection {
     activeSessionId?: string,
     model?: AgentModel,
     reasoningEffort?: AgentReasoningEffort,
+    openrouterModelId?: string,
   ): void {
     this.sendRaw({
       type: "user_message",
@@ -198,6 +199,7 @@ export class AgentConnection {
       activeSessionId,
       model,
       reasoningEffort,
+      openrouterModelId,
     });
   }
 
@@ -215,6 +217,10 @@ export class AgentConnection {
 
   listChats(): void {
     this.sendRaw({ type: "list_chats" });
+  }
+
+  requestOpenRouterModels(): void {
+    this.sendRaw({ type: "openrouter_models_request" });
   }
 
   deleteChat(chatId: string): void {

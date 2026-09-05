@@ -17,22 +17,26 @@ import {
 } from "@sparklab/ui/components/ui/dropdown-menu";
 import { cn } from "@sparklab/ui/lib/utils";
 import {
+  ArrowLeft,
   ArrowUp,
   Check,
   ChevronDown,
   Mic,
   MicOff,
   Pin,
+  Search,
   SlidersHorizontal,
   Square,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useAgentStore } from "../store";
+import { requestOpenRouterModels } from "../use-agent-chat";
 
 import type {
   AgentModel,
   AgentReasoningEffort,
+  OpenRouterCatalogModel,
   SessionInfo,
 } from "@sparklab/shared-types";
 
@@ -43,6 +47,7 @@ const MODEL_LABELS: Record<AgentModel, string> = {
   "deepseek-v4-pro-byteplus": "DeepSeek V4 Pro",
   "deepseek-v32-byteplus": "DeepSeek V3.2",
   "glm-byteplus": "GLM-4.7",
+  "openrouter-gpt-latest": "GPT Latest",
   "codex-cli": "Codex CLI",
 };
 
@@ -54,15 +59,22 @@ const MODEL_PROVIDER: Record<AgentModel, string> = {
   "deepseek-v4-pro-byteplus": "BytePlus Ark",
   "deepseek-v32-byteplus": "BytePlus Ark",
   "glm-byteplus": "BytePlus Ark",
+  "openrouter-gpt-latest": "OpenRouter",
   "codex-cli": "OpenAI Codex",
 };
 
 /**
  * Reasoning effort is a GPT-5.6 control; BytePlus Ark models ignore it, and
- * "Codex CLI" is not a chat-completions model at all.
+ * "Codex CLI" is not a chat-completions model at all. The bare
+ * "openrouter-gpt-latest" entry (no specific catalog model chosen) also has
+ * no effort control — once a specific OpenRouter catalog model is selected,
+ * ITS OWN supported-efforts array (from the live catalog) decides this
+ * instead; see `showsEffortControl` in the component below.
  */
-const modelSupportsEffort = (model: AgentModel): boolean =>
-  !model.endsWith("-byteplus") && model !== "codex-cli";
+const nativeModelSupportsEffort = (model: AgentModel): boolean =>
+  !model.endsWith("-byteplus") &&
+  model !== "codex-cli" &&
+  model !== "openrouter-gpt-latest";
 
 const EFFORT_LABELS: Record<AgentReasoningEffort, string> = {
   none: "None",
@@ -72,6 +84,26 @@ const EFFORT_LABELS: Record<AgentReasoningEffort, string> = {
   xhigh: "Extra high",
   max: "Max",
 };
+
+/**
+ * A compact per-1M-token price hint for the OpenRouter search results, e.g.
+ * "$10.00/$50.00 per 1M" or "free". OpenRouter reports pricing as a per-token
+ * decimal string; this is a v1 readability choice, not exact-cost accounting.
+ */
+function formatPriceHint(pricing: {
+  prompt: string;
+  completion: string;
+}): string {
+  const perMillion = (raw: string): string => {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return "?";
+    return n === 0 ? "free" : `$${(n * 1_000_000).toFixed(2)}`;
+  };
+  const prompt = perMillion(pricing.prompt);
+  const completion = perMillion(pricing.completion);
+  if (prompt === "free" && completion === "free") return "free";
+  return `${prompt}/${completion} per 1M`;
+}
 
 const WAVEFORM_DELAYS_MS = [0, 90, 180, 270, 360, 450, 540, 630, 720, 810];
 
@@ -116,8 +148,43 @@ export function Composer({
   const availableReasoningEfforts = useAgentStore(
     (s) => s.availableReasoningEfforts,
   );
+  const openrouterCatalog = useAgentStore((s) => s.openrouterCatalog);
+  const openrouterCatalogLoading = useAgentStore(
+    (s) => s.openrouterCatalogLoading,
+  );
+  const setOpenRouterCatalogLoading = useAgentStore(
+    (s) => s.setOpenRouterCatalogLoading,
+  );
+  const openrouterModelId = useAgentStore((s) => s.openrouterModelId);
+  const openrouterModelLabel = useAgentStore((s) => s.openrouterModelLabel);
+  const openrouterModelSupportedEfforts = useAgentStore(
+    (s) => s.openrouterModelSupportedEfforts,
+  );
+  const selectOpenRouterModel = useAgentStore((s) => s.selectOpenRouterModel);
+  const [openrouterSearchOpen, setOpenrouterSearchOpen] = useState(false);
+  const [openrouterQuery, setOpenrouterQuery] = useState("");
 
   const working = status !== "idle";
+  const catalogSelected =
+    model === "openrouter-gpt-latest" && openrouterModelId !== null;
+  const showsEffortControl = catalogSelected
+    ? (openrouterModelSupportedEfforts?.length ?? 0) > 0
+    : nativeModelSupportsEffort(model);
+  const effortOptionsToShow =
+    catalogSelected && openrouterModelSupportedEfforts
+      ? openrouterModelSupportedEfforts
+      : availableReasoningEfforts;
+  const modelTriggerLabel = catalogSelected
+    ? (openrouterModelLabel ?? MODEL_LABELS[model])
+    : MODEL_LABELS[model];
+  const filteredOpenrouterCatalog = openrouterQuery.trim()
+    ? openrouterCatalog.filter((m: OpenRouterCatalogModel) => {
+        const q = openrouterQuery.trim().toLowerCase();
+        return (
+          m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
+        );
+      })
+    : openrouterCatalog;
   const effectiveTarget = pinnedTargetId ?? activeSessionId;
   const targetName =
     sessions.find((s) => s.id === effectiveTarget)?.name ?? "no session";
@@ -311,18 +378,25 @@ export function Composer({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <DropdownMenu>
+            <DropdownMenu
+              onOpenChange={(open) => {
+                if (!open) {
+                  setOpenrouterSearchOpen(false);
+                  setOpenrouterQuery("");
+                }
+              }}
+            >
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
                   disabled={working || disabled}
                   aria-label="Choose agent model and reasoning effort"
-                  className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                  className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 min-w-0 shrink items-center gap-1 rounded-sm px-1.5 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
                 >
                   <SlidersHorizontal className="size-3 shrink-0" />
-                  <span>
-                    {MODEL_LABELS[model]}
-                    {modelSupportsEffort(model)
+                  <span className="max-w-32 truncate">
+                    {modelTriggerLabel}
+                    {showsEffortControl
                       ? ` · ${EFFORT_LABELS[reasoningEffort]}`
                       : ""}
                   </span>
@@ -330,38 +404,127 @@ export function Composer({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-44">
-                <DropdownMenuLabel>Model</DropdownMenuLabel>
-                {availableModels.map((option) => (
-                  <DropdownMenuItem
-                    key={option}
-                    onClick={() => setModel(option)}
-                  >
-                    <span className="flex flex-col">
-                      <span>{MODEL_LABELS[option]}</span>
-                      <span className="text-muted-foreground text-[10px]">
-                        {MODEL_PROVIDER[option]}
-                      </span>
-                    </span>
-                    {model === option && (
-                      <Check className="ml-auto size-3.5 self-center" />
-                    )}
-                  </DropdownMenuItem>
-                ))}
-                {modelSupportsEffort(model) && (
+                {openrouterSearchOpen ? (
+                  <div className="flex flex-col gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenrouterSearchOpen(false);
+                        setOpenrouterQuery("");
+                      }}
+                      className="text-muted-foreground hover:text-foreground flex items-center gap-1 px-1 py-1 text-xs"
+                    >
+                      <ArrowLeft className="size-3" />
+                      Back
+                    </button>
+                    <input
+                      autoFocus
+                      value={openrouterQuery}
+                      onChange={(e) => setOpenrouterQuery(e.target.value)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      placeholder="Search OpenRouter models…"
+                      className="bg-background border-border text-foreground placeholder:text-muted-foreground mb-1 rounded-sm border px-2 py-1 text-xs outline-none"
+                    />
+                    <div className="max-h-64 overflow-y-auto">
+                      {openrouterCatalogLoading &&
+                      openrouterCatalog.length === 0 ? (
+                        <div className="text-muted-foreground px-2 py-1.5 text-xs">
+                          Loading models…
+                        </div>
+                      ) : filteredOpenrouterCatalog.length === 0 ? (
+                        <div className="text-muted-foreground px-2 py-1.5 text-xs">
+                          No matching models
+                        </div>
+                      ) : (
+                        filteredOpenrouterCatalog.map((m) => (
+                          <DropdownMenuItem
+                            key={m.id}
+                            onClick={() => {
+                              selectOpenRouterModel(
+                                m.id,
+                                m.name,
+                                m.reasoning?.supportedEfforts ?? null,
+                              );
+                              setOpenrouterSearchOpen(false);
+                              setOpenrouterQuery("");
+                            }}
+                          >
+                            <span className="flex min-w-0 flex-col">
+                              <span className="truncate">{m.name}</span>
+                              <span className="text-muted-foreground truncate font-mono text-[10px]">
+                                {m.id}
+                              </span>
+                            </span>
+                            <span className="text-muted-foreground ml-auto shrink-0 text-[10px]">
+                              {formatPriceHint(m.pricing)}
+                            </span>
+                            {openrouterModelId === m.id && (
+                              <Check className="ml-1 size-3.5 shrink-0 self-center" />
+                            )}
+                          </DropdownMenuItem>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : (
                   <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel>Reasoning effort</DropdownMenuLabel>
-                    {availableReasoningEfforts.map((option) => (
+                    <DropdownMenuLabel>Model</DropdownMenuLabel>
+                    {/* "openrouter-gpt-latest" has no plain list row — OpenRouter
+                        is reached only through the search entry point below,
+                        which sets a real openrouterModelId on selection. */}
+                    {availableModels
+                      .filter((option) => option !== "openrouter-gpt-latest")
+                      .map((option) => (
+                        <DropdownMenuItem
+                          key={option}
+                          onClick={() => setModel(option)}
+                        >
+                          <span className="flex flex-col">
+                            <span>{MODEL_LABELS[option]}</span>
+                            <span className="text-muted-foreground text-[10px]">
+                              {MODEL_PROVIDER[option]}
+                            </span>
+                          </span>
+                          {model === option && (
+                            <Check className="ml-auto size-3.5 self-center" />
+                          )}
+                        </DropdownMenuItem>
+                      ))}
+                    {availableModels.includes("openrouter-gpt-latest") && (
                       <DropdownMenuItem
-                        key={option}
-                        onClick={() => setReasoningEffort(option)}
+                        onSelect={(e) => {
+                          e.preventDefault();
+                          setOpenrouterSearchOpen(true);
+                          if (
+                            openrouterCatalog.length === 0 &&
+                            !openrouterCatalogLoading
+                          ) {
+                            setOpenRouterCatalogLoading(true);
+                            requestOpenRouterModels();
+                          }
+                        }}
                       >
-                        <span>{EFFORT_LABELS[option]}</span>
-                        {reasoningEffort === option && (
-                          <Check className="ml-auto size-3.5" />
-                        )}
+                        <Search className="size-3.5 shrink-0" />
+                        <span>Search OpenRouter models…</span>
                       </DropdownMenuItem>
-                    ))}
+                    )}
+                    {showsEffortControl && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuLabel>Reasoning effort</DropdownMenuLabel>
+                        {effortOptionsToShow.map((option) => (
+                          <DropdownMenuItem
+                            key={option}
+                            onClick={() => setReasoningEffort(option)}
+                          >
+                            <span>{EFFORT_LABELS[option]}</span>
+                            {reasoningEffort === option && (
+                              <Check className="ml-auto size-3.5" />
+                            )}
+                          </DropdownMenuItem>
+                        ))}
+                      </>
+                    )}
                   </>
                 )}
               </DropdownMenuContent>

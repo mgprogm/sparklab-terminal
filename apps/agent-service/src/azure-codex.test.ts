@@ -19,8 +19,8 @@ test("codex-cli is listed when CODEX_PROVIDER_ENABLED=true", () => {
   assert.ok(availableModels().includes("codex-cli"));
 });
 
-test("codex-cli is not a chat-completions model (resolveModel → undefined)", () => {
-  assert.equal(resolveModel("codex-cli"), undefined);
+test("codex-cli is not a chat-completions model (resolveModel → undefined)", async () => {
+  assert.equal(await resolveModel("codex-cli"), undefined);
 });
 
 test("isCodexCliModel discriminates the picker entry", () => {

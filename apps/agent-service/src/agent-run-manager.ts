@@ -111,12 +111,14 @@ export class AgentRun {
     activeSessionId?: string,
     model?: AgentModel,
     reasoningEffort?: AgentReasoningEffort,
+    openrouterModelId?: string,
   ): Promise<void> {
     await this.loop.handleUserMessage(
       text,
       activeSessionId,
       model,
       reasoningEffort,
+      openrouterModelId,
     );
     await this.flush();
   }

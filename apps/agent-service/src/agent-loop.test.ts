@@ -10,6 +10,7 @@ const {
   sanitizePersistedToolResult,
   parseComputerAction,
   formatCodexProviderReply,
+  describeStreamError,
 } = await import("./agent-loop.js");
 
 test("browser arguments omit typed secrets and URL tokens from history", () => {
@@ -217,6 +218,55 @@ test("parseComputerAction: drag needs integer to_x/to_y and rejects an element t
     }) as string,
     /drag cannot target an element_index/,
   );
+});
+
+function makeApiError(
+  status: number,
+  error?: { message?: string; metadata?: Record<string, unknown> },
+): Error {
+  const message = error?.message ? `${status} ${error.message}` : `${status}`;
+  return Object.assign(new Error(message), { status, error });
+}
+
+test("describeStreamError: a 429 with OpenRouter's generic body surfaces the metadata.raw detail instead", () => {
+  const err = makeApiError(429, {
+    message: "Provider returned error",
+    metadata: {
+      raw: "upstream rate limit: 20 requests/day exceeded",
+      provider_name: "z-ai",
+    },
+  });
+  const msg = describeStreamError(err);
+  assert.match(msg, /Rate limited \(429\)/);
+  assert.match(msg, /Upstream provider: z-ai\./);
+  assert.match(msg, /upstream rate limit: 20 requests\/day exceeded/);
+  assert.doesNotMatch(msg, /Provider returned error/);
+});
+
+test("describeStreamError: a 429 with a real body message and no metadata surfaces that message", () => {
+  const err = makeApiError(429, {
+    message: "You have exceeded your current quota",
+  });
+  const msg = describeStreamError(err);
+  assert.match(msg, /Rate limited \(429\)/);
+  assert.match(msg, /You have exceeded your current quota/);
+});
+
+test("describeStreamError: a 429 with no body at all still gives actionable guidance", () => {
+  const err = makeApiError(429);
+  const msg = describeStreamError(err);
+  assert.match(msg, /Rate limited \(429\) by the model provider\./);
+  assert.match(msg, /wait a bit and try again/);
+});
+
+test("describeStreamError: a non-429 error passes its message through unchanged", () => {
+  const err = makeApiError(500, { message: "internal server error" });
+  assert.equal(describeStreamError(err), "500 internal server error");
+});
+
+test("describeStreamError: a non-Error value never throws", () => {
+  assert.equal(describeStreamError("not an error"), "unexpected agent error");
+  assert.equal(describeStreamError(undefined), "unexpected agent error");
 });
 
 test("parseComputerAction: hotkey needs a 2-8 key chord and no target (M3.2)", () => {
