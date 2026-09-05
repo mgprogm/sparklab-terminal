@@ -25,6 +25,7 @@ import kanban from "./kanban.js";
 import notes from "./notes.js";
 import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
+import taskmasterProjects from "./taskmaster.js";
 import agentic from "./agentic.js";
 import schedules from "./agentic-schedules.js";
 import scheduledTerminalActions from "./scheduled-terminal-actions.js";
@@ -649,20 +650,32 @@ async function serverExecStdin(server, tmuxArgs, input) {
 const FS_CMD_MAX_BUFFER = 16 * 1024 * 1024;
 const FS_CMD_TIMEOUT_MS = 15_000;
 
-function serverCmdArgv(server, argv, { tty = false } = {}) {
+function serverCmdArgv(server, argv, { tty = false, cwd } = {}) {
   if (!server || server.type === "local") {
     return argv;
   }
   const ssh = ["ssh"];
   if (tty) ssh.push("-tt");
-  const remoteCmd = argv.map(shellQuote).join(" ");
+  const quotedArgv = argv.map(shellQuote).join(" ");
+  // A remote `cwd` has no execFile-option equivalent over ssh (unlike the
+  // local path, where `opts.cwd` below flows straight to execFileAsync) — it
+  // must be baked into the remote command string itself. Added for the Task
+  // Master Hub's "legacy family" commands: task-master's project-root/config
+  // discovery follows the REAL process cwd, never a `--file`/`--project`-style
+  // flag substitute (verified live, see docs/TASKMASTER-HUB-PLAN.md §1e #3 —
+  // `--file` from an unrelated cwd silently picked the wrong AI provider), so
+  // a legacy command run against a remote project must actually `cd` there.
+  const remoteCmd = cwd ? `cd ${shellQuote(cwd)} && ${quotedArgv}` : quotedArgv;
   ssh.push(...sshOptsFor(server), sshHost(server), remoteCmd);
   return ssh;
 }
 
 // Run an arbitrary argv on `server`, await stdout/stderr. Mirrors serverExec.
+// `opts.cwd`: local exec passes it straight through to execFileAsync (a real
+// cwd); remote exec bakes it into the ssh command string via serverCmdArgv
+// (see its comment — there's no execFile-option equivalent over ssh).
 async function serverCmd(server, argv, opts = {}) {
-  const a = serverCmdArgv(server, argv);
+  const a = serverCmdArgv(server, argv, { cwd: opts.cwd });
   return execFileAsync(a[0], a.slice(1), {
     env: childEnvFor(server),
     timeout: FS_CMD_TIMEOUT_MS,
@@ -675,7 +688,7 @@ async function serverCmd(server, argv, opts = {}) {
 // serverExecStdin; used by fs/upload (`tee -- <dest>`). `input` is a Buffer or
 // string already buffered under the route-local upload cap.
 async function serverCmdStdin(server, argv, input, opts = {}) {
-  const a = serverCmdArgv(server, argv);
+  const a = serverCmdArgv(server, argv, { cwd: opts.cwd });
   const promise = execFileAsync(a[0], a.slice(1), {
     env: childEnvFor(server),
     timeout: FS_CMD_TIMEOUT_MS,
@@ -2917,6 +2930,633 @@ async function handlePm(req, res, url) {
       return sendJson(res, pmErrorStatus(e.code), {
         error: e.message,
         ...(e.details || {}),
+      });
+    }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task Master Hub (pluggable artifact) — /api/taskmaster/*
+// ---------------------------------------------------------------------------
+// Every route below shells out to the REAL `task-master` CLI (a separate,
+// externally-published tool: https://github.com/eyaltoledano/claude-task-master)
+// — this gateway never reads or writes a project's own
+// `.taskmaster/tasks/tasks.json` itself, so tm-core's own validation,
+// dependency-cycle checks, and tag/schema logic stay authoritative (same
+// trust model as `run_codex` shelling to `codex exec`). Full design record,
+// including the live-CLI/live-SSH verification spike this implementation is
+// built from: docs/TASKMASTER-HUB-PLAN.md (D1-D12, §1e).
+
+// Overridable via TASKMASTER_COMMAND (mirrors CODEX_COMMAND) so tests can
+// point at a stub; the real default is just `task-master` on $PATH.
+const TASKMASTER_COMMAND = (() => {
+  const raw = (process.env.TASKMASTER_COMMAND || "").trim();
+  if (!raw) return ["task-master"];
+  if (raw.startsWith("[")) {
+    try {
+      const arr = JSON.parse(raw);
+      if (
+        Array.isArray(arr) &&
+        arr.length > 0 &&
+        arr.every((x) => typeof x === "string")
+      ) {
+        return arr;
+      }
+    } catch {
+      /* fall through to treating raw as a plain path */
+    }
+  }
+  return [raw];
+})();
+const TASKMASTER_TIMEOUT_MS =
+  Number(process.env.TASKMASTER_TIMEOUT_MS) || 120_000;
+const TASKMASTER_OUTPUT_CAP = 128 * 1024;
+const TASKMASTER_STATUSES = new Set([
+  "pending",
+  "in-progress",
+  "done",
+  "deferred",
+  "cancelled",
+  "blocked",
+  "review",
+]);
+const TASKMASTER_PRIORITIES = new Set(["low", "medium", "high"]);
+
+function isTaskmasterUnavailableError(err) {
+  const stderr = String((err && err.stderr) || "");
+  return (
+    (err && err.code === "ENOENT") ||
+    /command not found|not found|not recognized as/i.test(stderr)
+  );
+}
+
+function isTaskmasterTimeoutError(err) {
+  return !!(
+    err &&
+    (err.killed || err.signal === "SIGTERM" || err.code === "ETIMEDOUT")
+  );
+}
+
+function taskmasterErrorStatus(code) {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "taskmaster_unavailable":
+      return 503;
+    case "taskmaster_timeout":
+      return 504;
+    default:
+      return 400;
+  }
+}
+
+// `family: "core"` (list/show/next/set-status): `--project <path>` is
+// genuinely cwd-independent, verified live over ssh too (TASKMASTER-HUB-PLAN
+// §1e #2) — never touches cwd, local or remote.
+async function runTaskmasterCore(server, projectPath, command, args = []) {
+  const argv = [
+    ...TASKMASTER_COMMAND,
+    command,
+    ...args,
+    "--project",
+    projectPath,
+    "--format",
+    "json",
+  ];
+  try {
+    const { stdout } = await serverCmd(server, argv, {
+      timeout: TASKMASTER_TIMEOUT_MS,
+    });
+    let json = null;
+    try {
+      json = JSON.parse(stdout);
+    } catch {
+      /* leave json null — caller treats as unparseable */
+    }
+    return { exitCode: 0, json, raw: stdout };
+  } catch (err) {
+    if (isTaskmasterUnavailableError(err)) {
+      const e = new Error("task-master CLI is not installed on this server");
+      e.code = "taskmaster_unavailable";
+      throw e;
+    }
+    if (isTaskmasterTimeoutError(err)) {
+      const e = new Error(
+        `task-master timed out after ${TASKMASTER_TIMEOUT_MS} ms`,
+      );
+      e.code = "taskmaster_timeout";
+      throw e;
+    }
+    // Non-zero exit but the process ran — task-master can still emit a
+    // misleading success-shaped JSON body on stdout (§1c) even on failure;
+    // surface it for the caller to judge rather than swallowing it here.
+    let json = null;
+    try {
+      json = JSON.parse(err.stdout || "");
+    } catch {
+      /* leave json null */
+    }
+    return {
+      exitCode: typeof err.code === "number" ? err.code : 1,
+      json,
+      raw: err.stdout || "",
+      stderr: err.stderr || "",
+    };
+  }
+}
+
+// `family: "legacy"` (add-task/update-task/expand/add-dependency): task-
+// master's project-root/config discovery follows the REAL process cwd ONLY —
+// verified live, `--file` does NOT substitute (§1e #3, silently picks the
+// wrong AI provider from an unrelated cwd). Always real cwd = project path
+// (local {cwd} execFile option / remote `cd &&`, both via serverCmd's
+// `opts.cwd`). No JSON mode; judged by exit code (+ text checks per command).
+async function runTaskmasterLegacy(server, projectPath, command, args = []) {
+  const argv = [...TASKMASTER_COMMAND, command, ...args];
+  try {
+    const { stdout, stderr } = await serverCmd(server, argv, {
+      cwd: projectPath,
+      timeout: TASKMASTER_TIMEOUT_MS,
+    });
+    return { exitCode: 0, stdout, stderr };
+  } catch (err) {
+    if (isTaskmasterUnavailableError(err)) {
+      const e = new Error("task-master CLI is not installed on this server");
+      e.code = "taskmaster_unavailable";
+      throw e;
+    }
+    if (isTaskmasterTimeoutError(err)) {
+      const e = new Error(
+        `task-master timed out after ${TASKMASTER_TIMEOUT_MS} ms`,
+      );
+      e.code = "taskmaster_timeout";
+      // The CLI may have already written state before the timeout fired —
+      // the caller must re-fetch, never blindly retry (D11).
+      e.outcomeUnknown = true;
+      throw e;
+    }
+    return {
+      exitCode: typeof err.code === "number" ? err.code : 1,
+      stdout: err.stdout || "",
+      stderr: err.stderr || "",
+    };
+  }
+}
+
+// Resolve a registered project id -> {project, server}, or send 404/400 and
+// return null. Every route below starts with this.
+function resolveTaskmasterProject(res, projectId) {
+  const project = taskmasterProjects.get(projectId);
+  if (!project) {
+    sendJson(res, 404, { error: "project not found" });
+    return null;
+  }
+  const server = registry.get(project.serverId);
+  if (!server) {
+    sendJson(res, 400, { error: `unknown server "${project.serverId}"` });
+    return null;
+  }
+  return { project, server };
+}
+
+// D9: strip the fields observed to run tens of KB per task (§1d) from the
+// polled list — full detail is fetched only by the per-task `show` route.
+function projectTaskSummary(t) {
+  return {
+    id: t.id,
+    title: t.title,
+    status: t.status,
+    priority: t.priority,
+    dependencies: Array.isArray(t.dependencies) ? t.dependencies : [],
+    blocks: Array.isArray(t.blocks) ? t.blocks : [],
+    complexity: t.complexity ?? null,
+    updatedAt: t.updatedAt ?? null,
+  };
+}
+
+async function handleTaskmaster(req, res, url) {
+  const seg = url.pathname.split("/").filter(Boolean).slice(2);
+  try {
+    // GET /api/taskmaster/projects
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "projects") {
+      return sendJson(res, 200, { projects: taskmasterProjects.list() });
+    }
+
+    // POST /api/taskmaster/projects — register (probes .taskmaster/ + binaryMode, D1/D5)
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "projects") {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const { name, serverId, path: projectPath } = r.body;
+      if (typeof projectPath !== "string" || !projectPath.startsWith("/")) {
+        return sendJson(res, 400, { error: "path must be an absolute path" });
+      }
+      if (typeof serverId !== "string" || !serverId) {
+        return sendJson(res, 400, { error: "serverId is required" });
+      }
+      const server = registry.get(serverId);
+      if (!server) {
+        return sendJson(res, 400, { error: `unknown server "${serverId}"` });
+      }
+      try {
+        await serverCmd(server, ["test", "-d", `${projectPath}/.taskmaster`]);
+      } catch {
+        return sendJson(res, 400, {
+          error: `no .taskmaster/ directory found at "${projectPath}"`,
+        });
+      }
+      // Probe binaryMode (D5): a real installed binary is required for the
+      // legacy-family routes; the npx fallback is only safe for core-family
+      // commands (§1e #5 — never combine npx with the legacy family's `cd`).
+      let binaryMode = "core-only-npx";
+      try {
+        await serverCmd(server, [...TASKMASTER_COMMAND, "--version"]);
+        binaryMode = "binary";
+      } catch {
+        binaryMode = "core-only-npx";
+      }
+      const created = taskmasterProjects.create({
+        name,
+        serverId,
+        path: projectPath,
+        binaryMode,
+      });
+      return sendJson(res, 201, created);
+    }
+
+    // DELETE /api/taskmaster/projects/:id — registry-only removal
+    if (req.method === "DELETE" && seg.length === 2 && seg[0] === "projects") {
+      try {
+        taskmasterProjects.remove(seg[1]);
+      } catch (e) {
+        if (e && e.code === "not_found") {
+          return sendJson(res, 404, { error: "project not found" });
+        }
+        throw e;
+      }
+      res.writeHead(204);
+      res.end();
+      return true;
+    }
+
+    // GET /api/taskmaster/projects/:id/tags — read-only: current tag only
+    // (D12). task-master's `tags list` has no JSON mode (§1a) and parsing its
+    // styled table is exactly the kind of unverified contract §7 warns
+    // against — v1 exposes only the current tag, read directly from
+    // .taskmaster/state.json (a scoped, read-only exception to D2: there is
+    // no JSON-capable CLI equivalent for "what's the current tag").
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "tags"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      try {
+        const { stdout } = await serverCmd(server, [
+          "cat",
+          `${project.path}/.taskmaster/state.json`,
+        ]);
+        const state = JSON.parse(stdout);
+        return sendJson(res, 200, {
+          currentTag: state.currentTag || "master",
+        });
+      } catch {
+        return sendJson(res, 200, { currentTag: "master" });
+      }
+    }
+
+    // POST /api/taskmaster/projects/:id/tags/use — the single confirmed
+    // tag-switch action (D12, verified §1e #6: exit-code reliable).
+    if (
+      req.method === "POST" &&
+      seg.length === 4 &&
+      seg[0] === "projects" &&
+      seg[2] === "tags" &&
+      seg[3] === "use"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.name !== "string" || !r.body.name.trim()) {
+        return sendJson(res, 400, { error: "name is required" });
+      }
+      if (project.binaryMode !== "binary") {
+        return sendJson(res, 503, {
+          error:
+            "task-master CLI is not installed on this server (npx fallback does not support tag switching, see TASKMASTER-HUB-PLAN.md §1e #5)",
+        });
+      }
+      const result = await runTaskmasterLegacy(server, project.path, "tags", [
+        "use",
+        r.body.name.trim(),
+      ]);
+      if (result.exitCode !== 0) {
+        return sendJson(res, 400, {
+          error: capText(result.stderr || "", TASKMASTER_OUTPUT_CAP).text,
+        });
+      }
+      return sendJson(res, 200, { currentTag: r.body.name.trim() });
+    }
+
+    // GET /api/taskmaster/projects/:id/tasks — summary-projected list (D9)
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      const result = await runTaskmasterCore(server, project.path, "list");
+      if (!result.json || !Array.isArray(result.json.tasks)) {
+        return sendJson(res, 502, { error: "unexpected task-master output" });
+      }
+      return sendJson(res, 200, {
+        tasks: result.json.tasks.map(projectTaskSummary),
+        metadata: result.json.metadata || {},
+      });
+    }
+
+    // GET /api/taskmaster/projects/:id/tasks/:taskId — full detail
+    if (
+      req.method === "GET" &&
+      seg.length === 4 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      const result = await runTaskmasterCore(server, project.path, "show", [
+        "--id",
+        seg[3],
+      ]);
+      if (!result.json) {
+        return sendJson(res, 502, { error: "unexpected task-master output" });
+      }
+      if (result.json.found === false || !result.json.task) {
+        return sendJson(res, 404, { error: "task not found" });
+      }
+      return sendJson(res, 200, result.json.task);
+    }
+
+    // GET /api/taskmaster/projects/:id/next
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "next"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      const result = await runTaskmasterCore(server, project.path, "next");
+      if (!result.json) {
+        return sendJson(res, 502, { error: "unexpected task-master output" });
+      }
+      return sendJson(res, 200, result.json);
+    }
+
+    // POST /api/taskmaster/projects/:id/tasks/:taskId/status — set-status
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks" &&
+      seg[4] === "status"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const status = r.body.status;
+      if (typeof status !== "string" || !TASKMASTER_STATUSES.has(status)) {
+        return sendJson(res, 400, {
+          error: `status must be one of ${[...TASKMASTER_STATUSES].join(", ")}`,
+        });
+      }
+      const taskId = seg[3];
+      const result = await runTaskmasterCore(
+        server,
+        project.path,
+        "set-status",
+        ["--id", taskId, "--status", status],
+      );
+      // §1c: never trust a bare success field — exit code AND whether
+      // updatedTasks actually contains the task we asked for.
+      const updated = Array.isArray(result.json && result.json.updatedTasks)
+        ? result.json.updatedTasks
+        : [];
+      const ok =
+        result.exitCode === 0 &&
+        updated.some((t) => String((t && t.id) ?? t) === String(taskId));
+      if (!ok) {
+        return sendJson(res, 400, {
+          error: `failed to set status for task ${taskId}`,
+          detail: capText(
+            result.stderr || result.raw || "",
+            TASKMASTER_OUTPUT_CAP,
+          ).text,
+        });
+      }
+      // Re-fetch (D3) rather than trust the mutation's own payload shape.
+      const fresh = await runTaskmasterCore(server, project.path, "show", [
+        "--id",
+        taskId,
+      ]);
+      return sendJson(
+        res,
+        200,
+        (fresh.json && fresh.json.task) || { id: taskId, status },
+      );
+    }
+
+    // Everything past this point is legacy-family (D3) and requires a real
+    // installed binary (D5) — the npx fallback is unsafe combined with the
+    // `cd` these commands need (§1e #5).
+    if (
+      (req.method === "POST" || req.method === "PATCH") &&
+      seg[0] === "projects" &&
+      seg.length >= 3 &&
+      (seg[2] === "tasks" || seg[2] === "dependencies")
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      if (project.binaryMode !== "binary") {
+        return sendJson(res, 503, {
+          error:
+            "task-master CLI is not installed on this server (npx fallback does not support this action, see TASKMASTER-HUB-PLAN.md §1e #5)",
+        });
+      }
+
+      // POST /api/taskmaster/projects/:id/tasks — add-task
+      if (req.method === "POST" && seg.length === 3 && seg[2] === "tasks") {
+        const r = await readJsonObject(req);
+        if (!r.ok) return sendJson(res, r.status, { error: r.error });
+        if (typeof r.body.prompt !== "string" || !r.body.prompt.trim()) {
+          return sendJson(res, 400, { error: "prompt is required" });
+        }
+        if (
+          r.body.priority !== undefined &&
+          !TASKMASTER_PRIORITIES.has(r.body.priority)
+        ) {
+          return sendJson(res, 400, {
+            error: `priority must be one of ${[...TASKMASTER_PRIORITIES].join(", ")}`,
+          });
+        }
+        const args = ["--prompt", r.body.prompt.trim()];
+        if (r.body.priority) args.push("--priority", r.body.priority);
+        if (Array.isArray(r.body.dependencies) && r.body.dependencies.length) {
+          args.push("--dependencies", r.body.dependencies.join(","));
+        }
+        const result = await runTaskmasterLegacy(
+          server,
+          project.path,
+          "add-task",
+          args,
+        );
+        if (result.exitCode !== 0) {
+          return sendJson(res, 400, {
+            error: capText(result.stderr || "", TASKMASTER_OUTPUT_CAP).text,
+          });
+        }
+        const fresh = await runTaskmasterCore(server, project.path, "list");
+        return sendJson(res, 201, {
+          tasks:
+            fresh.json && Array.isArray(fresh.json.tasks)
+              ? fresh.json.tasks.map(projectTaskSummary)
+              : [],
+        });
+      }
+
+      // PATCH /api/taskmaster/projects/:id/tasks/:taskId — update-task
+      if (req.method === "PATCH" && seg.length === 4 && seg[2] === "tasks") {
+        const r = await readJsonObject(req);
+        if (!r.ok) return sendJson(res, r.status, { error: r.error });
+        if (typeof r.body.prompt !== "string" || !r.body.prompt.trim()) {
+          return sendJson(res, 400, { error: "prompt is required" });
+        }
+        const taskId = seg[3];
+        const result = await runTaskmasterLegacy(
+          server,
+          project.path,
+          "update-task",
+          ["--id", taskId, "--prompt", r.body.prompt.trim()],
+        );
+        if (result.exitCode !== 0) {
+          return sendJson(res, 400, {
+            error: capText(result.stderr || "", TASKMASTER_OUTPUT_CAP).text,
+          });
+        }
+        const fresh = await runTaskmasterCore(server, project.path, "show", [
+          "--id",
+          taskId,
+        ]);
+        return sendJson(
+          res,
+          200,
+          (fresh.json && fresh.json.task) || { id: taskId },
+        );
+      }
+
+      // POST /api/taskmaster/projects/:id/dependencies — add-dependency
+      if (
+        req.method === "POST" &&
+        seg.length === 3 &&
+        seg[2] === "dependencies"
+      ) {
+        const r = await readJsonObject(req);
+        if (!r.ok) return sendJson(res, r.status, { error: r.error });
+        const { id, dependsOn } = r.body;
+        if (!id || !dependsOn) {
+          return sendJson(res, 400, {
+            error: "id and dependsOn are required",
+          });
+        }
+        const result = await runTaskmasterLegacy(
+          server,
+          project.path,
+          "add-dependency",
+          ["--id", String(id), "--depends-on", String(dependsOn)],
+        );
+        // §1c: exit 0 + [WARN] already-exists is a success; exit≠0 +
+        // "circular dependency" text is the dependency-cycle rejection (400).
+        if (result.exitCode !== 0) {
+          const isCycle = /circular dependency/i.test(result.stderr || "");
+          return sendJson(res, 400, {
+            error: capText(result.stderr || "", TASKMASTER_OUTPUT_CAP).text,
+            ...(isCycle ? { code: "dependency_cycle" } : {}),
+          });
+        }
+        const fresh = await runTaskmasterCore(server, project.path, "show", [
+          "--id",
+          String(id),
+        ]);
+        return sendJson(res, 200, (fresh.json && fresh.json.task) || { id });
+      }
+    }
+
+    // POST /api/taskmaster/projects/:id/tasks/:taskId/expand — expand
+    if (
+      req.method === "POST" &&
+      seg.length === 5 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks" &&
+      seg[4] === "expand"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const { project, server } = resolved;
+      if (project.binaryMode !== "binary") {
+        return sendJson(res, 503, {
+          error:
+            "task-master CLI is not installed on this server (npx fallback does not support this action, see TASKMASTER-HUB-PLAN.md §1e #5)",
+        });
+      }
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      const taskId = seg[3];
+      const args = ["--id", taskId];
+      if (r.body.research === true) args.push("--research");
+      if (Number.isInteger(r.body.num) && r.body.num > 0) {
+        args.push("--num", String(r.body.num));
+      }
+      const result = await runTaskmasterLegacy(
+        server,
+        project.path,
+        "expand",
+        args,
+      );
+      if (result.exitCode !== 0) {
+        return sendJson(res, 400, {
+          error: capText(result.stderr || "", TASKMASTER_OUTPUT_CAP).text,
+        });
+      }
+      const fresh = await runTaskmasterCore(server, project.path, "show", [
+        "--id",
+        taskId,
+      ]);
+      return sendJson(
+        res,
+        200,
+        (fresh.json && fresh.json.task) || { id: taskId },
+      );
+    }
+
+    return sendJson(res, 404, { error: "not found" });
+  } catch (e) {
+    if (e && e.code) {
+      return sendJson(res, taskmasterErrorStatus(e.code), {
+        error: e.message,
+        ...(e.outcomeUnknown ? { code: "outcome_unknown" } : {}),
       });
     }
     throw e;
@@ -6001,7 +6641,8 @@ async function handleApi(req, res, url) {
       (parts[1] === "kanban" ||
         parts[1] === "pm" ||
         parts[1] === "agentic" ||
-        parts[1] === "notes") &&
+        parts[1] === "notes" ||
+        parts[1] === "taskmaster") &&
       (isArtifactBearerAuthorized(req) || isScopedMcpAuthorized(req, url))
     ) &&
     !(isHookNotifyRoute && isHookNotifyAuthorized(req))
@@ -6034,6 +6675,11 @@ async function handleApi(req, res, url) {
   // ---- Project-management tool: /api/pm/* ----
   if (parts[1] === "pm") {
     return handlePm(req, res, url);
+  }
+
+  // ---- Task Master Hub: /api/taskmaster/* ----
+  if (parts[1] === "taskmaster") {
+    return handleTaskmaster(req, res, url);
   }
 
   // ---- Agentic AI Creator: /api/agentic/* ----
