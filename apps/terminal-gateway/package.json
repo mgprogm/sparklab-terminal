@@ -22,6 +22,7 @@
     "test:parse": "node test/parse-result.js",
     "test:agentic": "node test/agentic-endpoints.js",
     "test:hook-notify": "node test/hook-notify-endpoints.js",
+    "test:taskmaster": "node test/taskmaster-endpoints.js",
     "hash-password": "node scripts/hash-password.js",
     "generate-vapid": "node scripts/generate-vapid.js",
     "generate-hook-token": "node scripts/generate-hook-token.js",

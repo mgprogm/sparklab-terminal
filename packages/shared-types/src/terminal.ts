@@ -1843,3 +1843,167 @@ export const RejectNodeRequestSchema = z.object({
   reason: z.string().max(2048).optional(),
 });
 export type RejectNodeRequest = z.infer<typeof RejectNodeRequestSchema>;
+
+// ---------------------------------------------------------------------------
+// Task Master Hub (/api/taskmaster/*) — see docs/TASKMASTER-HUB-PLAN.md
+// ---------------------------------------------------------------------------
+// task-master's own status enum, verified live against a real seeded project
+// (TASKMASTER-HUB-PLAN.md §1d). Deliberately passthrough-tolerant elsewhere in
+// this block (extra fields allowed) since the upstream JSON shape is
+// undocumented and unversioned — a task-master version bump should never
+// hard-break parsing here.
+export const TaskMasterStatusSchema = z.enum([
+  "pending",
+  "in-progress",
+  "done",
+  "deferred",
+  "cancelled",
+  "blocked",
+  "review",
+]);
+export type TaskMasterStatus = z.infer<typeof TaskMasterStatusSchema>;
+
+export const TaskMasterPrioritySchema = z.enum(["low", "medium", "high"]);
+export type TaskMasterPriority = z.infer<typeof TaskMasterPrioritySchema>;
+
+/** A registered project — a pointer only; task content lives in the
+ *  project's own `.taskmaster/` tree, never persisted by the gateway (D1). */
+export const TaskMasterProjectSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    serverId: z.string(),
+    path: z.string(),
+    /** "binary" = a real `task-master` install; "core-only-npx" = only the
+     *  read-only core-family routes work (D5, §1e #5). */
+    binaryMode: z.enum(["binary", "core-only-npx"]),
+    createdAt: z.number(),
+  })
+  .passthrough();
+export type TaskMasterProject = z.infer<typeof TaskMasterProjectSchema>;
+
+export const TaskMasterListProjectsResponseSchema = z.object({
+  projects: z.array(TaskMasterProjectSchema),
+});
+export type TaskMasterListProjectsResponse = z.infer<
+  typeof TaskMasterListProjectsResponseSchema
+>;
+
+/** Request body for POST /api/taskmaster/projects. */
+export const CreateTaskMasterProjectRequestSchema = z.object({
+  name: z.string().optional(),
+  serverId: z.string().min(1),
+  path: z.string().min(1),
+});
+export type CreateTaskMasterProjectRequest = z.infer<
+  typeof CreateTaskMasterProjectRequestSchema
+>;
+
+/** The D9 summary projection returned by GET .../tasks (list) — the large
+ *  `details`/`testStrategy`/`expansionPrompt` fields are NOT included here,
+ *  only by the per-task `show` route (§1d observed these can run to tens of
+ *  KB per task). */
+export const TaskMasterTaskSummarySchema = z
+  .object({
+    id: z.string(),
+    title: z.string(),
+    status: TaskMasterStatusSchema,
+    priority: TaskMasterPrioritySchema.nullable().optional(),
+    dependencies: z.array(z.string()).default([]),
+    /** Reverse-dependency edges — undocumented upstream, verified live (§1d). */
+    blocks: z.array(z.string()).default([]),
+    complexity: z.number().nullable().optional(),
+    updatedAt: z.string().nullable().optional(),
+  })
+  .passthrough();
+export type TaskMasterTaskSummary = z.infer<typeof TaskMasterTaskSummarySchema>;
+
+/** Full task detail — returned by GET .../tasks/:taskId (show). Kept loose
+ *  (passthrough) since task-master's full shape has many optional fields
+ *  (§1d) and is not a versioned contract. */
+export const TaskMasterTaskSchema = z
+  .object({
+    id: z.string(),
+    title: z.string(),
+    status: TaskMasterStatusSchema,
+  })
+  .passthrough();
+export type TaskMasterTask = z.infer<typeof TaskMasterTaskSchema>;
+
+export const TaskMasterListTasksResponseSchema = z.object({
+  tasks: z.array(TaskMasterTaskSummarySchema),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type TaskMasterListTasksResponse = z.infer<
+  typeof TaskMasterListTasksResponseSchema
+>;
+
+/** GET .../next response — `hasAnyTasks` distinguishes "tag is genuinely
+ *  empty" from "tasks exist but none are unblocked" (verified live, §1d). */
+export const TaskMasterNextResponseSchema = z
+  .object({
+    task: TaskMasterTaskSchema.nullable(),
+    found: z.boolean(),
+    hasAnyTasks: z.boolean().optional(),
+  })
+  .passthrough();
+export type TaskMasterNextResponse = z.infer<
+  typeof TaskMasterNextResponseSchema
+>;
+
+export const TaskMasterTagsResponseSchema = z.object({
+  currentTag: z.string(),
+});
+export type TaskMasterTagsResponse = z.infer<
+  typeof TaskMasterTagsResponseSchema
+>;
+
+export const UseTaskMasterTagRequestSchema = z.object({
+  name: z.string().min(1),
+});
+export type UseTaskMasterTagRequest = z.infer<
+  typeof UseTaskMasterTagRequestSchema
+>;
+
+export const SetTaskMasterStatusRequestSchema = z.object({
+  status: TaskMasterStatusSchema,
+});
+export type SetTaskMasterStatusRequest = z.infer<
+  typeof SetTaskMasterStatusRequestSchema
+>;
+
+/** Request body for POST .../tasks (add-task, an AI-provider mutation). */
+export const AddTaskMasterTaskRequestSchema = z.object({
+  prompt: z.string().min(1),
+  priority: TaskMasterPrioritySchema.optional(),
+  dependencies: z.array(z.string()).optional(),
+});
+export type AddTaskMasterTaskRequest = z.infer<
+  typeof AddTaskMasterTaskRequestSchema
+>;
+
+/** Request body for PATCH .../tasks/:taskId (update-task). */
+export const UpdateTaskMasterTaskRequestSchema = z.object({
+  prompt: z.string().min(1),
+});
+export type UpdateTaskMasterTaskRequest = z.infer<
+  typeof UpdateTaskMasterTaskRequestSchema
+>;
+
+/** Request body for POST .../tasks/:taskId/expand. */
+export const ExpandTaskMasterTaskRequestSchema = z.object({
+  research: z.boolean().optional(),
+  num: z.number().int().positive().optional(),
+});
+export type ExpandTaskMasterTaskRequest = z.infer<
+  typeof ExpandTaskMasterTaskRequestSchema
+>;
+
+/** Request body for POST .../dependencies (add-dependency). */
+export const AddTaskMasterDependencyRequestSchema = z.object({
+  id: z.string().min(1),
+  dependsOn: z.string().min(1),
+});
+export type AddTaskMasterDependencyRequest = z.infer<
+  typeof AddTaskMasterDependencyRequestSchema
+>;

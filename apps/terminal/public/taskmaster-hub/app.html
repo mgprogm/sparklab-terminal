@@ -1,0 +1,312 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Task Master Hub</title>
+<!--
+  Pluggable Task Master Hub artifact. One self-contained document: no CDN,
+  imports, fonts, or external requests. Safety: all user-supplied and
+  server-derived text is inserted with textContent / DOM nodes, NEVER innerHTML.
+-->
+<style>
+  :root {
+    --canvas: #2b2622;
+    --canvas-soft: #383330;
+    --canvas-softer: #423d39;
+    --hairline: #3f3a36;
+    --ink: #f7f5f0;
+    --body: #c9c0ad;
+    --mute: #aea69c;
+    --accent: #dad2c1;
+    --danger: #e07a6a;
+    --prio-low: #7fa6a0;
+    --prio-medium: #d8b46a;
+    --prio-high: #e0946a;
+    --prio-urgent: #e07a6a;
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --font: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --status-pending: #d8b46a;
+    --status-in-progress: #7fa6a0;
+    --status-done: #8eb878;
+    --status-review: #9f8ac7;
+    --status-other: #aea69c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--canvas); color: var(--ink); font: 14px/1.4 var(--font); display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+  button, input, select, textarea { font: inherit; }
+  button { cursor: pointer; }
+  button:disabled, input:disabled, textarea:disabled { cursor: not-allowed; opacity: .5; }
+  .topbar { align-items: center; border-bottom: 1px solid var(--hairline); display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px; }
+  .grow { flex: 1 1 auto; }
+  .project-select, .field { background: var(--canvas-soft); border: 1px solid var(--hairline); border-radius: var(--radius-sm); color: var(--ink); padding: 6px 9px; }
+  .project-select { max-width: 340px; }
+  .field { width: 100%; }
+  textarea.field { min-height: 78px; resize: vertical; }
+  .btn { background: var(--canvas-soft); border: 1px solid var(--hairline); border-radius: var(--radius-sm); color: var(--ink); padding: 6px 10px; white-space: nowrap; }
+  .btn:hover:not(:disabled) { background: var(--canvas-softer); }
+  .btn-primary { background: var(--ink); border-color: var(--ink); color: var(--canvas); font-weight: 500; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+  .btn-danger:hover:not(:disabled) { color: var(--danger); }
+  .tag, .chip { background: var(--canvas-soft); border: 1px solid var(--hairline); border-radius: 9999px; color: var(--body); display: inline-flex; font-size: 11px; line-height: 16px; padding: 1px 8px; white-space: nowrap; }
+  .readonly { color: var(--mute); }
+  .banner { background: rgba(224, 122, 106, .12); border-bottom: 1px solid var(--hairline); color: var(--danger); display: none; font-size: 13px; padding: 8px 16px; }
+  .banner.show { display: block; }
+  .project-form, .tag-form { align-items: center; display: none; flex-wrap: wrap; gap: 6px; width: 100%; }
+  .project-form.show, .tag-form.show { display: flex; }
+  .project-form .field { flex: 1 1 150px; width: auto; }
+  .tag-form .field { width: 180px; }
+  #add-task-panel { align-items: center; background: var(--canvas-soft); border-bottom: 1px solid var(--hairline); display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px; }
+  #add-task-panel.hidden { display: none; }
+  #content { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .placeholder { align-items: center; color: var(--mute); display: flex; flex: 1; flex-direction: column; gap: 10px; justify-content: center; padding: 32px; text-align: center; }
+  .hub { display: flex; flex: 1; gap: 14px; min-height: 0; overflow: auto; padding: 16px; }
+  .tasks { display: flex; flex: 1 1 600px; flex-direction: column; gap: 12px; min-width: 360px; }
+  .next-tile, .bucket { background: var(--canvas-soft); border: 1px solid var(--hairline); border-radius: var(--radius-lg); }
+  .next-tile { padding: 12px; }
+  .next-title, .bucket-head { align-items: center; display: flex; gap: 8px; margin-bottom: 8px; }
+  .next-title { color: var(--body); font-size: 12px; font-weight: 500; text-transform: uppercase; }
+  .bucket-head { border-bottom: 1px solid var(--hairline); margin: 0; padding: 9px 12px; }
+  .bucket-name { font-size: 13px; font-weight: 500; }
+  .bucket-count { color: var(--mute); font-size: 12px; }
+  .bucket-status { border-left: 3px solid var(--status-other); }
+  .status-pending { border-left-color: var(--status-pending); }
+  .status-in-progress { border-left-color: var(--status-in-progress); }
+  .status-review { border-left-color: var(--status-review); }
+  .status-done { border-left-color: var(--status-done); }
+  .bucket-body { display: flex; flex-direction: column; gap: 7px; padding: 9px; }
+  .card { background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--radius-md); cursor: pointer; padding: 9px; }
+  .card:hover { background: var(--canvas-softer); }
+  .card-title { margin: 4px 0 8px; overflow-wrap: anywhere; }
+  .card-meta { align-items: center; display: flex; flex-wrap: wrap; gap: 5px; }
+  .task-id { color: var(--mute); font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-size: 11px; }
+  .prio-low { color: var(--prio-low); } .prio-medium { color: var(--prio-medium); } .prio-high { color: var(--prio-high); }
+  .status-chip { color: var(--status-other); }
+  .other-controls { margin-left: auto; max-width: 150px; padding: 3px 5px; }
+  .empty { color: var(--mute); font-size: 13px; padding: 6px 3px; }
+  .overlay { align-items: stretch; background: rgba(0,0,0,.5); display: none; inset: 0; justify-content: flex-end; padding: 12px; position: fixed; z-index: 10; }
+  .overlay.show { display: flex; }
+  .detail { background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--radius-lg); display: flex; flex-direction: column; gap: 14px; max-width: 620px; overflow-y: auto; padding: 18px; width: 100%; }
+  .detail-head { align-items: flex-start; display: flex; gap: 10px; }
+  .detail-head h2 { font-size: 17px; margin: 0; overflow-wrap: anywhere; }
+  .close { margin-left: auto; }
+  .section { border-top: 1px solid var(--hairline); padding-top: 12px; }
+  .section h3 { color: var(--body); font-size: 12px; margin: 0 0 7px; text-transform: uppercase; }
+  pre { background: var(--canvas-soft); border: 1px solid var(--hairline); border-radius: var(--radius-sm); color: var(--body); font: 12px/1.45 "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; margin: 0; overflow: auto; padding: 9px; white-space: pre-wrap; }
+  .action-row { align-items: end; display: flex; flex-wrap: wrap; gap: 7px; }
+  .action-row .field { flex: 1 1 180px; }
+  .binary-note { color: var(--mute); font-size: 11px; margin: 4px 0 0; }
+  .subtask { border-bottom: 1px solid var(--hairline); color: var(--body); padding: 5px 0; }
+  .subtask:last-child { border-bottom: 0; }
+  @media (max-width: 650px) { .hub { padding: 10px; } .detail { max-width: none; } .project-select { max-width: 100%; } }
+</style>
+
+<div class="topbar">
+  <select id="project-select" class="project-select" aria-label="Select project"></select>
+  <button id="remove-project" class="btn btn-danger" type="button">Remove project</button>
+  <span id="current-tag" class="tag"></span>
+  <button id="switch-tag" class="btn" type="button">Switch tag</button>
+  <span class="grow"></span>
+  <button id="add-project" class="btn btn-primary" type="button">Add project</button>
+  <form id="project-form" class="project-form">
+    <input id="project-name" class="field" type="text" placeholder="Name (optional)" autocomplete="off" />
+    <select id="server-select" class="field" aria-label="Server"></select>
+    <input id="project-path" class="field" type="text" placeholder="/home/user/my-project" autocomplete="off" required />
+    <button class="btn btn-primary" type="submit">Add</button>
+    <button id="cancel-project" class="btn" type="button">Cancel</button>
+  </form>
+  <form id="tag-form" class="tag-form">
+    <input id="tag-name" class="field" type="text" placeholder="Tag name" autocomplete="off" required />
+    <button class="btn btn-primary" type="submit">Switch</button>
+    <button id="cancel-tag" class="btn" type="button">Cancel</button>
+  </form>
+</div>
+<div id="banner" class="banner" role="alert"></div>
+<div id="add-task-panel" class="hidden">
+  <button id="add-task-btn" class="btn btn-primary" type="button">+ Add task</button>
+  <span id="add-task-note" class="binary-note"></span>
+  <form id="add-task-form" class="project-form">
+    <textarea id="add-task-prompt" class="field" placeholder="Task prompt" autocomplete="off" required></textarea>
+    <select id="add-task-priority" class="field" aria-label="Priority"></select>
+    <input id="add-task-deps" class="field" type="text" placeholder="Dependencies (comma-separated task ids)" autocomplete="off" />
+    <button class="btn btn-primary" type="submit">Add task</button>
+    <button id="add-task-cancel" class="btn" type="button">Cancel</button>
+  </form>
+</div>
+<div id="content"></div>
+
+<div id="detail-overlay" class="overlay">
+  <section id="detail" class="detail" aria-label="Task detail"></section>
+</div>
+
+<script>
+  "use strict";
+  var state = { projects: [], servers: [], projectId: null, project: null, tasks: [], next: null, currentTag: null, detailTaskId: null, detailTask: null, detailLoading: false, pollTimer: null, otherFilter: "collapsed" };
+  var STATUS = ["pending", "in-progress", "done", "deferred", "cancelled", "blocked", "review"];
+  var el = {
+    projectSelect: document.getElementById("project-select"), removeProject: document.getElementById("remove-project"), currentTag: document.getElementById("current-tag"), switchTag: document.getElementById("switch-tag"), addProject: document.getElementById("add-project"), projectForm: document.getElementById("project-form"), projectName: document.getElementById("project-name"), serverSelect: document.getElementById("server-select"), projectPath: document.getElementById("project-path"), cancelProject: document.getElementById("cancel-project"), tagForm: document.getElementById("tag-form"), tagName: document.getElementById("tag-name"), cancelTag: document.getElementById("cancel-tag"), addTaskPanel: document.getElementById("add-task-panel"), addTaskBtn: document.getElementById("add-task-btn"), addTaskNote: document.getElementById("add-task-note"), addTaskForm: document.getElementById("add-task-form"), addTaskPrompt: document.getElementById("add-task-prompt"), addTaskPriority: document.getElementById("add-task-priority"), addTaskDeps: document.getElementById("add-task-deps"), addTaskCancel: document.getElementById("add-task-cancel"), banner: document.getElementById("banner"), content: document.getElementById("content"), detailOverlay: document.getElementById("detail-overlay"), detail: document.getElementById("detail")
+  };
+  [ ["", "No preference"], ["low", "low"], ["medium", "medium"], ["high", "high"] ].forEach(function (item) { var option = elem("option", null, item[1]); option.value = item[0]; el.addTaskPriority.appendChild(option); });
+
+  function ApiError(status, message) { this.status = status; this.message = message || "Request failed"; }
+  ApiError.prototype = Object.create(Error.prototype);
+  async function api(method, path, body) {
+    var opts = { method: method, headers: {}, credentials: "same-origin" };
+    if (body !== undefined) { opts.headers["content-type"] = "application/json"; opts.body = JSON.stringify(body); }
+    var res;
+    try { res = await fetch("/api/taskmaster" + path, opts); } catch (e) { throw new ApiError(0, "Network error — is the gateway reachable?"); }
+    if (res.status === 204) return null;
+    var data = null, text = await res.text();
+    if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+    if (!res.ok) { var err = new ApiError(res.status, (data && data.error) || res.statusText || "Request failed"); err.body = data; throw err; }
+    return data;
+  }
+  function showBanner(message) { el.banner.textContent = message; el.banner.classList.add("show"); }
+  function clearBanner() { el.banner.textContent = ""; el.banner.classList.remove("show"); }
+  function handleError(e) { if (e && e.status === 401) showBanner("Session expired — reload the page to sign in again."); else showBanner((e && e.message) || "Something went wrong."); }
+  function elem(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; }
+  function projectPath(id) { return "/projects/" + encodeURIComponent(id); }
+  function currentProject() { return state.projects.find(function (p) { return p.id === state.projectId; }) || null; }
+  function isBinary() { return state.project && state.project.binaryMode === "binary"; }
+  function statusClass(status) { return "status-" + String(status || "other").replace(/[^a-z-]/g, ""); }
+
+  function renderProjectSelect() {
+    el.projectSelect.textContent = "";
+    if (!state.projects.length) { var none = elem("option", null, "No projects"); none.value = ""; el.projectSelect.appendChild(none); el.projectSelect.disabled = true; el.removeProject.disabled = true; return; }
+    el.projectSelect.disabled = false; el.removeProject.disabled = false;
+    state.projects.forEach(function (project) {
+      var label = project.name || project.path;
+      if (project.binaryMode === "core-only-npx") label += " (read-only — no task-master binary on that server)";
+      var option = elem("option", null, label); option.value = project.id; option.selected = project.id === state.projectId;
+      if (project.binaryMode === "core-only-npx") option.style.color = "#aea69c";
+      el.projectSelect.appendChild(option);
+    });
+  }
+  function renderTag() { el.currentTag.textContent = state.projectId && state.currentTag ? "tag: " + state.currentTag : ""; el.currentTag.style.display = state.projectId ? "inline-flex" : "none"; el.switchTag.disabled = !state.projectId; renderAddTaskGate(); }
+  function renderAddTaskGate() {
+    var disabled = !state.project || !isBinary(), submit = el.addTaskForm.querySelector('button[type="submit"]');
+    el.addTaskPanel.classList.toggle("hidden", !state.project);
+    el.addTaskBtn.disabled = disabled; el.addTaskPrompt.disabled = disabled; el.addTaskPriority.disabled = disabled; el.addTaskDeps.disabled = disabled; submit.disabled = disabled;
+    el.addTaskNote.textContent = disabled ? "Requires the task-master binary" : "";
+  }
+  function renderServers() { el.serverSelect.textContent = ""; state.servers.forEach(function (server) { var option = elem("option", null, server.name); option.value = server.id; el.serverSelect.appendChild(option); }); }
+
+  async function loadProjects(preferId) {
+    var data = await api("GET", "/projects"); state.projects = (data && data.projects) || [];
+    var ids = state.projects.map(function (p) { return p.id; });
+    state.projectId = (preferId && ids.indexOf(preferId) >= 0 && preferId) || (state.projectId && ids.indexOf(state.projectId) >= 0 && state.projectId) || (state.projects[0] && state.projects[0].id) || null;
+    state.project = currentProject(); renderProjectSelect();
+    if (state.projectId) await selectProject(state.projectId, false); else { state.tasks = []; state.next = null; state.currentTag = null; renderTag(); renderContent(); }
+  }
+  async function loadServers() { state.servers = await fetchServers(); renderServers(); }
+  async function fetchServers() {
+    var res;
+    try { res = await fetch("/api/servers", { credentials: "same-origin" }); } catch (e) { throw new ApiError(0, "Network error — is the gateway reachable?"); }
+    var data = null, text = await res.text(); if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+    if (!res.ok) { var err = new ApiError(res.status, (data && data.error) || res.statusText || "Request failed"); err.body = data; throw err; }
+    return Array.isArray(data) ? data : [];
+  }
+  async function selectProject(id, keepPoll) {
+    if (!keepPoll) { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null; }
+    state.projectId = id; state.project = currentProject(); state.tasks = []; state.next = null; state.currentTag = null; state.detailTaskId = null; state.detailTask = null;
+    renderProjectSelect(); renderTag(); renderContent();
+    await refreshProjectData();
+    if (!keepPoll) startPolling();
+  }
+  async function refreshProjectData() {
+    var id = state.projectId; if (!id) return;
+    var results = await Promise.all([api("GET", projectPath(id) + "/tasks"), api("GET", projectPath(id) + "/next"), api("GET", projectPath(id) + "/tags")]);
+    if (state.projectId !== id) return;
+    state.tasks = (results[0] && results[0].tasks) || []; state.next = results[1] || null; state.currentTag = results[2] && results[2].currentTag;
+    renderTag(); renderContent();
+  }
+  function startPolling() {
+    if (!state.projectId) return;
+    var projectId = state.projectId;
+    state.pollTimer = setInterval(function () { if (state.projectId !== projectId) return; refreshProjectData().catch(handleError); }, 5000);
+  }
+  async function refreshAfterUnknown() {
+    showBanner("Task Master may have already made this change — the request timed out before we could confirm. Refreshing the task list…");
+    try { await refreshProjectData(); if (state.detailTaskId) await loadDetail(state.detailTaskId); } catch (e) { handleError(e); }
+  }
+  function handleMutationError(e) { if (e && e.status === 504 && e.body && e.body.code === "outcome_unknown") { void refreshAfterUnknown(); return; } handleError(e); }
+
+  function renderContent() {
+    el.content.textContent = "";
+    if (!state.projects.length) { var empty = elem("div", "placeholder", "Add a Task Master project to get started."); el.content.appendChild(empty); return; }
+    if (!state.project) { el.content.appendChild(elem("div", "placeholder", "Loading project…")); return; }
+    var hub = elem("div", "hub"), tasks = elem("div", "tasks"); tasks.appendChild(renderNextTile());
+    ["pending", "in-progress", "review", "done"].forEach(function (status) { tasks.appendChild(renderBucket(status, state.tasks.filter(function (task) { return task.status === status; }))); });
+    tasks.appendChild(renderOtherBucket()); hub.appendChild(tasks); el.content.appendChild(hub);
+  }
+  function renderNextTile() {
+    var box = elem("section", "next-tile"), head = elem("div", "next-title", "Next task"); box.appendChild(head); var next = state.next;
+    if (next && next.found === true && next.task) {
+      box.appendChild(elem("div", "task-id", String(next.task.id))); box.appendChild(elem("div", "card-title", next.task.title));
+      var button = elem("button", "btn btn-primary", "Set in-progress"); button.type = "button"; button.addEventListener("click", function () { button.disabled = true; api("POST", projectPath(state.projectId) + "/tasks/" + encodeURIComponent(next.task.id) + "/status", { status: "in-progress" }).then(function () { return refreshProjectData(); }).catch(handleMutationError).finally(function () { button.disabled = false; }); }); box.appendChild(button);
+    } else if (next && next.found === false && next.hasAnyTasks === true) box.appendChild(elem("div", "empty", "Every task is done or blocked — nothing is ready to start."));
+    else box.appendChild(elem("div", "empty", "This tag has no tasks yet."));
+    return box;
+  }
+  function renderBucket(status, items) {
+    var section = elem("section", "bucket " + statusClass(status)), head = elem("div", "bucket-head"); head.appendChild(elem("span", "bucket-name", status)); head.appendChild(elem("span", "bucket-count", String(items.length))); section.appendChild(head); var body = elem("div", "bucket-body"); if (!items.length) body.appendChild(elem("div", "empty", "No tasks.")); items.forEach(function (task) { body.appendChild(renderCard(task, false)); }); section.appendChild(body); return section;
+  }
+  function renderOtherBucket() {
+    var others = state.tasks.filter(function (task) { return ["deferred", "cancelled", "blocked"].indexOf(task.status) >= 0; });
+    var section = elem("section", "bucket bucket-status"), head = elem("div", "bucket-head"); head.appendChild(elem("span", "bucket-name", "Other")); head.appendChild(elem("span", "bucket-count", String(others.length)));
+    var filter = elem("select", "field other-controls"); [ ["collapsed", "Collapsed"], ["all", "All"], ["deferred", "Deferred"], ["cancelled", "Cancelled"], ["blocked", "Blocked"] ].forEach(function (item) { var option = elem("option", null, item[1]); option.value = item[0]; option.selected = state.otherFilter === item[0]; filter.appendChild(option); }); filter.addEventListener("change", function () { state.otherFilter = filter.value; renderContent(); }); head.appendChild(filter); section.appendChild(head);
+    var body = elem("div", "bucket-body"); if (state.otherFilter === "collapsed") body.appendChild(elem("div", "empty", others.length ? "Expand or filter to inspect deferred, cancelled, and blocked tasks." : "No other tasks.")); else { var visible = state.otherFilter === "all" ? others : others.filter(function (task) { return task.status === state.otherFilter; }); if (!visible.length) body.appendChild(elem("div", "empty", "No tasks.")); visible.forEach(function (task) { body.appendChild(renderCard(task, true)); }); } section.appendChild(body); return section;
+  }
+  function renderCard(task, showStatus) {
+    var card = elem("article", "card"), meta = elem("div", "card-meta"); meta.appendChild(elem("span", "task-id", String(task.id))); if (showStatus) meta.appendChild(elem("span", "chip status-chip", task.status)); card.appendChild(meta); card.appendChild(elem("div", "card-title", task.title || "Untitled task")); var details = elem("div", "card-meta"); if (task.priority != null && task.priority !== "") details.appendChild(elem("span", "chip prio-" + task.priority, task.priority)); var deps = Array.isArray(task.dependencies) ? task.dependencies.length : 0, blocks = Array.isArray(task.blocks) ? task.blocks.length : 0; if (deps) details.appendChild(elem("span", "chip", "deps " + deps)); if (blocks) details.appendChild(elem("span", "chip", "blocks " + blocks)); if (task.complexity != null) details.appendChild(elem("span", "chip", "complexity " + task.complexity)); if (details.childNodes.length) card.appendChild(details); card.addEventListener("click", function () { void openDetail(task.id); }); return card;
+  }
+
+  async function openDetail(taskId) { state.detailTaskId = taskId; state.detailTask = null; state.detailLoading = true; el.detailOverlay.classList.add("show"); renderDetail(); await loadDetail(taskId); }
+  async function loadDetail(taskId) { var id = state.projectId; if (!id) return; try { var task = await api("GET", projectPath(id) + "/tasks/" + encodeURIComponent(taskId)); if (state.projectId === id && state.detailTaskId === taskId) { state.detailTask = task; state.detailLoading = false; renderDetail(); } } catch (e) { if (state.detailTaskId === taskId) { state.detailLoading = false; renderDetail(); } handleError(e); } }
+  function closeDetail() { state.detailTaskId = null; state.detailTask = null; state.detailLoading = false; el.detailOverlay.classList.remove("show"); }
+  function renderDetail() {
+    el.detail.textContent = ""; var close = elem("button", "btn close", "Close"); close.type = "button"; close.addEventListener("click", closeDetail);
+    if (state.detailLoading) { el.detail.appendChild(close); el.detail.appendChild(elem("div", "empty", "Loading full task details…")); return; }
+    var task = state.detailTask; if (!task) { el.detail.appendChild(close); el.detail.appendChild(elem("div", "empty", "Task details are unavailable.")); return; }
+    var head = elem("div", "detail-head"), titleWrap = elem("div"); titleWrap.appendChild(elem("div", "task-id", String(task.id))); titleWrap.appendChild(elem("h2", null, task.title || "Untitled task")); head.appendChild(titleWrap); head.appendChild(close); el.detail.appendChild(head);
+    var statusSection = elem("section", "section"); statusSection.appendChild(elem("h3", null, "Status")); var select = elem("select", "field"); STATUS.forEach(function (status) { var option = elem("option", null, status); option.value = status; option.selected = task.status === status; select.appendChild(option); }); select.addEventListener("change", function () { select.disabled = true; api("POST", projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id) + "/status", { status: select.value }).then(function (updated) { state.detailTask = updated; renderDetail(); return refreshProjectData(); }).catch(handleMutationError).finally(function () { select.disabled = false; }); }); statusSection.appendChild(select); el.detail.appendChild(statusSection);
+    appendTextSection("Details", task.details); appendTextSection("Test strategy", task.testStrategy);
+    var subtasks = task.subtasks || []; if (subtasks.length) { var subSection = elem("section", "section"); subSection.appendChild(elem("h3", null, "Subtasks")); subtasks.forEach(function (subtask) { subSection.appendChild(elem("div", "subtask", String(subtask.id) + " · " + (subtask.title || "Untitled") + " · " + (subtask.status || "pending"))); }); el.detail.appendChild(subSection); }
+    el.detail.appendChild(renderLegacyActions(task));
+  }
+  function appendTextSection(title, value) { var section = elem("section", "section"); section.appendChild(elem("h3", null, title)); section.appendChild(elem("pre", null, value == null || value === "" ? "—" : String(value))); el.detail.appendChild(section); }
+  function renderLegacyActions(task) {
+    var section = elem("section", "section"); section.appendChild(elem("h3", null, "Task Master actions")); var binary = isBinary(); if (!binary) section.appendChild(elem("div", "binary-note", "These actions need the task-master binary on this project's server."));
+    var depForm = elem("form", "action-row"), dependsOn = elem("input", "field"); dependsOn.placeholder = "Depends on task id"; dependsOn.disabled = !binary; var depButton = elem("button", "btn", "Add dependency"); depButton.type = "submit"; depButton.disabled = !binary; depButton.title = binary ? "" : "Requires the task-master binary"; depForm.appendChild(dependsOn); depForm.appendChild(depButton); depForm.addEventListener("submit", function (event) { event.preventDefault(); var value = dependsOn.value.trim(); if (!value || !binary) return; depButton.disabled = true; api("POST", projectPath(state.projectId) + "/dependencies", { id: task.id, dependsOn: value }).then(function (updated) { state.detailTask = updated; dependsOn.value = ""; renderDetail(); return refreshProjectData(); }).catch(function (e) { if (e && e.status === 400 && e.body && e.body.code === "dependency_cycle") showBanner("This would create a circular dependency."); else handleMutationError(e); }).finally(function () { depButton.disabled = !isBinary(); }); }); section.appendChild(depForm);
+    var expandRow = elem("div", "action-row"), researchLabel = elem("label", null), research = elem("input"); research.type = "checkbox"; research.disabled = !binary; researchLabel.appendChild(research); researchLabel.appendChild(document.createTextNode(" Research")); var expand = elem("button", "btn", "Expand"); expand.type = "button"; expand.disabled = !binary; expand.title = binary ? "" : "Requires the task-master binary"; expand.addEventListener("click", function () { expand.disabled = true; var body = {}; if (research.checked) body.research = true; api("POST", projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id) + "/expand", body).then(function (updated) { state.detailTask = updated; renderDetail(); return refreshProjectData(); }).catch(handleMutationError).finally(function () { expand.disabled = !isBinary(); }); }); expandRow.appendChild(researchLabel); expandRow.appendChild(expand); section.appendChild(expandRow);
+    var promptForm = elem("form", "section"), prompt = elem("textarea", "field"); prompt.placeholder = "Update via prompt"; prompt.disabled = !binary; var promptButton = elem("button", "btn btn-primary", "Update via prompt"); promptButton.type = "submit"; promptButton.disabled = !binary; promptButton.title = binary ? "" : "Requires the task-master binary"; promptForm.appendChild(prompt); promptForm.appendChild(promptButton); promptForm.addEventListener("submit", function (event) { event.preventDefault(); var value = prompt.value.trim(); if (!value || !binary) return; promptButton.disabled = true; api("PATCH", projectPath(state.projectId) + "/tasks/" + encodeURIComponent(task.id), { prompt: value }).then(function (updated) { state.detailTask = updated; prompt.value = ""; renderDetail(); return refreshProjectData(); }).catch(handleMutationError).finally(function () { promptButton.disabled = !isBinary(); }); }); section.appendChild(promptForm); return section;
+  }
+
+  el.projectSelect.addEventListener("change", function () { if (el.projectSelect.value) selectProject(el.projectSelect.value, false).catch(handleError); });
+  el.addProject.addEventListener("click", function () { el.projectForm.classList.add("show"); el.projectName.focus(); });
+  el.cancelProject.addEventListener("click", function () { el.projectForm.classList.remove("show"); });
+  el.projectForm.addEventListener("submit", function (event) { event.preventDefault(); var path = el.projectPath.value.trim(); if (!path) return; api("POST", "/projects", { name: el.projectName.value.trim() || undefined, serverId: el.serverSelect.value, path: path }).then(function (project) { el.projectForm.reset(); el.projectForm.classList.remove("show"); return loadProjects(project.id); }).catch(handleError); });
+  el.removeProject.addEventListener("click", function () { var project = currentProject(); if (!project || !window.confirm('Remove "' + (project.name || project.path) + '" from this Hub? This only removes the registry entry; project files are unchanged.')) return; api("DELETE", projectPath(project.id)).then(function () { state.projectId = null; return loadProjects(); }).catch(handleError); });
+  el.switchTag.addEventListener("click", function () { el.tagForm.classList.add("show"); el.tagName.focus(); });
+  el.cancelTag.addEventListener("click", function () { el.tagForm.classList.remove("show"); });
+  el.tagForm.addEventListener("submit", function (event) { event.preventDefault(); var name = el.tagName.value.trim(); if (!name || !state.projectId) return; if (!window.confirm('Switch the active tag for this project to "' + name + '"? This affects every tool (CLI, agent, this Hub) using this project.')) return; api("POST", projectPath(state.projectId) + "/tags/use", { name: name }).then(function (data) { state.currentTag = data.currentTag; el.tagForm.reset(); el.tagForm.classList.remove("show"); renderTag(); return refreshProjectData(); }).catch(function (e) { if (e && e.status === 503) showBanner("task-master isn't installed on that server — tag switching isn't available."); else handleError(e); }); });
+  el.addTaskBtn.addEventListener("click", function () { el.addTaskForm.classList.add("show"); el.addTaskPrompt.focus(); });
+  el.addTaskCancel.addEventListener("click", function () { el.addTaskForm.reset(); el.addTaskForm.classList.remove("show"); });
+  el.addTaskForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var prompt = el.addTaskPrompt.value.trim(), priority = el.addTaskPriority.value, deps = el.addTaskDeps.value.split(",").map(function (id) { return id.trim(); }).filter(Boolean), submit = el.addTaskForm.querySelector('button[type="submit"]');
+    if (!prompt || !isBinary()) return;
+    submit.disabled = true;
+    var body = { prompt: prompt, ...(priority ? { priority: priority } : {}), ...(deps.length ? { dependencies: deps } : {}) };
+    api("POST", projectPath(state.projectId) + "/tasks", body).then(function (response) {
+      state.tasks = response.tasks || [];
+      el.addTaskForm.reset(); el.addTaskForm.classList.remove("show"); renderContent();
+      return refreshProjectData();
+    }).catch(handleMutationError).finally(function () { submit.disabled = !isBinary(); });
+  });
+  el.detailOverlay.addEventListener("mousedown", function (event) { if (event.target === el.detailOverlay) closeDetail(); });
+  document.addEventListener("keydown", function (event) { if (event.key === "Escape") closeDetail(); });
+
+  Promise.all([loadServers(), loadProjects()]).catch(handleError);
+</script>

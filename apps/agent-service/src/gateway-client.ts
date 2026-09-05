@@ -45,6 +45,11 @@ import type {
   CreateNotebookRequest,
   CreateSectionRequest,
   CreatePageRequest,
+  TaskMasterProject,
+  TaskMasterTaskSummary,
+  TaskMasterTask,
+  TaskMasterListTasksResponse,
+  TaskMasterNextResponse,
 } from "@sparklab/shared-types";
 import { config } from "./config.js";
 
@@ -441,6 +446,152 @@ class GatewayClient {
       { method: "DELETE" },
     );
     if (res.status !== 204) throw await this.error(res);
+  }
+
+  // --- Task Master Hub ------------------------------------------------------
+  // REST-client-only (D7): every one of these calls the gateway's
+  // /api/taskmaster/* routes. Never reads data/taskmaster-projects.json or a
+  // project's .taskmaster/ tree directly.
+
+  async listTaskmasterProjects(): Promise<TaskMasterProject[]> {
+    const r = await this.json<{ projects: TaskMasterProject[] }>(
+      await this.call("/api/taskmaster/projects"),
+    );
+    return r.projects;
+  }
+
+  async listTaskmasterTasks(
+    projectId: string,
+  ): Promise<TaskMasterListTasksResponse> {
+    return this.json<TaskMasterListTasksResponse>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks`,
+      ),
+    );
+  }
+
+  async getTaskmasterTask(
+    projectId: string,
+    taskId: string,
+  ): Promise<TaskMasterTask> {
+    return this.json<TaskMasterTask>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+      ),
+    );
+  }
+
+  async getTaskmasterNext(projectId: string): Promise<TaskMasterNextResponse> {
+    return this.json<TaskMasterNextResponse>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/next`,
+      ),
+    );
+  }
+
+  async setTaskmasterStatus(
+    projectId: string,
+    taskId: string,
+    status: string,
+  ): Promise<TaskMasterTask> {
+    return this.json<TaskMasterTask>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/status`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status }),
+        },
+      ),
+    );
+  }
+
+  async addTaskmasterTask(
+    projectId: string,
+    body: { prompt: string; priority?: string; dependencies?: string[] },
+  ): Promise<{ tasks: TaskMasterTaskSummary[] }> {
+    return this.json<{ tasks: TaskMasterTaskSummary[] }>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async updateTaskmasterTask(
+    projectId: string,
+    taskId: string,
+    body: { prompt: string },
+  ): Promise<TaskMasterTask> {
+    return this.json<TaskMasterTask>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  async expandTaskmasterTask(
+    projectId: string,
+    taskId: string,
+    body: { research?: boolean; num?: number },
+  ): Promise<TaskMasterTask> {
+    return this.json<TaskMasterTask>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/expand`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      ),
+    );
+  }
+
+  /**
+   * add-dependency (legacy family) — the gateway returns 400 with
+   * {error, code:"dependency_cycle"} specifically for the CLI's circular-
+   * dependency rejection (§1c), distinct from any other 400. Special-cased
+   * here (mirrors moveKanbanCard's 409-special-case pattern) so the tool
+   * executor can surface "this would create a circular dependency" distinctly
+   * instead of a generic gateway-error string.
+   */
+  async addTaskmasterDependency(
+    projectId: string,
+    body: { id: string; dependsOn: string },
+  ): Promise<
+    { cycle: false; task: TaskMasterTask } | { cycle: true; message: string }
+  > {
+    const res = await this.call(
+      `/api/taskmaster/projects/${encodeURIComponent(projectId)}/dependencies`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    if (res.status === 400) {
+      const b = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        code?: string;
+      };
+      if (b.code === "dependency_cycle") {
+        return {
+          cycle: true,
+          message: b.error || "would create a circular dependency",
+        };
+      }
+      throw new GatewayError(400, b.error || "bad request");
+    }
+    return { cycle: false, task: await this.json<TaskMasterTask>(res) };
   }
 
   // --- Project management (PM) -------------------------------------------

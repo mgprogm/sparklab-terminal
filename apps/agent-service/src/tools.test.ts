@@ -1078,3 +1078,121 @@ test("notes_update_page does NOT retry a 409 stale (D4 — blind overwrite, surf
     gateway.updatePage = originalUpdatePage;
   }
 });
+
+// ---- Task Master Hub tools -------------------------------------------------
+
+const TASKMASTER_READ_TOOLS = [
+  "taskmaster_list_projects",
+  "taskmaster_list",
+  "taskmaster_show",
+  "taskmaster_next",
+];
+const TASKMASTER_ROUTINE_WRITE_TOOLS = [
+  "taskmaster_set_status",
+  "taskmaster_add_dependency",
+];
+const TASKMASTER_ONE_TIME_WRITE_TOOLS = [
+  "taskmaster_add_task",
+  "taskmaster_update_task",
+  "taskmaster_expand",
+];
+const TASKMASTER_TOOLS = [
+  ...TASKMASTER_READ_TOOLS,
+  ...TASKMASTER_ROUTINE_WRITE_TOOLS,
+  ...TASKMASTER_ONE_TIME_WRITE_TOOLS,
+];
+
+test("all 9 Task Master Hub tools are exposed", () => {
+  const names = toolNames();
+  for (const t of TASKMASTER_TOOLS) {
+    assert.ok(names.includes(t), `${t} missing from TOOLS`);
+  }
+});
+
+test("every Task Master Hub tool has a closed parameters schema", () => {
+  for (const name of TASKMASTER_TOOLS) {
+    const tool = TOOLS.find((t) => t.function.name === name);
+    assert.ok(tool, `${name} not found`);
+    const params = tool.function.parameters as {
+      type?: string;
+      additionalProperties?: boolean;
+    };
+    assert.equal(params.type, "object", `${name} parameters not an object`);
+    assert.equal(
+      params.additionalProperties,
+      false,
+      `${name} must set additionalProperties:false`,
+    );
+  }
+});
+
+test("Task Master Hub reads are auto (NOT write tools)", () => {
+  for (const t of TASKMASTER_READ_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), false, `${t} should NOT be a WRITE tool`);
+    assert.equal(ONE_TIME_TOOLS.has(t), false, `${t} should NOT be one-time`);
+  }
+});
+
+test("taskmaster_set_status and taskmaster_add_dependency are routine writes (allow-always ok)", () => {
+  for (const t of TASKMASTER_ROUTINE_WRITE_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+    assert.equal(ONE_TIME_TOOLS.has(t), false, `${t} should NOT be one-time`);
+  }
+});
+
+test("taskmaster_add_task/update_task/expand are AI-mutation tools, coerced one-time (D7)", () => {
+  for (const t of TASKMASTER_ONE_TIME_WRITE_TOOLS) {
+    assert.equal(WRITE_TOOLS.has(t), true, `${t} should be a WRITE tool`);
+    assert.equal(
+      ONE_TIME_TOOLS.has(t),
+      true,
+      `${t} should be coerced one-time`,
+    );
+  }
+});
+
+test("taskmaster_list requires project_id (no gateway call when missing)", async () => {
+  assert.equal(
+    await executeTool("taskmaster_list", {}),
+    "error: project_id is required",
+  );
+});
+
+test("taskmaster_add_dependency requires project_id, id and depends_on", async () => {
+  assert.equal(
+    await executeTool("taskmaster_add_dependency", { project_id: "tmp-1" }),
+    "error: project_id, id and depends_on are required",
+  );
+});
+
+test("taskmaster_add_dependency surfaces dependency cycles distinctly", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/auth/login")) {
+      return new Response(null, {
+        status: 204,
+        headers: { "set-cookie": "gw_session=test-session" },
+      });
+    }
+    assert.ok(url.endsWith("/dependencies"), `unexpected URL: ${url}`);
+    return new Response(
+      JSON.stringify({
+        error: "would create a circular dependency",
+        code: "dependency_cycle",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  try {
+    const result = await executeTool("taskmaster_add_dependency", {
+      project_id: "tmp-1",
+      id: "3",
+      depends_on: "5",
+    });
+    assert.match(result, /circular dependency/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
