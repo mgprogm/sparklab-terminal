@@ -181,6 +181,7 @@
     border: 2px solid var(--hairline);
     border-radius: 50%;
     border-top-color: var(--body);
+    display: inline-block;
     flex: none;
     height: 13px;
     width: 13px;
@@ -407,6 +408,52 @@
   }
   .progress-cell.status-blocked {
     background: var(--danger);
+  }
+  .card-select {
+    flex: none;
+  }
+  .bulk-toolbar {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .bulk-toolbar .field {
+    max-width: 160px;
+    width: auto;
+  }
+  .bulk-count {
+    color: var(--body);
+    font-size: 12px;
+  }
+  .bulk-results {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    width: 100%;
+  }
+  .bulk-result-row {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .bulk-result-icon {
+    flex: none;
+    font-size: 12px;
+    width: 14px;
+  }
+  .bulk-result-icon.ok {
+    color: var(--status-done);
+  }
+  .bulk-result-icon.fail {
+    color: var(--danger);
+  }
+  .bulk-result-icon .loading-spinner {
+    height: 11px;
+    width: 11px;
   }
   .other-controls {
     margin-left: auto;
@@ -646,6 +693,10 @@
     taskFilter: "",
     nextSubtasksTaskId: null,
     nextSubtasks: null,
+    bulkSelected: {},
+    bulkTargetStatus: "in-progress",
+    bulkRunning: false,
+    bulkResults: null,
   };
   var STATUS = [
     "pending",
@@ -934,6 +985,8 @@
     state.next = null;
     state.nextSubtasksTaskId = null;
     state.nextSubtasks = null;
+    state.bulkSelected = {};
+    state.bulkResults = null;
     state.currentTag = null;
     state.detailTaskId = null;
     state.detailTask = null;
@@ -1018,6 +1071,8 @@
       readyTasks = visibleTasks.filter(isReadyTask);
     tasks.appendChild(renderOverview());
     tasks.appendChild(renderNextTile());
+    var bulkToolbar = renderBulkToolbar();
+    if (bulkToolbar) tasks.appendChild(bulkToolbar);
     var statusStack = elem("div", "status-stack");
     statusStack.setAttribute("aria-label", "Tasks by status");
     statusStack.appendChild(renderReadyBucket(readyTasks));
@@ -1192,6 +1247,99 @@
       })
     );
   }
+  function renderBulkToolbar() {
+    var ids = Object.keys(state.bulkSelected);
+    if (!ids.length && !state.bulkResults) return null;
+    var box = elem("section", "next-tile bulk-toolbar");
+    if (ids.length) {
+      box.appendChild(
+        elem("span", "bulk-count", ids.length + " selected"),
+      );
+      var select = elem("select", "field");
+      STATUS.forEach(function (status) {
+        var option = elem("option", null, status);
+        option.value = status;
+        option.selected = status === state.bulkTargetStatus;
+        select.appendChild(option);
+      });
+      select.disabled = state.bulkRunning;
+      select.addEventListener("change", function () {
+        state.bulkTargetStatus = select.value;
+      });
+      box.appendChild(select);
+      var apply = elem(
+        "button",
+        "btn btn-primary",
+        state.bulkRunning ? "Applying…" : "Apply",
+      );
+      apply.type = "button";
+      apply.disabled = state.bulkRunning;
+      apply.addEventListener("click", function () {
+        void applyBulkStatus(ids, select.value);
+      });
+      box.appendChild(apply);
+    }
+    var clear = elem("button", "btn", ids.length ? "Clear selection" : "Dismiss");
+    clear.type = "button";
+    clear.disabled = state.bulkRunning;
+    clear.addEventListener("click", function () {
+      state.bulkSelected = {};
+      state.bulkResults = null;
+      renderContent();
+    });
+    box.appendChild(clear);
+    if (state.bulkResults) {
+      var results = elem("div", "bulk-results");
+      state.bulkResults.forEach(function (item) {
+        var row = elem("div", "bulk-result-row"),
+          icon = elem("span", "bulk-result-icon");
+        if (item.state === "pending") icon.appendChild(elem("span", "loading-spinner"));
+        else if (item.state === "ok") icon.className = "bulk-result-icon ok";
+        else if (item.state === "fail") icon.className = "bulk-result-icon fail";
+        if (item.state === "ok") icon.textContent = "✓";
+        else if (item.state === "fail") icon.textContent = "✗";
+        row.appendChild(icon);
+        row.appendChild(
+          elem(
+            "span",
+            "task-id",
+            String(item.id) + " " + (item.title || ""),
+          ),
+        );
+        if (item.state === "fail" && item.error)
+          row.appendChild(elem("span", "empty", item.error));
+        results.appendChild(row);
+      });
+      box.appendChild(results);
+    }
+    return box;
+  }
+  async function applyBulkStatus(ids, status) {
+    state.bulkRunning = true;
+    state.bulkResults = ids.map(function (id) {
+      var task = taskById(id);
+      return { id: id, title: task ? task.title : "", state: "pending" };
+    });
+    renderContent();
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
+      try {
+        await api(
+          "POST",
+          projectPath(state.projectId) + "/tasks/" + encodeURIComponent(id) + "/status",
+          { status: status },
+        );
+        state.bulkResults[i].state = "ok";
+        delete state.bulkSelected[id];
+      } catch (e) {
+        state.bulkResults[i].state = "fail";
+        state.bulkResults[i].error = (e && e.message) || "Request failed";
+      }
+      renderContent();
+    }
+    state.bulkRunning = false;
+    await refreshProjectData();
+  }
   function renderReadyBucket(items) {
     var section = elem("section", "bucket bucket-ready"),
       head = elem("div", "bucket-head");
@@ -1313,6 +1461,19 @@
     var card = elem("article", "card"),
       meta = elem("div", "card-meta"),
       run = findExecution(task.id);
+    var checkbox = elem("input", "card-select");
+    checkbox.type = "checkbox";
+    checkbox.checked = !!state.bulkSelected[task.id];
+    checkbox.setAttribute("aria-label", "Select task " + task.id);
+    checkbox.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    checkbox.addEventListener("change", function () {
+      if (checkbox.checked) state.bulkSelected[task.id] = true;
+      else delete state.bulkSelected[task.id];
+      renderContent();
+    });
+    meta.appendChild(checkbox);
     meta.appendChild(elem("span", "task-id", String(task.id)));
     if (showStatus)
       meta.appendChild(elem("span", "chip status-chip", task.status));

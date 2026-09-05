@@ -219,7 +219,22 @@ here.
   project, fetched only on an explicit refresh action, never polled.
 - **Sequential bulk status-change queue** (D3): multi-select within a
   bucket, apply, a visible per-item progress list — built entirely on the
-  existing single-task status route, no new backend endpoint.
+  existing single-task status route, no new backend endpoint. **Built and
+  verified (2026-09-06).** A checkbox on every card (`state.bulkSelected`,
+  keyed by task id, survives the 5s poll rebuild the same way the task
+  filter does) feeds a toolbar that appears above the bucket grid whenever
+  ≥1 task is selected: a target-status `<select>` (reuses `STATUS`), Apply,
+  and Clear/Dismiss. `applyBulkStatus()` calls the existing per-task status
+  route sequentially (never `Promise.all` — each CLI call is slow, so a
+  true one-at-a-time queue with a live per-item ✓/✗/spinner row is the
+  correct affordance, not a single blocking spinner); a failed item's error
+  is shown inline and it stays selected for retry, a succeeded item is
+  cleared from selection. Verified live: selection persists across a poll
+  tick, both success and per-item-failure paths render correctly (the
+  failure path was caught for real against the documented §1c
+  "response must actually contain the requested id" contract — a stub
+  fixture bug, not a feature bug, fixed in the test fixture), and Dismiss
+  correctly tears the toolbar down.
 
 ### Phase C — cross-referenced, not re-designed here
 
