@@ -11,6 +11,21 @@ gateway REST API — never tmux directly.
 Browser chat panel ──WS /agent (JSON)──► agent-service ──REST──► gateway ──► tmux
 ```
 
+## Task Master Hub preflight
+
+For normal tool-calling Agent Chat turns, implementation tools (`run_command`,
+`type_text`, `press_keys`, and `run_codex`) require a successful Task Master
+claim in the live AgentLoop. The intended flow is: inspect the project/task
+and dependencies, claim the task, implement, post working/blocked/review
+progress, set the Task Master status, then release the claim.
+
+The claim owner is injected from the persisted chat id, not supplied by the
+model. This guard is in-memory: a service restart or a new loop must reclaim
+the durable task claim. It does not govern raw terminal sessions, direct REST
+or CLI callers, interactive Claude/Codex sessions, or the separate
+`codex-cli` provider path, which does not receive Agent Chat tools. See
+[TASKMASTER-HUB-OPERATIONS.md](TASKMASTER-HUB-OPERATIONS.md).
+
 ## Configuration (`.env`, gitignored)
 
 | Var                                           | Purpose                                                                                                                         |

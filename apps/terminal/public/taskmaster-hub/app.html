@@ -64,6 +64,9 @@
   .hub { display: flex; flex: 1; gap: 14px; min-height: 0; overflow: auto; padding: 16px; }
   .tasks { display: flex; flex: 1 1 600px; flex-direction: column; gap: 12px; min-width: 360px; }
   .next-tile, .bucket { background: var(--canvas-soft); border: 1px solid var(--hairline); border-radius: var(--radius-lg); }
+  .overview { display: grid; gap: 7px; grid-template-columns: repeat(3, minmax(100px, 1fr)); }
+  .metric { background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--radius-sm); padding: 8px; }
+  .metric b { display: block; font-size: 18px; } .metric span { color: var(--mute); font-size: 11px; }
   .next-tile { padding: 12px; }
   .next-title, .bucket-head { align-items: center; display: flex; gap: 8px; margin-bottom: 8px; }
   .next-title { color: var(--body); font-size: 12px; font-weight: 500; text-transform: uppercase; }
@@ -142,7 +145,7 @@
 
 <script>
   "use strict";
-  var state = { projects: [], servers: [], projectId: null, project: null, tasks: [], next: null, currentTag: null, detailTaskId: null, detailTask: null, detailLoading: false, pollTimer: null, otherFilter: "collapsed" };
+  var state = { projects: [], servers: [], projectId: null, project: null, tasks: [], next: null, overview: null, currentTag: null, detailTaskId: null, detailTask: null, detailLoading: false, pollTimer: null, otherFilter: "collapsed" };
   var STATUS = ["pending", "in-progress", "done", "deferred", "cancelled", "blocked", "review"];
   var el = {
     projectSelect: document.getElementById("project-select"), removeProject: document.getElementById("remove-project"), currentTag: document.getElementById("current-tag"), switchTag: document.getElementById("switch-tag"), addProject: document.getElementById("add-project"), projectForm: document.getElementById("project-form"), projectName: document.getElementById("project-name"), serverSelect: document.getElementById("server-select"), projectPath: document.getElementById("project-path"), cancelProject: document.getElementById("cancel-project"), tagForm: document.getElementById("tag-form"), tagName: document.getElementById("tag-name"), cancelTag: document.getElementById("cancel-tag"), addTaskPanel: document.getElementById("add-task-panel"), addTaskBtn: document.getElementById("add-task-btn"), addTaskNote: document.getElementById("add-task-note"), addTaskForm: document.getElementById("add-task-form"), addTaskPrompt: document.getElementById("add-task-prompt"), addTaskPriority: document.getElementById("add-task-priority"), addTaskDeps: document.getElementById("add-task-deps"), addTaskCancel: document.getElementById("add-task-cancel"), banner: document.getElementById("banner"), content: document.getElementById("content"), detailOverlay: document.getElementById("detail-overlay"), detail: document.getElementById("detail")
@@ -216,9 +219,9 @@
   }
   async function refreshProjectData() {
     var id = state.projectId; if (!id) return;
-    var results = await Promise.all([api("GET", projectPath(id) + "/tasks"), api("GET", projectPath(id) + "/next"), api("GET", projectPath(id) + "/tags")]);
+    var results = await Promise.all([api("GET", projectPath(id) + "/tasks"), api("GET", projectPath(id) + "/next"), api("GET", projectPath(id) + "/tags"), api("GET", projectPath(id) + "/overview")]);
     if (state.projectId !== id) return;
-    state.tasks = (results[0] && results[0].tasks) || []; state.next = results[1] || null; state.currentTag = results[2] && results[2].currentTag;
+    state.tasks = (results[0] && results[0].tasks) || []; state.next = results[1] || null; state.currentTag = results[2] && results[2].currentTag; state.overview = results[3] || null;
     renderTag(); renderContent();
   }
   function startPolling() {
@@ -236,9 +239,14 @@
     el.content.textContent = "";
     if (!state.projects.length) { var empty = elem("div", "placeholder", "Add a Task Master project to get started."); el.content.appendChild(empty); return; }
     if (!state.project) { el.content.appendChild(elem("div", "placeholder", "Loading project…")); return; }
-    var hub = elem("div", "hub"), tasks = elem("div", "tasks"); tasks.appendChild(renderNextTile());
+    var hub = elem("div", "hub"), tasks = elem("div", "tasks"); tasks.appendChild(renderOverview()); tasks.appendChild(renderNextTile());
     ["pending", "in-progress", "review", "done"].forEach(function (status) { tasks.appendChild(renderBucket(status, state.tasks.filter(function (task) { return task.status === status; }))); });
     tasks.appendChild(renderOtherBucket()); hub.appendChild(tasks); el.content.appendChild(hub);
+  }
+  function renderOverview() {
+    var box = elem("section", "next-tile"); box.appendChild(elem("div", "next-title", "PM overview")); var grid = elem("div", "overview"), c = (state.overview && state.overview.counts) || {};
+    [["total", "tasks"], ["ready", "ready"], ["inProgress", "in progress"], ["blocked", "blocked"], ["done", "done"], ["activeAgents", "active agents"]].forEach(function (item) { var card = elem("div", "metric"); card.appendChild(elem("b", null, String(c[item[0]] || 0))); card.appendChild(elem("span", null, item[1])); grid.appendChild(card); });
+    box.appendChild(grid); var runs = (state.overview && state.overview.executions) || []; if (runs.length) box.appendChild(elem("div", "empty", runs.map(function (run) { return run.taskId + " · " + (run.agentRole || "Developer") + " · " + run.agentName + " · " + (run.agentTool || "Agent Chat") + " · " + run.status; }).join("\n"))); else box.appendChild(elem("div", "empty", "No agent has claimed a task.")); return box;
   }
   function renderNextTile() {
     var box = elem("section", "next-tile"), head = elem("div", "next-title", "Next task"); box.appendChild(head); var next = state.next;
@@ -259,7 +267,7 @@
     var body = elem("div", "bucket-body"); if (state.otherFilter === "collapsed") body.appendChild(elem("div", "empty", others.length ? "Expand or filter to inspect deferred, cancelled, and blocked tasks." : "No other tasks.")); else { var visible = state.otherFilter === "all" ? others : others.filter(function (task) { return task.status === state.otherFilter; }); if (!visible.length) body.appendChild(elem("div", "empty", "No tasks.")); visible.forEach(function (task) { body.appendChild(renderCard(task, true)); }); } section.appendChild(body); return section;
   }
   function renderCard(task, showStatus) {
-    var card = elem("article", "card"), meta = elem("div", "card-meta"); meta.appendChild(elem("span", "task-id", String(task.id))); if (showStatus) meta.appendChild(elem("span", "chip status-chip", task.status)); card.appendChild(meta); card.appendChild(elem("div", "card-title", task.title || "Untitled task")); var details = elem("div", "card-meta"); if (task.priority != null && task.priority !== "") details.appendChild(elem("span", "chip prio-" + task.priority, task.priority)); var deps = Array.isArray(task.dependencies) ? task.dependencies.length : 0, blocks = Array.isArray(task.blocks) ? task.blocks.length : 0; if (deps) details.appendChild(elem("span", "chip", "deps " + deps)); if (blocks) details.appendChild(elem("span", "chip", "blocks " + blocks)); if (task.complexity != null) details.appendChild(elem("span", "chip", "complexity " + task.complexity)); if (details.childNodes.length) card.appendChild(details); card.addEventListener("click", function () { void openDetail(task.id); }); return card;
+    var card = elem("article", "card"), meta = elem("div", "card-meta"), runs = (state.overview && state.overview.executions) || [], run = runs.find(function (item) { return String(item.taskId) === String(task.id); }); meta.appendChild(elem("span", "task-id", String(task.id))); if (showStatus) meta.appendChild(elem("span", "chip status-chip", task.status)); if (run) meta.appendChild(elem("span", "chip", (run.agentRole || "Developer") + " · " + run.agentName + " · " + (run.agentTool || "Agent Chat") + " · " + run.status)); card.appendChild(meta); card.appendChild(elem("div", "card-title", task.title || "Untitled task")); var details = elem("div", "card-meta"); if (task.priority != null && task.priority !== "") details.appendChild(elem("span", "chip prio-" + task.priority, task.priority)); var deps = Array.isArray(task.dependencies) ? task.dependencies.length : 0, blocks = Array.isArray(task.blocks) ? task.blocks.length : 0; if (deps) details.appendChild(elem("span", "chip", "deps " + deps)); if (blocks) details.appendChild(elem("span", "chip", "blocks " + blocks)); if (task.complexity != null) details.appendChild(elem("span", "chip", "complexity " + task.complexity)); if (details.childNodes.length) card.appendChild(details); card.addEventListener("click", function () { void openDetail(task.id); }); return card;
   }
 
   async function openDetail(taskId) { state.detailTaskId = taskId; state.detailTask = null; state.detailLoading = true; el.detailOverlay.classList.add("show"); renderDetail(); await loadDetail(taskId); }

@@ -68,6 +68,8 @@ export class AgentLoop {
   // interrupt / dispose, replaced on unexpected close. No handoff/broker/lease
   // (that is docs/VIRTUAL-COMPUTER.md D4, a later phase).
   private computer: ComputerRuntime;
+  /** A successful Task Master claim is the mandatory implementation preflight. */
+  private activeTask: { projectId: string; taskId: string } | null = null;
 
   constructor(
     private send: Send,
@@ -602,6 +604,14 @@ export class AgentLoop {
     signal: AbortSignal,
   ): Promise<string> {
     try {
+      if (
+        ["run_command", "type_text", "press_keys", "run_codex"].includes(
+          tool,
+        ) &&
+        !this.activeTask
+      ) {
+        return "error: Task Master preflight required: list/show an actionable task and call taskmaster_claim before implementation tools.";
+      }
       if (tool === "browser_observe") {
         const result = await this.browser.observe(signal);
         if (result.snapshot)
@@ -696,7 +706,31 @@ export class AgentLoop {
           viewport: result.snapshot.viewport,
         });
       }
-      return executeTool(tool, args, signal);
+      const result = await executeTool(tool, args, signal, {
+        id: `chat-${this.chatId}`,
+        name: "Agent Chat",
+        role: "Developer",
+        tool: "Agent Chat",
+      });
+      if (
+        tool === "taskmaster_claim" &&
+        !result.startsWith("error:") &&
+        args.project_id &&
+        args.task_id
+      ) {
+        this.activeTask = {
+          projectId: args.project_id,
+          taskId: args.task_id,
+        };
+      }
+      if (
+        tool === "taskmaster_release" &&
+        !result.startsWith("error:") &&
+        this.activeTask?.projectId === args.project_id &&
+        this.activeTask?.taskId === args.task_id
+      )
+        this.activeTask = null;
+      return result;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       if (tool.startsWith("browser_") && this.browser.isClosed) {

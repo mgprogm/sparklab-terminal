@@ -489,6 +489,75 @@ class GatewayClient {
     );
   }
 
+  async getTaskmasterOverview(projectId: string): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/overview`,
+      ),
+    );
+  }
+
+  async claimTaskmasterTask(
+    projectId: string,
+    taskId: string,
+    identity: { id: string; name: string; role: string; tool: string },
+  ): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/claim`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            agentId: identity.id,
+            agentName: identity.name,
+            agentRole: identity.role,
+            agentTool: identity.tool,
+          }),
+        },
+      ),
+    );
+  }
+
+  async updateTaskmasterExecution(
+    projectId: string,
+    taskId: string,
+    agentId: string,
+    status: string,
+    note?: string,
+  ): Promise<unknown> {
+    return this.json<unknown>(
+      await this.call(
+        `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/execution`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            agentId,
+            status,
+            ...(note !== undefined ? { note } : {}),
+          }),
+        },
+      ),
+    );
+  }
+
+  async releaseTaskmasterExecution(
+    projectId: string,
+    taskId: string,
+    agentId: string,
+  ): Promise<void> {
+    const res = await this.call(
+      `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/execution`,
+      {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId }),
+      },
+    );
+    if (res.status !== 204) throw await this.error(res);
+  }
+
   async setTaskmasterStatus(
     projectId: string,
     taskId: string,

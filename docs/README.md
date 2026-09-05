@@ -6,6 +6,8 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md)                                       | Monorepo layout, the three-lifetimes design, every app and package                                                      |
 | [TERMINAL-PROTOCOL.md](TERMINAL-PROTOCOL.md)                             | REST API + WebSocket wire protocol, load-bearing invariants                                                             |
 | [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md)                                   | Agent Chat: `/agent`, auth, terminal/browser tools, approved screenshot export, history, and safety model               |
+| [TASKMASTER-HUB-OPERATIONS.md](TASKMASTER-HUB-OPERATIONS.md)             | Implemented Task Master dashboard, agent claims/preflight, execution metadata, limits, and verification                 |
+| [TASKMASTER-HUB-PLAN.md](TASKMASTER-HUB-PLAN.md)                         | Task Master CLI compatibility survey and original architecture decision record                                          |
 | [SCHEDULED-TERMINAL-INPUT-DESIGN.md](SCHEDULED-TERMINAL-INPUT-DESIGN.md) | Delayed text + key actions: security boundary, encrypted persistence, approval, recovery, and tests                     |
 | [AUTONOMOUS-TERMINAL-MONITORS.md](AUTONOMOUS-TERMINAL-MONITORS.md)       | Deterministic persisted terminal monitoring and bounded autonomous actions                                              |
 | [VIRTUAL-BROWSER.md](VIRTUAL-BROWSER.md)                                 | Virtual-browser setup, capture/save workflow, code map, security invariants, and troubleshooting                        |

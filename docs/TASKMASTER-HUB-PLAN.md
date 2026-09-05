@@ -1,7 +1,10 @@
 # Task Master Hub (pluggable HTML artifact) — Design & Decision Record
 
-> Status: **design only — CLI surface surveyed against a real checkout, nothing
-> built yet.** Scope: a new pluggable artifact, `/api/taskmaster/*` in the
+> Status: **implemented v1 plus in-progress agent coordination extensions.**
+> The original design record below remains the source for CLI compatibility
+> decisions; the current operational behavior and follow-up roadmap live in
+> [`TASKMASTER-HUB-OPERATIONS.md`](./TASKMASTER-HUB-OPERATIONS.md). Scope: a
+> pluggable artifact, `/api/taskmaster/*` in the
 > gateway, that gives one dashboard over **multiple `claude-task-master`
 > projects** (each project = one `.taskmaster/` directory on a server already
 > registered in Connected Servers), and exposes the same operations as agent

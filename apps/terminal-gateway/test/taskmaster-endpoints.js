@@ -146,6 +146,10 @@ function startServer(env = {}) {
           scratch,
           "taskmaster-projects.json",
         ),
+        TASKMASTER_EXECUTIONS_FILE: path.join(
+          scratch,
+          "taskmaster-executions.json",
+        ),
         ...env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -321,6 +325,57 @@ async function main() {
     assert(res.status === 404, `show missing -> ${res.status}, expected 404`);
   }
   console.log("  ok: GET task detail — full show + found:false -> 404");
+
+  // Execution metadata is gateway-owned: it must not change Task Master task
+  // data, and an active claim cannot be silently taken by another agent.
+  {
+    const claim = await req(
+      "POST",
+      `/api/taskmaster/projects/${projectId}/tasks/1/claim`,
+      {
+        body: { agentId: "agent-a", agentName: "Agent A" },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(claim.status === 201, `claim -> ${claim.status}, expected 201`);
+    const conflict = await req(
+      "POST",
+      `/api/taskmaster/projects/${projectId}/tasks/1/claim`,
+      { body: { agentId: "agent-b" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      conflict.status === 409,
+      `conflicting claim -> ${conflict.status}, expected 409`,
+    );
+    const progress = await req(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: {
+          agentId: "agent-a",
+          status: "blocked",
+          note: "waiting for dependency",
+        },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(progress.status === 200, `progress -> ${progress.status}`);
+    const overview = await req(
+      "GET",
+      `/api/taskmaster/projects/${projectId}/overview`,
+    );
+    const overviewJson = await overview.json();
+    assert(
+      overview.status === 200 && overviewJson.counts.total === 2,
+      "overview task count wrong",
+    );
+    assert(
+      overviewJson.counts.activeAgents === 1 &&
+        overviewJson.executions[0].status === "blocked",
+      "overview execution state wrong",
+    );
+  }
+  console.log("  ok: execution claims + conflict guard + PM overview");
 
   // ===========================================================================
   // GET next

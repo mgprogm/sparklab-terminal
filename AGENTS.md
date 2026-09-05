@@ -71,6 +71,14 @@ Use two-space indentation and Prettier with its Tailwind plugin. TypeScript is s
 
 Place Vitest tests beside code as `*.test.ts(x)` or in feature `__tests__/`; use the React preset for DOM tests. Gateway scripts use real tmux; Playwright specs live in `apps/e2e/specs/`. Add regression tests and run `pnpm turbo lint typecheck test build` before pushing.
 
+## Task Master Hub workflow
+
+When an implementation task is managed in Task Master Hub, read its task and
+dependencies before making changes, claim it, post progress or a blocker, and
+move it to review/done before releasing the claim. See
+`docs/TASKMASTER-HUB-OPERATIONS.md`. Do not edit Task Master task JSON
+directly; use the Hub API or the `task-master` CLI.
+
 ## Virtual Browser Changes
 
 Read `docs/VIRTUAL-BROWSER.md` and `docs/AGENT-PROTOCOL.md` first. Browser Use runs lazily through `apps/agent-service/src/browser-runtime.ts`; network policy belongs in `browser-proxy.ts` and `browser-security.ts`. Keep actions one-time approval-only, typed text redacted, screenshots ephemeral and bounded, and the UI read-only. Never expose raw MCP, CDP, JavaScript, filesystem, uploads, or downloads.

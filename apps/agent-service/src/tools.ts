@@ -88,6 +88,9 @@ export const WRITE_TOOLS = new Set([
   "taskmaster_add_task",
   "taskmaster_update_task",
   "taskmaster_expand",
+  "taskmaster_claim",
+  "taskmaster_update_progress",
+  "taskmaster_release",
 ]);
 
 /**
@@ -1463,6 +1466,71 @@ export const TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "taskmaster_overview",
+      description: "Read the Task Master PM overview before selecting work.",
+      parameters: {
+        type: "object",
+        properties: { project_id: { type: "string" } },
+        required: ["project_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_claim",
+      description:
+        "Claim an actionable task before implementation. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_update_progress",
+      description:
+        "Post working, blocked, or review progress for the claimed task. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+          status: { type: "string", enum: ["working", "blocked", "review"] },
+          note: { type: "string" },
+        },
+        required: ["project_id", "task_id", "status"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "taskmaster_release",
+      description: "Release this agent's task claim. Requires user approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          project_id: { type: "string" },
+          task_id: { type: "string" },
+        },
+        required: ["project_id", "task_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "taskmaster_list_projects",
       description:
         "List all registered Task Master Hub projects (id, name, serverId, path, binaryMode). Read-only. Call this first to discover which projects exist before listing or mutating tasks in one.",
@@ -1808,6 +1876,7 @@ export interface ToolArgs {
   dependencies?: string[];
   research?: boolean;
   num?: number;
+  note?: string;
   // PM columns
   wip_limit?: number | null;
   transitions?: string[] | null;
@@ -2086,10 +2155,23 @@ async function waitIdle(
  * Execute a tool and return the string the model sees as the tool result.
  * Approval (for write tools) is handled by the caller BEFORE this runs.
  */
+export interface AgentIdentity {
+  id: string;
+  name: string;
+  role: string;
+  tool: string;
+}
+
 export async function executeTool(
   tool: string,
   args: ToolArgs,
   signal?: AbortSignal,
+  agentIdentity: AgentIdentity = {
+    id: "agent-service",
+    name: "Agent Chat",
+    role: "Developer",
+    tool: "Agent Chat",
+  },
 ): Promise<string> {
   try {
     switch (tool) {
@@ -2601,6 +2683,46 @@ export async function executeTool(
         if (!args.project_id) return "error: project_id is required";
         const r = await gateway.getTaskmasterNext(args.project_id);
         return JSON.stringify(r);
+      }
+      case "taskmaster_overview": {
+        if (!args.project_id) return "error: project_id is required";
+        return JSON.stringify(
+          await gateway.getTaskmasterOverview(args.project_id),
+        );
+      }
+      case "taskmaster_claim": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        return JSON.stringify(
+          await gateway.claimTaskmasterTask(
+            args.project_id,
+            args.task_id,
+            agentIdentity,
+          ),
+        );
+      }
+      case "taskmaster_update_progress": {
+        if (!args.project_id || !args.task_id || !args.status)
+          return "error: project_id, task_id and status are required";
+        return JSON.stringify(
+          await gateway.updateTaskmasterExecution(
+            args.project_id,
+            args.task_id,
+            agentIdentity.id,
+            args.status,
+            args.note,
+          ),
+        );
+      }
+      case "taskmaster_release": {
+        if (!args.project_id || !args.task_id)
+          return "error: project_id and task_id are required";
+        await gateway.releaseTaskmasterExecution(
+          args.project_id,
+          args.task_id,
+          agentIdentity.id,
+        );
+        return "released";
       }
       case "taskmaster_set_status": {
         if (!args.project_id || !args.task_id || !args.status)

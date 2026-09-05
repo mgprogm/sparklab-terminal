@@ -26,6 +26,7 @@ import notes from "./notes.js";
 import pm from "./pm.js";
 import pmCollab from "./pm-collab.js";
 import taskmasterProjects from "./taskmaster.js";
+import taskmasterExecution from "./taskmaster-execution.js";
 import agentic from "./agentic.js";
 import schedules from "./agentic-schedules.js";
 import scheduledTerminalActions from "./scheduled-terminal-actions.js";
@@ -3006,6 +3007,10 @@ function taskmasterErrorStatus(code) {
       return 503;
     case "taskmaster_timeout":
       return 504;
+    case "claimed":
+      return 409;
+    case "forbidden":
+      return 403;
     default:
       return 400;
   }
@@ -3141,6 +3146,135 @@ async function handleTaskmaster(req, res, url) {
     // GET /api/taskmaster/projects
     if (req.method === "GET" && seg.length === 1 && seg[0] === "projects") {
       return sendJson(res, 200, { projects: taskmasterProjects.list() });
+    }
+
+    // GET overview is deliberately derived: tasks/dependencies come from the
+    // CLI, while active-agent execution state comes only from the sidecar.
+    if (
+      req.method === "GET" &&
+      seg.length === 3 &&
+      seg[0] === "projects" &&
+      seg[2] === "overview"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const result = await runTaskmasterCore(
+        resolved.server,
+        resolved.project.path,
+        "list",
+      );
+      if (!result.json || !Array.isArray(result.json.tasks))
+        return sendJson(res, 502, { error: "unexpected task-master output" });
+      const tasks = result.json.tasks.map(projectTaskSummary),
+        executions = taskmasterExecution.list(seg[1]);
+      const byId = new Map(tasks.map((task) => [String(task.id), task]));
+      const counts = {
+        total: tasks.length,
+        ready: tasks.filter(
+          (task) =>
+            task.status === "pending" &&
+            task.dependencies.every(
+              (id) => byId.get(String(id))?.status === "done",
+            ),
+        ).length,
+        blocked: tasks.filter((t) => t.status === "blocked").length,
+        inProgress: tasks.filter((t) => t.status === "in-progress").length,
+        done: tasks.filter((t) => t.status === "done").length,
+        activeAgents: new Set(executions.map((x) => x.agentId)).size,
+      };
+      return sendJson(res, 200, { counts, executions });
+    }
+
+    if (
+      seg.length === 5 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks" &&
+      seg[4] === "claim" &&
+      req.method === "POST"
+    ) {
+      const resolved = resolveTaskmasterProject(res, seg[1]);
+      if (!resolved) return true;
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.agentId !== "string" || !r.body.agentId.trim())
+        return sendJson(res, 400, { error: "agentId is required" });
+      const task = await runTaskmasterCore(
+        resolved.server,
+        resolved.project.path,
+        "show",
+        ["--id", seg[3]],
+      );
+      if (!task.json?.task)
+        return sendJson(res, 404, { error: "task not found" });
+      if (!["pending", "in-progress"].includes(task.json.task.status))
+        return sendJson(res, 409, { error: "task is not actionable" });
+      const list = await runTaskmasterCore(
+        resolved.server,
+        resolved.project.path,
+        "list",
+      );
+      const byId = new Map(
+        (list.json?.tasks || []).map((item) => [String(item.id), item]),
+      );
+      const unmet = (task.json.task.dependencies || []).filter(
+        (id) => byId.get(String(id))?.status !== "done",
+      );
+      if (unmet.length)
+        return sendJson(res, 409, {
+          error: "task dependencies are not complete",
+          code: "dependencies_unmet",
+          dependencyIds: unmet,
+        });
+      return sendJson(
+        res,
+        201,
+        taskmasterExecution.claim(
+          seg[1],
+          seg[3],
+          r.body.agentId.trim(),
+          typeof r.body.agentName === "string"
+            ? r.body.agentName.trim().slice(0, 120)
+            : "",
+          typeof r.body.agentRole === "string"
+            ? r.body.agentRole.trim().slice(0, 60)
+            : "",
+          typeof r.body.agentTool === "string"
+            ? r.body.agentTool.trim().slice(0, 120)
+            : "",
+        ),
+      );
+    }
+
+    if (
+      seg.length === 5 &&
+      seg[0] === "projects" &&
+      seg[2] === "tasks" &&
+      seg[4] === "execution"
+    ) {
+      const r = await readJsonObject(req);
+      if (!r.ok) return sendJson(res, r.status, { error: r.error });
+      if (typeof r.body.agentId !== "string" || !r.body.agentId.trim())
+        return sendJson(res, 400, { error: "agentId is required" });
+      if (req.method === "PATCH")
+        return sendJson(
+          res,
+          200,
+          taskmasterExecution.update(
+            seg[1],
+            seg[3],
+            r.body.agentId.trim(),
+            r.body.status,
+            typeof r.body.note === "string"
+              ? r.body.note.slice(0, 4000)
+              : undefined,
+          ),
+        );
+      if (req.method === "DELETE") {
+        taskmasterExecution.release(seg[1], seg[3], r.body.agentId.trim());
+        res.writeHead(204);
+        res.end();
+        return true;
+      }
     }
 
     // POST /api/taskmaster/projects — register (probes .taskmaster/ + binaryMode, D1/D5)
@@ -3371,6 +3505,9 @@ async function handleTaskmaster(req, res, url) {
         "--id",
         taskId,
       ]);
+      if (["done", "cancelled", "deferred"].includes(status)) {
+        taskmasterExecution.releaseForTask(seg[1], taskId);
+      }
       return sendJson(
         res,
         200,
