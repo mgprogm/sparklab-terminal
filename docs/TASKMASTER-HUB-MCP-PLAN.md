@@ -4,12 +4,11 @@
 >
 > - `README.md` + `apps/terminal-gateway/test/taskmaster-hub-mcp.mjs` (11
 >   checks, `test:taskmaster-hub-mcp` — see §6). A dependency-free stdio
->   JSON-RPC MCP server, a near-copy of
->   `tools/notes-mcp/` / `tools/kanban-mcp/`, that exposes the gateway's
->   `/api/taskmaster/*` routes as MCP tools so an MCP-capable agent CLI
->   (Claude Code, OpenCode) can **onboard its own project** into a running
->   Task Master Hub and then coordinate work through the claim layer — without
->   hand-rolling REST calls.
+>   JSON-RPC MCP server, a near-copy of `tools/notes-mcp/` / `tools/kanban-mcp/`,
+>   that exposes the gateway's `/api/taskmaster/*` routes as MCP tools so an
+>   MCP-capable agent CLI (Claude Code, OpenCode) can **onboard its own
+>   project** into a running Task Master Hub and then coordinate work through
+>   the claim layer — without hand-rolling REST calls.
 
 ## 1. Why a Hub MCP (it is not `task-master`'s own MCP)
 
