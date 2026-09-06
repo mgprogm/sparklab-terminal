@@ -460,6 +460,14 @@
   .task-grid {
     margin: 6px 0 2px;
   }
+  .task-grid-progress {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 4px;
+    font-size: 11px;
+    color: var(--mute);
+  }
   .task-grid-legend {
     display: flex;
     flex-wrap: wrap;
@@ -1313,6 +1321,22 @@
     });
 
     var wrapper = elem("div", "task-grid");
+
+    // --- progress summary ---
+    var doneTotal = filtered.filter(function (task) {
+      return task.status === "done";
+    }).length;
+    var pct = Math.round((doneTotal / filtered.length) * 100);
+    var progress = elem("div", "task-grid-progress");
+    progress.appendChild(elem("span", "chip", pct + "%"));
+    progress.appendChild(
+      elem(
+        "span",
+        "task-grid-progress-detail",
+        doneTotal + " / " + filtered.length + " done",
+      ),
+    );
+    wrapper.appendChild(progress);
 
     // --- grid of cells ---
     var grid = elem("div", "progress-grid");
