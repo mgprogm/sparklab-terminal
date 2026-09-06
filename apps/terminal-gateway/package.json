@@ -23,6 +23,7 @@
     "test:agentic": "node test/agentic-endpoints.js",
     "test:hook-notify": "node test/hook-notify-endpoints.js",
     "test:taskmaster": "node test/taskmaster-endpoints.js",
+    "test:taskmaster-hub-mcp": "node test/taskmaster-hub-mcp.mjs",
     "hash-password": "node scripts/hash-password.js",
     "generate-vapid": "node scripts/generate-vapid.js",
     "generate-hook-token": "node scripts/generate-hook-token.js",

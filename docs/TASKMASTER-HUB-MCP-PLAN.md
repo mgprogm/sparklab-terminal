@@ -1,12 +1,15 @@
 # Task Master Hub MCP — design
 
-> Status: **built (2026-09-06).** `tools/taskmaster-hub-mcp/server.mjs` +
-> `README.md`. A dependency-free stdio JSON-RPC MCP server, a near-copy of
-> `tools/notes-mcp/` / `tools/kanban-mcp/`, that exposes the gateway's
-> `/api/taskmaster/*` routes as MCP tools so an MCP-capable agent CLI
-> (Claude Code, OpenCode) can **onboard its own project** into a running
-> Task Master Hub and then coordinate work through the claim layer — without
-> hand-rolling REST calls.
+> Status: **built + tested (2026-09-06).** `tools/taskmaster-hub-mcp/server.mjs`
+>
+> - `README.md` + `apps/terminal-gateway/test/taskmaster-hub-mcp.mjs` (11
+>   checks, `test:taskmaster-hub-mcp` — see §6). A dependency-free stdio
+>   JSON-RPC MCP server, a near-copy of
+>   `tools/notes-mcp/` / `tools/kanban-mcp/`, that exposes the gateway's
+>   `/api/taskmaster/*` routes as MCP tools so an MCP-capable agent CLI
+>   (Claude Code, OpenCode) can **onboard its own project** into a running
+>   Task Master Hub and then coordinate work through the claim layer — without
+>   hand-rolling REST calls.
 
 ## 1. Why a Hub MCP (it is not `task-master`'s own MCP)
 
@@ -117,21 +120,30 @@ come back as `{ content:[{type:"text",…}], isError:true }`.
 
 ## 6. Verification
 
-No automated-test precedent for these MCP servers (README + manual, like
-kanban/pm/notes-mcp). Checked by piping JSON-RPC into `server.mjs` against
-the live prod-gateway (`:3107`, `GATEWAY_API_TOKEN` set, a project already
-registered):
+Unlike kanban/pm/notes-mcp (README + manual only), this one has an automated
+end-to-end test — it is the only coverage proving Phase C's `ownerChannel`
+isolation works through an _external_ client:
 
-1. `initialize` → `tools/list` returns the 16 tools.
-2. `tools/call taskmaster_hub_list_projects` and `_overview` (reads) return
-   real data.
-3. Against a **scratch `TASKMASTER_EXECUTIONS_FILE` gateway** (not prod
-   execution state): `_claim` with `x-pm-actor: mcpWorkerA` → 201; `_update_progress`
-   with the same config → 200; a second run with `TASKMASTER_HUB_ACTOR=mcpWorkerB`
-   `_update_progress` on A's claim → **403** (channel isolation proven);
-   `_release` as A → 204.
-4. `TASKMASTER_HUB_ACTOR="bad actor"` (space) → server exits non-zero at
-   startup with a clear message.
+**`apps/terminal-gateway/test/taskmaster-hub-mcp.mjs`**
+(`pnpm --filter @sparklab/terminal-gateway test:taskmaster-hub-mcp`). Spawns a
+real auth-enabled gateway with a stub `task-master` binary and fully scratched
+data files, then drives `server.mjs` as a child process:
+
+1. `taskmaster_hub_init` registers the scratch project and returns the
+   protocol + AGENTS.md snippet; a second `init` is idempotent.
+2. `workerA` `claim` → `working`; `update_progress` → `review`; `overview`
+   shows the held claim.
+3. `workerB` (a **different `TASKMASTER_HUB_ACTOR`, the same `agentId`**, so
+   the `agentId` check passes and the channel guard is what fires)
+   `update_progress` and `release` on A's claim → rejected with "owning auth
+   channel does not match".
+4. `workerA` `release` → ok; `workerB` claims the freed task; `workerA` is
+   then locked out of B's claim (the lock points the other way).
+5. `TASKMASTER_HUB_ACTOR="bad actor"` → the MCP exits 1 at startup.
+
+Also spot-checked by hand against the live prod-gateway (`:3107`):
+`initialize` → `tools/list` returns 16 tools; `_list_projects` / `_overview`
+return real data.
 
 ## 7. Registering it
 
