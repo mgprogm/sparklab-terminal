@@ -26,6 +26,9 @@ function load() {
   }
   if (!store.executions) store.executions = {};
   if (!Array.isArray(store.events)) store.events = [];
+  for (const x of Object.values(store.executions)) {
+    if (!x.ownerChannel) x.ownerChannel = "legacy";
+  }
 }
 function save() {
   fs.mkdirSync(path.dirname(FILE), { recursive: true });
@@ -74,7 +77,15 @@ function get(projectId, taskId) {
   const x = store.executions[key(projectId, taskId)];
   return x && ACTIVE.has(x.status) ? { ...x } : undefined;
 }
-function claim(projectId, taskId, agentId, agentName, agentRole, agentTool) {
+function claim(
+  projectId,
+  taskId,
+  agentId,
+  agentName,
+  agentRole,
+  agentTool,
+  ownerChannel,
+) {
   const existing = get(projectId, taskId);
   if (existing && existing.agentId !== agentId) {
     const e = new Error(
@@ -91,6 +102,7 @@ function claim(projectId, taskId, agentId, agentName, agentRole, agentTool) {
     agentName: agentName || agentId,
     agentRole: agentRole || "Developer",
     agentTool: agentTool || "Agent Chat",
+    ownerChannel: existing?.ownerChannel || ownerChannel || "legacy",
     status: "working",
     note: existing?.note || "",
     claimedAt: existing?.claimedAt || now,
@@ -101,7 +113,7 @@ function claim(projectId, taskId, agentId, agentName, agentRole, agentTool) {
   save();
   return { ...x };
 }
-function update(projectId, taskId, agentId, status, note) {
+function update(projectId, taskId, agentId, status, note, ownerChannel) {
   const x = get(projectId, taskId);
   if (!x) {
     const e = new Error("task is not claimed");
@@ -110,6 +122,15 @@ function update(projectId, taskId, agentId, status, note) {
   }
   if (x.agentId !== agentId) {
     const e = new Error("only the claiming agent can update this task");
+    e.code = "forbidden";
+    throw e;
+  }
+  if (
+    x.ownerChannel !== "legacy" &&
+    ownerChannel !== "legacy" &&
+    x.ownerChannel !== ownerChannel
+  ) {
+    const e = new Error("owning auth channel does not match");
     e.code = "forbidden";
     throw e;
   }
@@ -139,11 +160,20 @@ function update(projectId, taskId, agentId, status, note) {
   save();
   return { ...x };
 }
-function release(projectId, taskId, agentId) {
+function release(projectId, taskId, agentId, ownerChannel) {
   const x = get(projectId, taskId);
   if (!x) return;
   if (x.agentId !== agentId) {
     const e = new Error("only the claiming agent can release this task");
+    e.code = "forbidden";
+    throw e;
+  }
+  if (
+    x.ownerChannel !== "legacy" &&
+    ownerChannel !== "legacy" &&
+    x.ownerChannel !== ownerChannel
+  ) {
+    const e = new Error("owning auth channel does not match");
     e.code = "forbidden";
     throw e;
   }

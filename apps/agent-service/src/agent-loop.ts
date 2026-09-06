@@ -718,9 +718,9 @@ export class AgentLoop {
       }
       const result = await executeTool(tool, args, signal, {
         id: `chat-${this.chatId}`,
-        name: "Agent Chat",
-        role: "Developer",
-        tool: "Agent Chat",
+        name: config.agentChat.identityName,
+        role: config.agentChat.identityRole,
+        tool: config.agentChat.identityTool,
       });
       if (
         tool === "taskmaster_claim" &&

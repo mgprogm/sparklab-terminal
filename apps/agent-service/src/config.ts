@@ -183,6 +183,15 @@ export const config = {
       return m;
     })() as "read-only" | "workspace-write",
   },
+  // Agent Chat identity labels sent with Task Master Hub execution claims.
+  // Customize to distinguish concurrent agents (e.g. "BE" / "backend agent").
+  // The `id` field (`chat-<chatId>`) is per-chat, not user-settable, and stays
+  // unforgeable — these labels are display-only.
+  agentChat: {
+    identityRole: optional("AGENT_CHAT_ROLE", "Developer"),
+    identityName: optional("AGENT_CHAT_NAME", "Agent Chat"),
+    identityTool: optional("AGENT_CHAT_TOOL", "Agent Chat"),
+  },
   port: Number(optional("AGENT_PORT", "3009")),
   host: optional("AGENT_HOST", "127.0.0.1"),
   gatewayUrl: optional("GATEWAY_URL", "http://127.0.0.1:3007").replace(

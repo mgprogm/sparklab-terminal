@@ -3225,6 +3225,7 @@ async function handleTaskmaster(req, res, url) {
           code: "dependencies_unmet",
           dependencyIds: unmet,
         });
+      const ownerChannel = actorOf(req);
       return sendJson(
         res,
         201,
@@ -3241,6 +3242,7 @@ async function handleTaskmaster(req, res, url) {
           typeof r.body.agentTool === "string"
             ? r.body.agentTool.trim().slice(0, 120)
             : "",
+          ownerChannel,
         ),
       );
     }
@@ -3255,6 +3257,7 @@ async function handleTaskmaster(req, res, url) {
       if (!r.ok) return sendJson(res, r.status, { error: r.error });
       if (typeof r.body.agentId !== "string" || !r.body.agentId.trim())
         return sendJson(res, 400, { error: "agentId is required" });
+      const ownerChannel = actorOf(req);
       if (req.method === "PATCH")
         return sendJson(
           res,
@@ -3267,10 +3270,16 @@ async function handleTaskmaster(req, res, url) {
             typeof r.body.note === "string"
               ? r.body.note.slice(0, 4000)
               : undefined,
+            ownerChannel,
           ),
         );
       if (req.method === "DELETE") {
-        taskmasterExecution.release(seg[1], seg[3], r.body.agentId.trim());
+        taskmasterExecution.release(
+          seg[1],
+          seg[3],
+          r.body.agentId.trim(),
+          ownerChannel,
+        );
         res.writeHead(204);
         res.end();
         return true;

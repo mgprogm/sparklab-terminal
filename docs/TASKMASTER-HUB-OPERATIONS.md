@@ -54,15 +54,28 @@ claim. Claims without a heartbeat/progress update expire after
 
 ## Current limitations and roadmap
 
-- Agent Chat currently records the default identity `Developer · Agent Chat`.
-  Role-specific orchestration and external CLI claim wrappers remain to be
-  added.
+- Agent Chat records the identity `Developer · Agent Chat` by default, now
+  overridable per deployment via `AGENT_CHAT_ROLE` / `AGENT_CHAT_NAME` /
+  `AGENT_CHAT_TOOL` (Phase C). The `id` (`chat-<chatId>`) stays per-chat and
+  is never model-settable. Per-_chat_ role selection in the UI and external
+  CLI claim wrappers remain to be added.
 - The preflight grant is held in the running AgentLoop; it is not yet durable
   across an agent-service restart.
-- Direct artifact API callers can currently provide execution labels. Gateway
-  credential-to-owner binding is a security follow-up.
-- Hub UI shows execution metadata but does not yet offer human claim/progress/
-  release controls.
+- **Resolved (Phase C):** each execution record is now bound to the gateway
+  auth channel that created it (`ownerChannel`, derived from `actorOf(req)`);
+  `update`/`release` reject a caller on a different real channel with 403.
+  This closes the "direct artifact API callers can provide arbitrary
+  execution labels" hole for the scoped-bearer case. **Limitation:** the
+  gateway authenticates one user and agent-service calls it with that same
+  cookie, so `ownerChannel` separates bearer ↔ cookie but _not_ a human
+  clicking in the Hub UI from Agent Chat — both are the same cookie channel.
+  Pre-Phase-C records load with `ownerChannel: "legacy"`, which matches any
+  channel so they are never locked out. `releaseForTask()` (task status →
+  `done`/`cancelled`/`deferred`) intentionally has no owner check.
+- **Resolved (UI v2 Phase A):** the Hub detail panel offers human
+  claim / mark-working / mark-blocked / mark-review / release controls
+  (`agentId: "human"`), plus relative-time / stale-claim styling on claim
+  chips.
 - Task Master dependencies are per project. Cross-project dependency views,
   bulk operations, real-time push, and saved filters remain post-v1 work.
 

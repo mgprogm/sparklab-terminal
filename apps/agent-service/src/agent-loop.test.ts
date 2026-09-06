@@ -295,3 +295,17 @@ test("parseComputerAction: hotkey needs a 2-8 key chord and no target (M3.2)", (
     /short key name/,
   );
 });
+
+test("Agent Chat identity defaults match the hardcoded originals", async () => {
+  const { config } = await import("./config.js");
+  assert.equal(config.agentChat.identityRole, "Developer");
+  assert.equal(config.agentChat.identityName, "Agent Chat");
+  assert.equal(config.agentChat.identityTool, "Agent Chat");
+});
+
+test("Agent Chat identity config keys are strings", async () => {
+  const { config } = await import("./config.js");
+  assert.equal(typeof config.agentChat.identityRole, "string");
+  assert.equal(typeof config.agentChat.identityName, "string");
+  assert.equal(typeof config.agentChat.identityTool, "string");
+});

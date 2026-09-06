@@ -246,13 +246,30 @@ here.
   fixture bug, not a feature bug, fixed in the test fixture), and Dismiss
   correctly tears the toolbar down.
 
-### Phase C — cross-referenced, not re-designed here
+### Phase C — designed and built (2026-09-06)
 
-Role-specific Agent Chat identity / external-CLI claim wrapper, and
-credential-to-owner binding for direct artifact API callers. These are
-already tracked in `TASKMASTER-HUB-OPERATIONS.md`'s own "Current
-limitations and roadmap" section as backend/auth-model decisions; this
-brainstorm doesn't add new scope to them.
+Designed in [`TASKMASTER-HUB-PHASE-C-PLAN.md`](./TASKMASTER-HUB-PHASE-C-PLAN.md)
+(+ `TASKMASTER-HUB-PHASE-C-SPEC.md`) and built via an SA→Developer(Codex CLI)
+pipeline. Shipped:
+
+- **C1 — credential-to-owner binding.** Each execution record carries a
+  gateway-derived `ownerChannel` (`actorOf(req)`); `claim` re-claim /
+  `update` / `release` require both `agentId` and `ownerChannel` to match,
+  rejecting a cross-channel caller with 403. Pre-Phase-C records backfill to
+  `ownerChannel: "legacy"` (a wildcard on either side of the comparison).
+  Gateway-only: `taskmaster-execution.js` + the two `server.js` routes + a
+  new `TaskMasterExecutionRecordSchema` in shared-types. `app.html` and
+  `gateway-client.ts` unchanged.
+- **C2 — role-specific Agent Chat identity.** `AGENT_CHAT_ROLE` /
+  `AGENT_CHAT_NAME` / `AGENT_CHAT_TOOL` env vars override the previously
+  hardcoded `Developer · Agent Chat` labels in `agent-loop.ts` via a new
+  `config.agentChat` block. `id` stays `chat-<chatId>`; identity never comes
+  from model tool args.
+
+Still deferred (out of Phase C scope): external-CLI claim wrapper script,
+durable preflight grant across an agent-service restart, per-chat composer
+role picker. Known limit: single-user auth means `ownerChannel` separates
+bearer ↔ cookie only, not Hub-UI-human from Agent Chat.
 
 ---
 

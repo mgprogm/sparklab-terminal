@@ -140,6 +140,7 @@ function startServer(env = {}) {
         HOST: "127.0.0.1",
         GATEWAY_AUTH_USER: AUTH_USER,
         GATEWAY_AUTH_PASSWORD: AUTH_PASS,
+        GATEWAY_API_TOKEN: "test-tm-bearer-token-1234",
         ALLOWED_ORIGINS: ALLOWED_ORIGIN,
         TASKMASTER_COMMAND: stubPath,
         TASKMASTER_PROJECTS_FILE: path.join(
@@ -193,6 +194,21 @@ async function req(method, pathname, { body, origin, headers } = {}) {
     payload = JSON.stringify(body);
   }
   return fetch(`${BASE}${pathname}`, { method, headers: h, body: payload });
+}
+
+async function bearerReq(method, pathname, { body, origin, actor } = {}) {
+  const headers = {
+    authorization: `Bearer test-tm-bearer-token-1234`,
+  };
+  if (actor) headers["x-pm-actor"] = actor;
+  if (origin) headers["origin"] = origin;
+  let payload;
+  if (body !== undefined) {
+    headers["content-type"] = "application/json";
+    payload = JSON.stringify(body);
+  }
+  // No cookie — this simulates a pure bearer caller.
+  return fetch(`${BASE}${pathname}`, { method, headers, body: payload });
 }
 
 async function login() {
@@ -380,6 +396,168 @@ async function main() {
     );
   }
   console.log("  ok: execution claims + conflict guard + PM overview");
+
+  // ===========================================================================
+  // execution ownerChannel binding — cross-channel rejection (Phase C1)
+  // ===========================================================================
+  {
+    // Release the agent-a claim held by the block above so task 1 is free.
+    const rel = await req(
+      "DELETE",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      { body: { agentId: "agent-a" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(rel.status === 204, `pre-release -> ${rel.status}, expected 204`);
+
+    // Case 1: cookie claims, bearer tries to mutate the same agentId -> 403.
+    const c1claim = await req(
+      "POST",
+      `/api/taskmaster/projects/${projectId}/tasks/1/claim`,
+      { body: { agentId: "owner-chan-a" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      c1claim.status === 201,
+      `case1 claim -> ${c1claim.status}, expected 201`,
+    );
+    const c1patch = await bearerReq(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "owner-chan-a", status: "review" },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(
+      c1patch.status === 403,
+      `case1 cross-channel PATCH -> ${c1patch.status}, expected 403`,
+    );
+    const c1body = await c1patch.json().catch(() => ({}));
+    assert(
+      /forbidden|channel/i.test(JSON.stringify(c1body)),
+      `case1 error body missing forbidden/channel: ${JSON.stringify(c1body)}`,
+    );
+
+    // Case 2: bearer actor A claims, bearer actor B tries to PATCH -> 403.
+    const c2rel = await req(
+      "DELETE",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      { body: { agentId: "owner-chan-a" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      c2rel.status === 204,
+      `case2 release -> ${c2rel.status}, expected 204`,
+    );
+    const c2claim = await bearerReq(
+      "POST",
+      `/api/taskmaster/projects/${projectId}/tasks/1/claim`,
+      {
+        body: { agentId: "bearer-agent" },
+        origin: ALLOWED_ORIGIN,
+        actor: "botA",
+      },
+    );
+    assert(
+      c2claim.status === 201,
+      `case2 claim -> ${c2claim.status}, expected 201`,
+    );
+    const c2patch = await bearerReq(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "bearer-agent", status: "review" },
+        origin: ALLOWED_ORIGIN,
+        actor: "botB",
+      },
+    );
+    assert(
+      c2patch.status === 403,
+      `case2 actor-B PATCH -> ${c2patch.status}, expected 403`,
+    );
+
+    // Case 3: same bearer actor A can update and release.
+    const c3patch = await bearerReq(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "bearer-agent", status: "review" },
+        origin: ALLOWED_ORIGIN,
+        actor: "botA",
+      },
+    );
+    assert(
+      c3patch.status === 200,
+      `case3 same-channel PATCH -> ${c3patch.status}, expected 200`,
+    );
+    const c3del = await bearerReq(
+      "DELETE",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "bearer-agent" },
+        origin: ALLOWED_ORIGIN,
+        actor: "botA",
+      },
+    );
+    assert(
+      c3del.status === 204,
+      `case3 same-channel DELETE -> ${c3del.status}, expected 204`,
+    );
+
+    // Case 4: a legacy record (no ownerChannel on disk) stays updatable by the
+    // same agentId regardless of incoming channel, after a load()+backfill.
+    fs.writeFileSync(
+      path.join(scratch, "taskmaster-executions.json"),
+      JSON.stringify({
+        executions: {
+          [`${projectId}:1`]: {
+            projectId,
+            taskId: "1",
+            agentId: "legacy-agent",
+            agentName: "Legacy",
+            agentRole: "Developer",
+            agentTool: "Agent Chat",
+            status: "working",
+            note: "",
+            claimedAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+        events: [],
+      }),
+    );
+    server.kill("SIGTERM");
+    await new Promise((r) => server.once("exit", r));
+    await startServer();
+    await login();
+    const c4patch = await bearerReq(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "legacy-agent", status: "review" },
+        origin: ALLOWED_ORIGIN,
+        actor: "anybot",
+      },
+    );
+    assert(
+      c4patch.status === 200,
+      `case4 legacy-wildcard PATCH -> ${c4patch.status}, expected 200`,
+    );
+    const c4del = await bearerReq(
+      "DELETE",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "legacy-agent" },
+        origin: ALLOWED_ORIGIN,
+        actor: "anybot",
+      },
+    );
+    assert(
+      c4del.status === 204,
+      `case4 cleanup release -> ${c4del.status}, expected 204`,
+    );
+  }
+  console.log(
+    "  ok: execution ownerChannel binding — cross-channel rejection + legacy wildcard",
+  );
 
   // ===========================================================================
   // GET next

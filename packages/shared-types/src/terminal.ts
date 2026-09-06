@@ -2007,3 +2007,27 @@ export const AddTaskMasterDependencyRequestSchema = z.object({
 export type AddTaskMasterDependencyRequest = z.infer<
   typeof AddTaskMasterDependencyRequestSchema
 >;
+
+/** Gateway execution-record shape returned by the claim/update routes and
+ *  the overview's `executions[]` array. Fields are gateway-set; the client
+ *  never provides `ownerChannel`. */
+export const TaskMasterExecutionRecordSchema = z
+  .object({
+    projectId: z.string(),
+    taskId: z.string(),
+    agentId: z.string(),
+    agentName: z.string(),
+    agentRole: z.string(),
+    agentTool: z.string(),
+    status: z.string(),
+    note: z.string(),
+    claimedAt: z.number(),
+    updatedAt: z.number(),
+    /** Auth channel that created this claim. Gateway-set, read-only.
+     *  `"legacy"` for records created before Phase C. */
+    ownerChannel: z.string().optional(),
+  })
+  .passthrough();
+export type TaskMasterExecutionRecord = z.infer<
+  typeof TaskMasterExecutionRecordSchema
+>;

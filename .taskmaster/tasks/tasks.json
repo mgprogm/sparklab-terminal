@@ -159,12 +159,80 @@
           }
         ],
         "updatedAt": "2026-09-05T17:42:04.749Z"
+      },
+      {
+        "id": "4",
+        "title": "Task Master Hub Phase C — credential-to-owner binding + role-specific Agent Chat identity",
+        "description": "Resolve two roadmap bullets in docs/TASKMASTER-HUB-OPERATIONS.md: (C1) bind a Task Master Hub execution record to the auth channel that created it so a scoped-bearer caller can no longer claim as an arbitrary agentId or mutate/release another agent's claim; (C2) make the hardcoded Agent Chat claim identity (Developer / Agent Chat) configurable via env so concurrent agents are distinguishable in the Hub overview. Full design: docs/TASKMASTER-HUB-PHASE-C-PLAN.md. External-CLI claim wrapper, durable preflight grant, and a composer role picker are explicitly out of scope.",
+        "details": "C1 (gateway only): add a gateway-derived ownerChannel field to the execution record in apps/terminal-gateway/src/taskmaster-execution.js — do NOT reshape agentId. claim() takes ownerChannel; claim re-claim / update / release require agentId match AND ownerChannel match, mismatch throws code:\"forbidden\" (403). load() backfills a missing ownerChannel to \"legacy\" (only-if-absent, pm.js migrate() precedent); \"legacy\" compares equal to any channel. releaseForTask() (status->done path) stays unchanged and unchecked by design. server.js claim route (~3195) and execution route (~3248): const ownerChannel = actorOf(req) and pass through. packages/shared-types/src/terminal.ts: add optional ownerChannel:z.string() to the TaskMaster execution schema. app.html and agent-service gateway-client.ts do NOT change.\n\nC2 (agent-service only): apps/agent-service/src/config.ts gains agentChat.identityRole/identityName/identityTool from AGENT_CHAT_ROLE/AGENT_CHAT_NAME/AGENT_CHAT_TOOL env, defaulting to \"Developer\"/\"Agent Chat\"/\"Agent Chat\". apps/agent-service/src/agent-loop.ts ~719-724 uses the config values instead of the object literal; id stays chat-${chatId}. Update apps/agent-service/.env.example. Invariant: identity never derives from model tool args.\n\nConstraint: gateway is single-user; agent-service authenticates with its own cookie under GATEWAY_AUTH_USER, so ownerChannel separates bearer<->cookie only, NOT Hub-UI-human from Agent Chat. That is acceptable and must be stated, not overclaimed, in the ops-doc update.",
+        "testStrategy": "Gateway: extend apps/terminal-gateway/test/taskmaster-endpoints.js — add GATEWAY_API_TOKEN to the gateway spawn env, then assert: (1) cookie-claim then bearer PATCH/DELETE with the same agentId -> 403; (2) bearer-claim as X-PM-Actor A then bearer PATCH as actor B -> 403; (3) same-channel happy paths still 200/204; (4) an executions-file record with no ownerChannel still accepts a same-agentId update (legacy backfill). These are meaningful only against the existing auth-enabled harness (in open mode actorOf() always returns user:... and the checks pass vacuously). Run: env -u GATEWAY_AUTH_USER -u GATEWAY_AUTH_PASSWORD -u GATEWAY_AUTH_PASSWORD_HASH pnpm --filter @sparklab/terminal-gateway test:taskmaster. agent-service: extend agent-loop.test.ts — identity handed to executeTool reflects AGENT_CHAT_ROLE/NAME/TOOL when set, defaults when unset. Also green: pnpm --filter @sparklab/agent-service typecheck && test; pnpm --filter @sparklab/terminal typecheck.",
+        "status": "in-progress",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "SA: write docs/TASKMASTER-HUB-PHASE-C-SPEC.md",
+            "description": "Turn docs/TASKMASTER-HUB-PHASE-C-PLAN.md into an acceptance-criteria-level, per-file implementation spec the Developer can execute without further design decisions.",
+            "details": "Read the PLAN doc plus the real current code (taskmaster-execution.js, server.js claim/execution routes + actorOf, taskmaster-endpoints.js harness, agent-service config.ts + agent-loop.ts:~719, shared-types terminal.ts TaskMaster block). Produce a spec with: exact function signatures before/after, the ownerChannel comparison rule incl. the \"legacy\" wildcard, the exact new test cases with expected status codes and how the harness gets a bearer token, the config block shape, and a deviations-allowed note. No code — spec only.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 4,
+            "parentId": "undefined",
+            "updatedAt": "2026-09-06T02:43:39.585Z"
+          },
+          {
+            "id": 2,
+            "title": "Dev: C1 gateway ownerChannel binding + shared-types",
+            "description": "Implement credential-to-owner binding in the gateway per the spec.",
+            "details": "apps/terminal-gateway/src/taskmaster-execution.js: claim() gains ownerChannel param and persists it; claim re-claim / update / release guards require agentId AND ownerChannel match (mismatch -> code:\"forbidden\"); load() backfills missing ownerChannel to \"legacy\" (only-if-absent); \"legacy\" is a wildcard in the comparison; releaseForTask() untouched. apps/terminal-gateway/src/server.js: claim route (~3195) and execution route (~3248) compute actorOf(req) and pass it through. packages/shared-types/src/terminal.ts: add optional ownerChannel to the TaskMaster execution schema, keep re-exports. Do NOT touch app.html or agent-service gateway-client.ts.",
+            "status": "done",
+            "dependencies": ["4.1"],
+            "parentTaskId": 4,
+            "parentId": "undefined",
+            "updatedAt": "2026-09-06T02:52:44.244Z"
+          },
+          {
+            "id": 3,
+            "title": "Dev: C1 test coverage in taskmaster-endpoints.js",
+            "description": "Extend the gateway endpoint test with cross-channel guard checks.",
+            "details": "Add GATEWAY_API_TOKEN to the gateway spawn env (~line 137). New assertions: (1) cookie-claim then bearer PATCH/DELETE same agentId -> 403; (2) bearer-claim as X-PM-Actor A then bearer PATCH as actor B -> 403; (3) same-channel happy paths still 200/204; (4) executions-file record missing ownerChannel still accepts same-agentId update. Must stay in the existing auth-enabled harness (open mode makes actorOf always user:... -> vacuous pass). Verify: env -u GATEWAY_AUTH_USER -u GATEWAY_AUTH_PASSWORD -u GATEWAY_AUTH_PASSWORD_HASH pnpm --filter @sparklab/terminal-gateway test:taskmaster.",
+            "status": "done",
+            "dependencies": ["4.2"],
+            "parentTaskId": 4,
+            "parentId": "undefined",
+            "updatedAt": "2026-09-06T02:52:44.254Z"
+          },
+          {
+            "id": 4,
+            "title": "Dev: C2 config-driven Agent Chat identity + tests",
+            "description": "Make the Agent Chat claim identity role/name/tool configurable via env.",
+            "details": "apps/agent-service/src/config.ts: add agentChat.identityRole/identityName/identityTool from AGENT_CHAT_ROLE/AGENT_CHAT_NAME/AGENT_CHAT_TOOL, defaults \"Developer\"/\"Agent Chat\"/\"Agent Chat\". apps/agent-service/src/agent-loop.ts ~719-724: use config values, keep id = chat-${chatId}. Update apps/agent-service/.env.example. Extend agent-loop.test.ts: identity to executeTool reflects env overrides when set, defaults when unset. Green: pnpm --filter @sparklab/agent-service typecheck && test; pnpm --filter @sparklab/terminal typecheck.",
+            "status": "done",
+            "dependencies": ["4.1"],
+            "parentTaskId": 4,
+            "parentId": "undefined",
+            "updatedAt": "2026-09-06T02:52:44.262Z"
+          },
+          {
+            "id": 5,
+            "title": "Coordinator: full verification + docs update + commit",
+            "description": "Run the full §6 verification matrix, update the three docs, commit Phase C.",
+            "details": "Run all four verification commands from the PLAN §6. Update docs/TASKMASTER-HUB-OPERATIONS.md roadmap (credential-binding bullet resolved + intra-cookie limitation stated; keep CLI-wrapper and durable-grant bullets open), docs/TASKMASTER-HUB-UI-V2-PLAN.md Phase C status, and the PLAN doc status header + deviations section. Commit with the taskmaster-hub scope. Do NOT push unless asked.",
+            "status": "in-progress",
+            "dependencies": ["4.3", "4.4"],
+            "parentTaskId": 4,
+            "parentId": "undefined",
+            "updatedAt": "2026-09-06T02:52:46.509Z"
+          }
+        ],
+        "updatedAt": "2026-09-06T02:52:46.509Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-09-05T17:42:04.750Z",
-      "taskCount": 3,
+      "lastModified": "2026-09-06T02:52:46.509Z",
+      "taskCount": 4,
       "completedCount": 3,
       "tags": ["master"]
     }
