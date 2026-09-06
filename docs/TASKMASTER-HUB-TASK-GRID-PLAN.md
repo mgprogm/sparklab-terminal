@@ -1,8 +1,22 @@
 # Task Master Hub — tag task-status grid on the Next Task tile
 
-> Status: **planned, not built (2026-09-06).** Frontend-only follow-on to the
-> UI v2 work ([`TASKMASTER-HUB-UI-V2-PLAN.md`](./TASKMASTER-HUB-UI-V2-PLAN.md)).
-> Tracked as Task Master task **#5** in this repo's `.taskmaster/`.
+> Status: **built (2026-09-06).** Frontend-only follow-on to the UI v2 work
+> ([`TASKMASTER-HUB-UI-V2-PLAN.md`](./TASKMASTER-HUB-UI-V2-PLAN.md)). Tracked as
+> Task Master task **#5**. Spec: `TASKMASTER-HUB-TASK-GRID-SPEC.md`. Built via an
+> SA → Developer (Codex CLI) pipeline; `renderTaskStatusGrid()` + CSS applied
+> verbatim from the spec to `apps/terminal/public/taskmaster-hub/app.html`
+> (109 insertions, that file only). Verified: JS syntax check, `@sparklab/terminal`
+> typecheck (exit 0), and a shim harness exercising the function
+> (empty → `null`; N tasks → N clickable cells; legend partition matches the
+> `renderContent()` predicates incl. `deferred` → "Other"; the `ready` class
+> lands only on a `pending` task whose deps are all `done`; tooltip format;
+> the task filter narrows the grid). **A live `dev-browser` visual pass was
+> not run** — the scratch-gateway isolation hazard (see the memory notes and
+> `docs/TASKMASTER-HUB-UI-V2-PLAN.md` incidents) outweighed it for a purely
+> additive render that reuses the shipped `.progress-grid`/`.progress-cell`
+> pattern and is guarded identically to the existing
+> `state.tasks.filter(matchesTaskFilter)` call two lines above the call site.
+> Eyeball it in the running Hub after deploy.
 
 ## 1. What the user asked for
 

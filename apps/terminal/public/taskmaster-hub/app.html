@@ -31,6 +31,7 @@
     --status-done: #8eb878;
     --status-review: #9f8ac7;
     --status-other: #aea69c;
+    --status-ready: #b8c98a;
   }
   * {
     box-sizing: border-box;
@@ -445,6 +446,33 @@
   }
   .progress-cell.status-blocked {
     background: var(--danger);
+  }
+  .progress-cell.ready {
+    background: var(--status-ready);
+  }
+  .progress-cell[role="button"] {
+    cursor: pointer;
+  }
+  .progress-cell[role="button"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .task-grid {
+    margin: 6px 0 2px;
+  }
+  .task-grid-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin: 2px 0 8px;
+    font-size: 11px;
+    color: var(--mute);
+    align-items: center;
+  }
+  .task-grid-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .card-select {
     flex: none;
@@ -1276,10 +1304,91 @@
         renderContent();
       });
   }
+  function renderTaskStatusGrid() {
+    var filtered = state.tasks.filter(matchesTaskFilter);
+    if (!filtered.length) return null;
+
+    filtered.sort(function (a, b) {
+      return Number(a.id) - Number(b.id);
+    });
+
+    var wrapper = elem("div", "task-grid");
+
+    // --- grid of cells ---
+    var grid = elem("div", "progress-grid");
+    grid.setAttribute("aria-label", "Task status grid");
+    filtered.forEach(function (task) {
+      var cls = "progress-cell " + statusClass(task.status);
+      if (isReadyTask(task)) cls += " ready";
+      var cell = elem("span", cls);
+      cell.title =
+        "#" +
+        task.id +
+        " · " +
+        (task.title || "Untitled") +
+        " · " +
+        (task.status || "pending") +
+        (task.priority ? " · " + task.priority : "");
+      cell.setAttribute("role", "button");
+      cell.setAttribute("tabindex", "0");
+      cell.addEventListener("click", function () {
+        void openDetail(task.id);
+      });
+      cell.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          void openDetail(task.id);
+        }
+      });
+      grid.appendChild(cell);
+    });
+    wrapper.appendChild(grid);
+
+    // --- legend ---
+    var readyCount = 0,
+      pendingCount = 0,
+      inProgressCount = 0,
+      reviewCount = 0,
+      doneCount = 0,
+      blockedCount = 0,
+      otherCount = 0;
+    filtered.forEach(function (task) {
+      if (isReadyTask(task)) readyCount++;
+      else if (task.status === "pending") pendingCount++;
+      else if (task.status === "in-progress") inProgressCount++;
+      else if (task.status === "review") reviewCount++;
+      else if (task.status === "done") doneCount++;
+      else if (task.status === "blocked") blockedCount++;
+      else otherCount++;
+    });
+    var legendItems = [
+      ["ready", "Ready", readyCount],
+      ["status-pending", "Pending", pendingCount],
+      ["status-in-progress", "In progress", inProgressCount],
+      ["status-review", "Review", reviewCount],
+      ["status-done", "Done", doneCount],
+      ["status-blocked", "Blocked", blockedCount],
+      ["status-other", "Other", otherCount],
+    ];
+    var legend = elem("div", "task-grid-legend");
+    legendItems.forEach(function (item) {
+      if (item[2] === 0) return;
+      var row = elem("span", "task-grid-legend-item");
+      row.appendChild(elem("span", "progress-cell " + item[0]));
+      row.appendChild(document.createTextNode(item[1] + " " + item[2]));
+      legend.appendChild(row);
+    });
+    wrapper.appendChild(legend);
+
+    return wrapper;
+  }
+
   function renderNextTile() {
     var box = elem("section", "next-tile"),
       head = elem("div", "next-title", "Next task");
     box.appendChild(head);
+    var taskGrid = renderTaskStatusGrid();
+    if (taskGrid) box.appendChild(taskGrid);
     var next = state.next;
     if (next && next.found === true && next.task) {
       ensureNextSubtasksLoaded(next.task.id);

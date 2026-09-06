@@ -237,7 +237,35 @@
         "status": "pending",
         "dependencies": [],
         "priority": "medium",
-        "subtasks": []
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "SA: write docs/TASKMASTER-HUB-TASK-GRID-SPEC.md",
+            "description": "Code-anchored implementation spec from the PLAN doc. DONE — spec written, caught that there is no --status-blocked CSS var (blocked uses var(--danger) directly).",
+            "details": "",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 5
+          },
+          {
+            "id": 2,
+            "title": "Dev: implement renderTaskStatusGrid() + CSS in app.html",
+            "description": "Implemented via Codex CLI, verbatim from the spec. DONE — 109 insertions to app.html only; typecheck exit 0; logic verified in a shim harness (empty->null, 7 tasks->7 cells, legend partition correct, ready-class only on dep-satisfied pending, tooltip format, filter narrows grid).",
+            "details": "",
+            "status": "done",
+            "dependencies": ["5.1"],
+            "parentTaskId": 5
+          },
+          {
+            "id": 3,
+            "title": "Coordinator: verify + commit",
+            "description": "Diff reviewed (app.html only, 109 insertions, matches spec), JS syntax-checked, terminal typecheck green, logic shim-tested. Live dev-browser pass NOT performed (documented scratch-gateway isolation risk); noted to user. Update PLAN status header, commit.",
+            "details": "",
+            "status": "in-progress",
+            "dependencies": ["5.2"],
+            "parentTaskId": 5
+          }
+        ]
       }
     ],
     "metadata": {
