@@ -75,9 +75,16 @@ Place Vitest tests beside code as `*.test.ts(x)` or in feature `__tests__/`; use
 
 When an implementation task is managed in Task Master Hub, read its task and
 dependencies before making changes, claim it, post progress or a blocker, and
-move it to review/done before releasing the claim. See
-`docs/TASKMASTER-HUB-OPERATIONS.md`. Do not edit Task Master task JSON
-directly; use the Hub API or the `task-master` CLI.
+move it to review/done before releasing the claim. This applies to whichever
+agent you are — the in-app Agent Chat, or a Claude Code / Codex CLI /
+OpenCode / Pi session at a terminal. Identify yourself on the claim
+(`agentId` stable+unique, plus `agentRole` / `agentName` / `agentTool`
+labels). A claim is exclusive (409 if held), TTL-expiring (~30 min without a
+progress update), and bound to your auth channel (403 on a cross-channel
+mutation). See `docs/TASKMASTER-HUB-OPERATIONS.md` (§"Multiple agent tools on
+one backlog") and `docs/TASKMASTER-AGENT-SETUP.md` (per-CLI MCP-vs-REST
+setup). Do not edit Task Master task JSON directly; use the Hub API or the
+`task-master` CLI.
 
 ## Virtual Browser Changes
 

@@ -1,15 +1,28 @@
 # Task Master agent setup
 
-How to prepare a `claude-task-master` project so **Claude Code** and **Codex
-CLI** — not just the Task Master Hub artifact's web UI (see
+How to prepare a `claude-task-master` project so a terminal AI coding CLI —
+**Claude Code**, **Codex CLI**, **OpenCode**, **Pi**, and tools like them —
+not just the Task Master Hub artifact's web UI (see
 `docs/TASKMASTER-HUB-PLAN.md`) — can read and update its task list directly
 from a terminal. Written so an agent working in a project can follow it to
 prepare that project itself, without a human doing the setup by hand.
 
-Every command and result below was verified live against this repository
-(`claude-web-terminal`, `task-master-ai@0.43.1`, Claude Code and Codex CLI as
-installed on this host) on 2026-09-05. Re-verify the compatibility table in
-§3 if either CLI's version has moved on since.
+The Claude Code and Codex CLI commands and results below were verified live
+against this repository (`claude-web-terminal`, `task-master-ai@0.43.1`) on
+2026-09-05. The **OpenCode** and **Pi** rows were added 2026-09-06 from each
+tool's own CLI/config surface (`opencode@1.18.27`,
+`@earendil-works/pi-coding-agent`) and are **not yet run end-to-end** against
+this repo's Hub — treat them as documented, not verified, until someone does.
+Re-verify the compatibility table in §4 if any CLI's version has moved on.
+
+**Which tools support MCP at all:**
+
+| CLI         | MCP support                                                                        | If no MCP, how it reaches Task Master |
+| ----------- | ---------------------------------------------------------------------------------- | ------------------------------------- |
+| Claude Code | Yes (interactive **and** `claude -p`)                                              | —                                     |
+| Codex CLI   | Interactive `codex` only — **not** `codex exec`                                    | Hub REST or `task-master` CLI (§4)    |
+| OpenCode    | Yes (`opencode mcp add`, stdio or remote)                                          | —                                     |
+| Pi          | **No built-in MCP** (deliberate — extend via a TS extension / third-party package) | Hub REST or `task-master` CLI (§4)    |
 
 ## 0. Two independent relationships — set up both, or half of it silently doesn't work
 
@@ -27,6 +40,12 @@ These are unrelated switches. Registering the MCP server without configuring
 a provider still leaves `add-task` failing on a missing API key; configuring
 a provider without registering the MCP server still leaves the CLI unable to
 see the task list at all.
+
+For an MCP-less CLI (**Pi**, scripted **`codex exec`**, the in-app
+`run_codex`) relationship 1 (the engine) still applies unchanged — it's a
+setting on `task-master` itself, not on the CLI — but relationship 2 becomes
+"call the Hub REST API or run the `task-master` CLI directly" (§4) instead of
+an MCP registration. Skip §2/§3 for those tools.
 
 ## 1. Point task-master's own AI at something free
 
@@ -48,7 +67,7 @@ Agent Chat provider already use. Only reach for a paid provider (`anthropic`,
 
 ## 2. Register the MCP server with each CLI
 
-Both commands are run from inside the target project directory.
+Each command below is run from inside the target project directory.
 
 **Claude Code** — `local` scope keys the registration to this exact path;
 Claude Code loads it automatically whenever you're in this directory, in
@@ -66,13 +85,25 @@ only ever sees whichever project you happened to launch `codex` from:
 codex mcp add taskmaster-ai --env TASK_MASTER_TOOLS=standard -- npx -y task-master-ai
 ```
 
+**OpenCode** — `opencode mcp add` writes to `~/.config/opencode/opencode.json`
+(global) unless you run it against a project that has its own `opencode.json`
+(project scope). Local stdio server, same shape as the others:
+
+```bash
+opencode mcp add taskmaster-ai --env TASK_MASTER_TOOLS=standard -- npx -y task-master-ai
+```
+
+**Pi** — no step here. Pi ships no built-in MCP client; use §4's REST / CLI
+path. (If you add MCP to Pi via a third-party extension, register the same
+`npx -y task-master-ai` stdio command however that extension expects it.)
+
 `TASK_MASTER_TOOLS` controls how many tools load (`core` 7, `standard` ~14,
 `all` 36+, or a comma-separated list) — see the README table in the
 `claude-task-master` project itself. `standard` is a reasonable default: it
 adds task creation/expansion on top of the `core` read/status tools without
 pulling in every dependency/tag/research tool.
 
-## 3. Confirm both actually connected
+## 3. Confirm each actually connected
 
 ```bash
 claude mcp list
@@ -84,7 +115,12 @@ codex mcp get taskmaster-ai
 #   transport: stdio
 #   command: npx
 #   args: -y task-master-ai
+
+opencode mcp list
+# taskmaster-ai  <status>
 ```
+
+(Nothing to confirm for Pi — it has no MCP list.)
 
 ## 4. What actually works, once it's registered — verified, not assumed
 
@@ -97,16 +133,23 @@ tool. Do not skip this check when preparing a new host or a new CLI version.
 | Claude Code | `claude -p` (scripted / non-interactive)  | **Yes** — confirmed: listed all 14 tools for the `standard` tier on request                                                        |
 | Codex CLI   | `codex` (interactive)                     | Expected, not separately verified here (not scriptable to test the same way)                                                       |
 | Codex CLI   | `codex exec` (scripted / non-interactive) | **No** — confirmed twice: "No MCP server tools are currently exposed in this session," despite `codex mcp list` showing it enabled |
+| OpenCode    | `opencode` (interactive) / `opencode run` | Expected (OpenCode loads configured MCP servers in both) — **documented, not yet run against this Hub**                            |
+| Pi          | `pi` / `pi -p`                            | **No** — Pi has no built-in MCP client by design; REST / `task-master` CLI only                                                    |
 
 **This matters more than it looks.** This repo's own `run_codex` tool and its
 `codex-cli` Agent Chat provider (`docs/AGENT-PROTOCOL.md`) both work by
 shelling to `codex exec` — so a Codex-CLI-backed agent running _inside this
 app_ cannot reach task-master through this MCP registration either, no
 matter how it's configured. That path only reaches a genuinely interactive
-`codex` session at a real terminal. **For a scripted/non-interactive Codex
-agent to be task-aware, it must call the Task Master Hub's own REST API
-(`/api/taskmaster/*`, see `docs/TASKMASTER-HUB-PLAN.md` §4) or the
-`task-master` CLI directly — never MCP.**
+`codex` session at a real terminal. The same is true of **Pi** in every mode.
+**For any scripted/non-interactive or MCP-less agent (`codex exec`, `pi`,
+`pi -p`, the in-app `run_codex`) to be task-aware, it must call the Task
+Master Hub's own REST API (`/api/taskmaster/*`, see
+`docs/TASKMASTER-HUB-PLAN.md` §4) or the `task-master` CLI directly — never
+MCP.** The claim/progress/release routes and their behaviour (409 on a held
+task, 403 on a cross-auth-channel mutation, TTL auto-expiry) are documented
+in `docs/TASKMASTER-HUB-OPERATIONS.md` §"Multiple agent tools on one
+backlog".
 
 ## 5. One more gate: listing a tool ≠ being allowed to call it
 
@@ -125,6 +168,12 @@ so the choice is remembered.
 
 ## See also
 
+- `docs/TASKMASTER-HUB-OPERATIONS.md` — the runtime protocol: the five-step
+  claim workflow, and §"Multiple agent tools on one backlog" (per-tool
+  identity labels, 409/403/TTL semantics, handoff).
+- `AGENTS.md` (repo root) §"Task Master Hub workflow" — the one-paragraph
+  version every CLI that reads `AGENTS.md` (Claude Code, Codex, OpenCode, Pi)
+  picks up automatically.
 - `docs/TASKMASTER-HUB-PLAN.md` — the Hub artifact's own design record (D1-D12,
   the §1e CLI verification spike); §4 documents the REST routes an agent
   should call directly when MCP isn't reachable (§4 above).
