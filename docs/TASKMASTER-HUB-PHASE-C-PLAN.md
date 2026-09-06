@@ -171,3 +171,25 @@ Coordinator ran the §6 verification, updated the docs, and committed.
 - Test block placed immediately after the existing "execution claims"
   block; it opens by releasing that block's lingering `agent-a` claim on
   task 1.
+
+## 9. Independent QA (2026-09-06)
+
+A QA teammate re-ran the full matrix + regression (`test:pm` green;
+`test:kanban` only the known pre-existing bearer failure) and ran six
+adversarial probes — **no bugs found**. Notable properties confirmed:
+
+- **No channel laundering.** Re-claiming an active claim with the same
+  `agentId` from a different channel preserves the original
+  `ownerChannel`; the new channel still gets 403 on update.
+- **`expireStale` → re-claim** correctly frees the task for any channel,
+  then locks the guard to the new owner.
+- **`actorOf` X-PM-Actor** rejects invalid/oversized values to
+  `client:bearer` (never `client:<garbage>`).
+- **Design note (not a bug):** two callers that _both_ fail X-PM-Actor
+  validation collapse to the single `client:bearer` channel and can touch
+  each other's claims. Acceptable — "bearer without a valid actor" is one
+  logical identity, and the `agentId` match is a second layer. If per-bot
+  isolation is ever needed for tokenless callers, that's a follow-up
+  (distinct scoped tokens, or requiring a valid `X-PM-Actor`).
+- Deployed prod-gateway probed read-only: `GATEWAY_API_TOKEN` set, 3
+  pre-Phase-C records on disk backfilled to `"legacy"` as designed.

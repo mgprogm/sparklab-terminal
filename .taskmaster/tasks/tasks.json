@@ -2,7 +2,7 @@
   "master": {
     "tasks": [
       {
-        "id": 1,
+        "id": "1",
         "title": "Plan OpenRouter model support in Agent Chat",
         "description": "Produce an implementation-ready plan to add OpenRouter-backed chat-completions models to Agent Chat, following the existing Azure and optional BytePlus Ark provider patterns.",
         "details": "PM deliverable: inspect the current model contract (packages/shared-types/src/agent.ts), provider/config resolution (apps/agent-service/src/config.ts and azure.ts), streaming/tool-call loop (agent-loop.ts), composer model picker, environment examples and tests. Define: (1) user-facing OpenRouter model roster and stable public IDs, (2) opt-in env configuration and secrets handling, (3) OpenAI-compatible base URL/client and model resolution rules, (4) reasoning-effort and provider-specific request-body compatibility, (5) capabilities/default-model behavior when unavailable, (6) error handling, telemetry/privacy, and no regression to approvals/tools/history, (7) frontend labels and selection behavior, (8) focused regression and integration test matrix, rollout/rollback and documentation. Do not implement in this task; record explicit decisions and split implementation into dependency-ordered subtasks.",
@@ -70,7 +70,7 @@
         "updatedAt": "2026-09-05T15:51:57.136Z"
       },
       {
-        "id": 2,
+        "id": "2",
         "title": "Show dependencies and restore ready tasks in Task Master Hub",
         "description": "Fix Task Master Hub UI so task dependencies are visible and ready tasks are correctly presented.",
         "details": "Inspect the Hub artifact, its API client, and gateway task/overview/next-task responses. Identify why ready tasks are not rendered, add an accessible dependency display with resolved task title/status where available, and add regression coverage. Preserve sandboxing and escaping of task content.",
@@ -82,7 +82,7 @@
         "updatedAt": "2026-09-05T15:10:33.200Z"
       },
       {
-        "id": 3,
+        "id": "3",
         "title": "OpenRouter dynamic model search & switching in Agent Chat",
         "description": "Extend the shipped fixed-allowlist OpenRouter provider (openrouter-gpt-latest) with a live, searchable catalog: the user can search OpenRouter's full model list and switch to any of them per turn, with per-model reasoning-effort options. Confirmed direction: fully open catalog, live API-backed (not a curated static list). Full design record: docs/OPENROUTER-DYNAMIC-MODELS-PLAN.md.",
         "details": "Reverses subtask 1.1's \"no dynamic catalog fetching\" non-goal — justified because this app is single-user (one GATEWAY_AUTH_USER, one OPENROUTER_API_KEY owned by that same user), so \"any model reachable\" collapses to \"the key's owner reaches any model with their own key,\" not a multi-tenant exposure. AgentModelSchema stays a CLOSED enum (do not widen it — composer.tsx's MODEL_LABELS/MODEL_PROVIDER Records and modelSupportsEffort() are exhaustive over it); openrouter-gpt-latest is repurposed as the \"OpenRouter provider slot\" and a new optional AgentUserMessageSchema field `openrouterModelId` selects a specific catalog entry per turn, validated server-side against a freshly-fetched catalog before ever reaching the upstream request body. Catalog comes from GET https://openrouter.ai/api/v1/models (data[].{id,name,context_length,pricing.{prompt,completion},reasoning.{supported_efforts,mandatory}} — reasoning.supported_efforts uses the SAME vocabulary as AgentReasoningEffortSchema, verified live this session). Delivered over a new WS request/response frame pair on the existing authenticated /agent socket (NOT a new REST endpoint — avoids duplicating the WS upgrade's origin+cookie auth story), server-side cached with a TTL and stale-on-fetch-failure fallback. See docs/OPENROUTER-DYNAMIC-MODELS-PLAN.md for the full grounding, schema diff, and rationale — read it before starting any subtask.",
@@ -161,7 +161,7 @@
         "updatedAt": "2026-09-05T17:42:04.749Z"
       },
       {
-        "id": 4,
+        "id": "4",
         "title": "Task Master Hub Phase C — credential-to-owner binding + role-specific Agent Chat identity",
         "description": "Resolve two roadmap bullets in docs/TASKMASTER-HUB-OPERATIONS.md: (C1) bind a Task Master Hub execution record to the auth channel that created it so a scoped-bearer caller can no longer claim as an arbitrary agentId or mutate/release another agent's claim; (C2) make the hardcoded Agent Chat claim identity (Developer / Agent Chat) configurable via env so concurrent agents are distinguishable in the Hub overview. Full design: docs/TASKMASTER-HUB-PHASE-C-PLAN.md. External-CLI claim wrapper, durable preflight grant, and a composer role picker are explicitly out of scope.",
         "details": "C1 (gateway only): add a gateway-derived ownerChannel field to the execution record in apps/terminal-gateway/src/taskmaster-execution.js — do NOT reshape agentId. claim() takes ownerChannel; claim re-claim / update / release require agentId match AND ownerChannel match, mismatch throws code:\"forbidden\" (403). load() backfills a missing ownerChannel to \"legacy\" (only-if-absent, pm.js migrate() precedent); \"legacy\" compares equal to any channel. releaseForTask() (status->done path) stays unchanged and unchecked by design. server.js claim route (~3195) and execution route (~3248): const ownerChannel = actorOf(req) and pass through. packages/shared-types/src/terminal.ts: add optional ownerChannel:z.string() to the TaskMaster execution schema. app.html and agent-service gateway-client.ts do NOT change.\n\nC2 (agent-service only): apps/agent-service/src/config.ts gains agentChat.identityRole/identityName/identityTool from AGENT_CHAT_ROLE/AGENT_CHAT_NAME/AGENT_CHAT_TOOL env, defaulting to \"Developer\"/\"Agent Chat\"/\"Agent Chat\". apps/agent-service/src/agent-loop.ts ~719-724 uses the config values instead of the object literal; id stays chat-${chatId}. Update apps/agent-service/.env.example. Invariant: identity never derives from model tool args.\n\nConstraint: gateway is single-user; agent-service authenticates with its own cookie under GATEWAY_AUTH_USER, so ownerChannel separates bearer<->cookie only, NOT Hub-UI-human from Agent Chat. That is acceptable and must be stated, not overclaimed, in the ops-doc update.",
@@ -229,12 +229,12 @@
         "updatedAt": "2026-09-06T02:54:42.781Z"
       },
       {
-        "id": 5,
+        "id": "5",
         "title": "Task Master Hub — tag task-status grid on the Next Task tile",
         "description": "Add a GitHub-contribution-calendar-style grid to the Next Task section of the Hub artifact: one cell per task in the current tag, colored by task status, with a hover tooltip showing brief task details (#id, title, status, priority) and click-to-open the detail overlay. Renders in every state (found next task / nothing ready / empty tag), with the existing empty-state text kept as a sub-line. Frontend-only, single file. Full design: docs/TASKMASTER-HUB-TASK-GRID-PLAN.md.",
         "details": "Reuse the existing subtask-progress-grid pattern (commit b465953): .progress-grid flex-wrap + .progress-cell.status-<status> 12px squares + native title tooltip. New helper renderTaskStatusGrid() in apps/terminal/public/taskmaster-hub/app.html iterates state.tasks.filter(matchesTaskFilter) (D1: respect the Phase A filter for bucket consistency), ordered by numeric id asc (D5). Each cell: statusClass(task.status), title = \"#\"+id+\" · \"+title+\" · \"+status+(priority?\" · \"+priority:\"\"), role=button + tabindex=0 + click/Enter -> openDetail(task.id) (D2). Ready tasks (isReadyTask: pending + all deps done) get a distinct color via a new --status-ready :root var + a compound .progress-cell.ready rule (D3). A compact one-row legend under the grid: swatch+label+count per Ready/Pending/In progress/Review/Done/Blocked/Other, reusing the visibleTasks partition or state.overview.counts (D4). Placement: under the \"Next task\" heading in renderNextTile(), before the existing next-task specifics, so grid+legend show in all three states. Poll-safe by construction (derived from state.* each renderContent, like the subtask grid / bulk checkboxes / filter). No API/gateway/shared-types/agent changes. No cap for large tags in v1 (D6). CSS: DESIGN.md palette only, no new deps.",
         "testStrategy": "No automated tests for this artifact (consistent with the rest of app.html). Manual dev-browser pass against a real gateway + seeded project: (1) one cell per task, correct per-status color, Ready visually distinct; (2) hover shows #id · title · status · priority; (3) click opens the detail overlay; (4) typing in the task filter re-filters the grid in the same tick as the buckets and the grid survives a 5s poll with the filter value intact; (5) empty tag -> grid collapses, \"This tag has no tasks yet.\" still shown; (6) legend counts match bucket counts. Also run pnpm --filter @sparklab/terminal typecheck (no-op guard for a public/ JS file, but run it).",
-        "status": "pending",
+        "status": "done",
         "dependencies": [],
         "priority": "medium",
         "subtasks": [
@@ -245,7 +245,8 @@
             "details": "",
             "status": "done",
             "dependencies": [],
-            "parentTaskId": 5
+            "parentTaskId": 5,
+            "parentId": "undefined"
           },
           {
             "id": 2,
@@ -254,29 +255,42 @@
             "details": "",
             "status": "done",
             "dependencies": ["5.1"],
-            "parentTaskId": 5
+            "parentTaskId": 5,
+            "parentId": "undefined"
           },
           {
             "id": 3,
             "title": "Coordinator: verify + commit",
             "description": "Diff reviewed (app.html only, 109 insertions, matches spec), JS syntax-checked, terminal typecheck green, logic shim-tested. Live dev-browser pass NOT performed (documented scratch-gateway isolation risk); noted to user. Update PLAN status header, commit.",
             "details": "",
-            "status": "in-progress",
+            "status": "done",
             "dependencies": ["5.2"],
-            "parentTaskId": 5
+            "parentTaskId": 5,
+            "updatedAt": "2026-09-06T03:31:36.351Z",
+            "parentId": "undefined"
           }
-        ]
+        ],
+        "updatedAt": "2026-09-06T03:31:36.351Z"
+      },
+      {
+        "id": "6",
+        "title": "QA: independent verification of Task Master Hub Phase C",
+        "description": "A QA teammate independently verifies Phase C (credential-to-owner binding + configurable Agent Chat identity, commits 0255fee + 569e1af, pushed to origin/main, deployed to local-prod). Not just re-running Dev's commands — actively try to break the ownerChannel guard, probe edge cases the 4 committed test cases don't cover (re-claim channel-laundering, expireStale -> re-claim, actorOf X-PM-Actor validation, Hub-UI cookie path still works, C2 env flow), run the full regression matrix, and check the deployed prod-gateway. Produce a findings report; if a real bug is found, get it fixed and re-verified.",
+        "details": "Design/impl context: docs/TASKMASTER-HUB-PHASE-C-PLAN.md + PHASE-C-SPEC.md. Code: apps/terminal-gateway/src/taskmaster-execution.js (claim/update/release ownerChannel guard + load() backfill), apps/terminal-gateway/src/server.js (actorOf ~353, the two /api/taskmaster/*/claim + /execution routes ~3228/3260), apps/terminal-gateway/test/taskmaster-endpoints.js (the new \"ownerChannel binding\" block), apps/agent-service/src/config.ts (agentChat block) + agent-loop.ts (~719). Known pre-existing failure: test:kanban's \"valid bearer (no cookie) -> 401\" fails on main HEAD, unrelated. gateway-test-auth-env-leak: run gateway tests with env -u GATEWAY_AUTH_USER -u GATEWAY_AUTH_PASSWORD -u GATEWAY_AUTH_PASSWORD_HASH.",
+        "testStrategy": "Independently run: env -u ... pnpm --filter @sparklab/terminal-gateway test:taskmaster; pnpm --filter @sparklab/agent-service typecheck && test; pnpm --filter @sparklab/terminal typecheck; env -u ... test:pm (regression); env -u ... test:kanban (expect only the known bearer failure). Then adversarial probes: (1) re-claim an active claim with the SAME agentId from a DIFFERENT channel — does the stored ownerChannel stay the original owner's (no laundering)? (2) after a claim TTL-expires, can any channel re-claim (should) and does the guard then lock to the new channel? (3) actorOf X-PM-Actor: invalid chars / >64 chars -> falls back to client:bearer, not client:<garbage>. (4) Hub UI human path: cookie claim -> cookie update/release all succeed (same user: channel). (5) C2: set AGENT_CHAT_ROLE and confirm it reaches the AgentIdentity; unset -> \"Developer\". (6) hit the deployed prod-gateway (:3107) if GATEWAY_API_TOKEN is configured there. Report CONFIRMED/PLAUSIBLE findings ranked by severity, or \"all clean\".",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [],
+        "updatedAt": "2026-09-06T03:38:49.501Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-09-06T02:54:42.781Z",
-      "taskCount": 4,
-      "completedCount": 4,
-      "tags": ["master"],
-      "created": "2026-09-06T03:20:30.105Z",
-      "description": "Tasks for master context",
-      "updated": "2026-09-06T03:20:30.106Z"
+      "lastModified": "2026-09-06T03:38:49.501Z",
+      "taskCount": 6,
+      "completedCount": 6,
+      "tags": ["master"]
     }
   }
 }
