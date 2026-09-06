@@ -271,6 +271,15 @@ durable preflight grant across an agent-service restart, per-chat composer
 role picker. Known limit: single-user auth means `ownerChannel` separates
 bearer ↔ cookie only, not Hub-UI-human from Agent Chat.
 
+### Phase D — tag task-status grid on the Next Task tile (planned)
+
+Designed in [`TASKMASTER-HUB-TASK-GRID-PLAN.md`](./TASKMASTER-HUB-TASK-GRID-PLAN.md),
+tracked as Task Master task #5. A GitHub-contribution-calendar-style grid on
+the Next Task tile: one cell per task in the current tag, colored by status,
+hover tooltip with brief details, click → detail overlay. Frontend-only,
+single file, reuses the `b465953` subtask-grid pattern pointed at
+`state.tasks`. Not yet built.
+
 ---
 
 ## 5. Testing plan
