@@ -374,6 +374,10 @@ async function main() {
         overviewJson.executions[0].status === "blocked",
       "overview execution state wrong",
     );
+    assert(
+      overviewJson.counts.ready === 1,
+      `overview ready count=${overviewJson.counts.ready}, expected 1 for the root pending task`,
+    );
   }
   console.log("  ok: execution claims + conflict guard + PM overview");
 
