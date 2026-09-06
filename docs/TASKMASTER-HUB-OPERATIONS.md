@@ -70,8 +70,11 @@ claim. Claims without a heartbeat/progress update expire after
   cookie, so `ownerChannel` separates bearer ↔ cookie but _not_ a human
   clicking in the Hub UI from Agent Chat — both are the same cookie channel.
   Pre-Phase-C records load with `ownerChannel: "legacy"`, which matches any
-  channel so they are never locked out. `releaseForTask()` (task status →
-  `done`/`cancelled`/`deferred`) intentionally has no owner check.
+  channel so they are never locked out. Two paths transfer ownership without
+  a channel check, both by design: `releaseForTask()` (task status →
+  `done`/`cancelled`/`deferred`) and TTL expiry (an `expired` claim leaves
+  the active set, so the next `claim` starts fresh and any channel may take
+  it).
 - **Resolved (UI v2 Phase A):** the Hub detail panel offers human
   claim / mark-working / mark-blocked / mark-review / release controls
   (`agentId: "human"`), plus relative-time / stale-claim styling on claim
