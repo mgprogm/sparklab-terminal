@@ -103,6 +103,29 @@ path. (If you add MCP to Pi via a third-party extension, register the same
 adds task creation/expansion on top of the `core` read/status tools without
 pulling in every dependency/tag/research tool.
 
+### 2b. Or register the Task Master **Hub** MCP instead
+
+`task-master-ai`'s MCP drives a local `.taskmaster/` directly and knows
+nothing about the Hub's project registry or the multi-agent claim layer. If
+this repo's Task Master Hub is running and you want the CLI to **onboard a
+project into it and coordinate through claims**, register
+`tools/taskmaster-hub-mcp/server.mjs` instead (or in addition):
+
+```bash
+claude mcp add taskmaster-hub -- node /abs/tools/taskmaster-hub-mcp/server.mjs \
+  -e TASKMASTER_HUB_API_TOKEN=<gateway bearer> \
+  -e TASKMASTER_HUB_BASE_URL=<gateway/proxy URL> \
+  -e TASKMASTER_HUB_ACTOR=<stable-worker-id>   # its own ownerChannel (Phase C)
+```
+
+It exposes `taskmaster_hub_init` (register the current project + get the
+claim protocol) plus `_claim` / `_update_progress` / `_release` / `_next` /
+`_set_status` / … over the gateway's `/api/taskmaster/*` REST — a thin bearer
+client, no cookie. Set `TASKMASTER_HUB_ACTOR` to a distinct value per worker
+so each one's claims are channel-isolated (an invalid value fails the server
+at startup rather than silently sharing a channel). Full reference:
+`tools/taskmaster-hub-mcp/README.md` and `docs/TASKMASTER-HUB-MCP-PLAN.md`.
+
 ## 3. Confirm each actually connected
 
 ```bash

@@ -283,13 +283,25 @@
         "priority": "high",
         "subtasks": [],
         "updatedAt": "2026-09-06T03:38:49.501Z"
+      },
+      {
+        "id": "7",
+        "title": "Task Master Hub MCP — onboarding + coordination MCP server for external agent CLIs",
+        "description": "A dependency-free stdio JSON-RPC MCP server (tools/taskmaster-hub-mcp/) that exposes the gateway's /api/taskmaster/* routes as MCP tools, so an MCP-capable agent CLI (Claude Code, OpenCode) can onboard its own project into a running Task Master Hub via taskmaster_hub_init and then coordinate through the claim layer. NOT task-master-ai's own MCP — a thin bearer REST client of the Hub gateway. Near-copy of tools/notes-mcp/. Design: docs/TASKMASTER-HUB-MCP-PLAN.md.",
+        "details": "Built directly (not via SA/Dev pipeline — near-copy of an existing pattern). server.mjs + README.md. 16 tools: taskmaster_hub_init (register cwd/explicit path, idempotent, returns projectId/binaryMode/currentTag/identity/protocol/agentsMdSnippet as TEXT — does not write files), list_projects, overview, list_tasks, get_task, next, claim, update_progress, release, set_status, add_task, update_task, add_dependency, expand, current_tag, use_tag. No unregister (coordination-visible, human-only, matches repo convention). Auth: TASKMASTER_HUB_API_TOKEN||GATEWAY_API_TOKEN bearer; TASKMASTER_HUB_ACTOR sent as x-pm-actor header for per-worker ownerChannel isolation (Phase C) — validated against ^[\\w.@:-]{1,64}$ at startup, exits non-zero on set-but-invalid rather than silently degrading to client:bearer. TASKMASTER_HUB_ROLE/NAME/TOOL/AGENT_ID for claim labels. Cross-linked from docs/TASKMASTER-AGENT-SETUP.md §2b.</details>\n<parameter name=\"testStrategy\">No automated-test precedent for these MCP servers (README + manual, like kanban/pm/notes-mcp). Verified: (1) node --check clean; (2) initialize + tools/list=16 + list_projects + overview against the live prod-gateway :3107 (real data); (3) invalid TASKMASTER_HUB_ACTOR (space, >64 chars) -> FATAL + exit 1; (4) a mock-gateway plumbing test asserting every request carries Bearer, writes carry x-pm-actor:<actor>, claim body = configured identity, update_progress = {agentId,status}, release = {agentId}, init reports channel + returns snippet/protocol text, no isError. Gateway-side ownerChannel enforcement (worker-A vs worker-B -> 403) is already QA-verified in the Phase C round; the MCP is a thin pass-through of the header+body.",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "medium",
+        "subtasks": [],
+        "updatedAt": "2026-09-06T04:53:08.096Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-09-06T03:38:49.501Z",
-      "taskCount": 6,
-      "completedCount": 6,
+      "lastModified": "2026-09-06T04:53:08.096Z",
+      "taskCount": 7,
+      "completedCount": 7,
       "tags": ["master"]
     }
   }
