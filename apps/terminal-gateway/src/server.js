@@ -350,18 +350,26 @@ function isScopedMcpAuthorized(req, url) {
 // from the auth channel (PM plan §2). Cookie session → user:<GATEWAY_AUTH_USER>;
 // scoped bearer → client:<X-PM-Actor> (validated) or client:bearer. NOT a trust
 // boundary — auth is still the cookie/bearer itself; this only labels writes.
+function validPmActor(req) {
+  const raw = String(req.headers["x-pm-actor"] || "").trim();
+  return raw && raw.length <= 64 && /^[\w.@:-]+$/.test(raw) ? raw : null;
+}
+
 function actorOf(req) {
   const cookies = parseCookies(req);
-  if (validateAuthSession(cookies.gw_session))
-    return `user:${GATEWAY_AUTH_USER || "local"}`;
+  if (validateAuthSession(cookies.gw_session)) {
+    const base = `user:${GATEWAY_AUTH_USER || "local"}`;
+    const actor = validPmActor(req);
+    return actor ? `${base}:${actor}` : base;
+  }
   if (isArtifactBearerAuthorized(req)) {
-    const raw = String(req.headers["x-pm-actor"] || "").trim();
-    if (raw && raw.length <= 64 && /^[\w.@:-]+$/.test(raw))
-      return `client:${raw}`;
-    return "client:bearer";
+    const actor = validPmActor(req);
+    return actor ? `client:${actor}` : "client:bearer";
   }
   // Open mode (loopback dev) or agent-over-cookie fallthrough.
-  return `user:${GATEWAY_AUTH_USER || "local"}`;
+  const base = `user:${GATEWAY_AUTH_USER || "local"}`;
+  const actor = validPmActor(req);
+  return actor ? `${base}:${actor}` : base;
 }
 
 // ---- A1: Origin helpers ----

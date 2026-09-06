@@ -156,6 +156,7 @@ wss.on("connection", (ws: WebSocket, req) => {
           msg.data.model,
           msg.data.reasoningEffort,
           msg.data.openrouterModelId,
+          msg.data.identity,
         );
         break;
       case "approval_response":
@@ -305,6 +306,11 @@ wss.on("connection", (ws: WebSocket, req) => {
         reasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
         defaultModel: DEFAULT_MODEL,
         defaultReasoningEffort: "medium",
+        defaultIdentity: {
+          role: config.agentChat.identityRole,
+          name: config.agentChat.identityName,
+          tool: config.agentChat.identityTool,
+        },
       });
     } catch (error) {
       send({

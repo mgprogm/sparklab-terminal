@@ -36,6 +36,7 @@ import {
   describeCall,
   executeTool,
   targetSession,
+  type AgentIdentity,
   type ToolArgs,
 } from "./tools.js";
 import { BrowserRuntime, type BrowserAction } from "./browser-runtime.js";
@@ -53,6 +54,25 @@ interface AccumulatedToolCall {
   id: string;
   name: string;
   arguments: string;
+}
+
+type PerTurnIdentity = {
+  role: string;
+  name: string;
+  tool: string;
+};
+
+/** Resolve the Task Master identity for one turn without persisting it. */
+export function resolveExecutionIdentity(
+  chatId: string,
+  identity?: PerTurnIdentity,
+): AgentIdentity {
+  return {
+    id: `chat-${chatId}`,
+    name: identity?.name || config.agentChat.identityName,
+    role: identity?.role || config.agentChat.identityRole,
+    tool: identity?.tool || config.agentChat.identityTool,
+  };
 }
 
 export class AgentLoop {
@@ -81,9 +101,21 @@ export class AgentLoop {
     this.chatId = chatId;
     this.browser = this.newBrowserRuntime();
     this.computer = this.newComputerRuntime();
-    this.ready = loadChat(chatId).then((history) => {
-      this.history = history;
-    });
+    this.ready = Promise.all([
+      loadChat(chatId).then((history) => {
+        this.history = history;
+      }),
+      gateway
+        .findActiveClaim(`chat-${chatId}`)
+        .then((claim) => {
+          this.activeTask = claim;
+        })
+        .catch(() => {
+          // Fails closed: activeTask stays null, so the preflight gate still
+          // requires a fresh taskmaster_claim. Never fail open on a gateway
+          // hiccup during construction.
+        }),
+    ]).then(() => undefined);
   }
 
   async init(): Promise<void> {
@@ -215,6 +247,7 @@ export class AgentLoop {
      * `resolveModel` — an unknown id resolves like any unconfigured model.
      */
     openrouterModelId?: string,
+    identity?: PerTurnIdentity,
   ): Promise<void> {
     await this.ready;
     if (this.running) {
@@ -428,12 +461,17 @@ export class AgentLoop {
             } else {
               writeExecs++;
               this.send({ type: "status", state: "acting" });
-              resultContent = await this.execute(tc.name, args, signal);
+              resultContent = await this.execute(
+                tc.name,
+                args,
+                signal,
+                identity,
+              );
               ok = !resultContent.startsWith("error");
             }
           } else {
             this.send({ type: "status", state: "acting" });
-            resultContent = await this.execute(tc.name, args, signal);
+            resultContent = await this.execute(tc.name, args, signal, identity);
             ok = !resultContent.startsWith("error");
           }
 
@@ -612,6 +650,7 @@ export class AgentLoop {
     tool: string,
     args: ToolArgs,
     signal: AbortSignal,
+    identity?: PerTurnIdentity,
   ): Promise<string> {
     try {
       if (
@@ -716,12 +755,12 @@ export class AgentLoop {
           viewport: result.snapshot.viewport,
         });
       }
-      const result = await executeTool(tool, args, signal, {
-        id: `chat-${this.chatId}`,
-        name: config.agentChat.identityName,
-        role: config.agentChat.identityRole,
-        tool: config.agentChat.identityTool,
-      });
+      const result = await executeTool(
+        tool,
+        args,
+        signal,
+        resolveExecutionIdentity(this.chatId, identity),
+      );
       if (
         tool === "taskmaster_claim" &&
         !result.startsWith("error:") &&

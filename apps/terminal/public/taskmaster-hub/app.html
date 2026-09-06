@@ -69,9 +69,19 @@
     align-items: center;
     border-bottom: 1px solid var(--hairline);
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
     padding: 10px 16px;
+  }
+  .topbar > * {
+    flex-shrink: 0;
+  }
+  .topbar .project-select,
+  .topbar #task-filter,
+  .topbar #filter-presets {
+    flex-shrink: 1;
   }
   .grow {
     flex: 1 1 auto;
@@ -86,6 +96,7 @@
   }
   .project-select {
     max-width: 340px;
+    min-width: 140px;
   }
   .field {
     width: 100%;
@@ -139,6 +150,11 @@
   }
   #task-filter {
     max-width: 200px;
+    min-width: 90px;
+  }
+  #filter-presets {
+    max-width: 150px;
+    min-width: 80px;
   }
   .exec-list {
     display: flex;
@@ -234,9 +250,39 @@
   #rollup-panel.hidden {
     display: none;
   }
+  .panel-toggle {
+    align-items: center;
+    background: none;
+    border: none;
+    color: var(--body);
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 13px;
+    font-weight: 500;
+    gap: 5px;
+    padding: 2px 0;
+  }
+  .panel-toggle:hover {
+    color: var(--ink);
+  }
+  .panel-toggle-caret {
+    display: inline-block;
+    font-size: 10px;
+    width: 10px;
+  }
+  .panel-body {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .panel-body.hidden {
+    display: none;
+  }
   .rollup-strip {
     border-bottom: 1px solid var(--hairline);
     display: flex;
+    flex: 1 1 100%;
     flex-direction: column;
     gap: 7px;
     padding: 10px 16px;
@@ -310,13 +356,15 @@
   .overview {
     display: grid;
     gap: 7px;
-    grid-template-columns: repeat(3, minmax(100px, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
   .metric {
     background: var(--canvas);
     border: 1px solid var(--hairline);
     border-radius: var(--radius-sm);
-    padding: 8px;
+    min-width: 0;
+    padding: 8px 4px;
+    text-align: center;
   }
   .metric b {
     display: block;
@@ -325,6 +373,9 @@
   .metric span {
     color: var(--mute);
     font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .next-tile {
     padding: 12px;
@@ -670,6 +721,8 @@
     placeholder="Filter tasks…"
     autocomplete="off"
   />
+  <select id="filter-presets" class="field" aria-label="Filter presets"></select>
+  <button id="save-filter" class="btn" type="button">Save filter</button>
   <span class="grow"></span>
   <button id="add-project" class="btn btn-primary" type="button">
     Add project
@@ -709,45 +762,75 @@
 </div>
 <div id="banner" class="banner" role="alert"></div>
 <div id="add-task-panel" class="hidden">
-  <button id="add-task-btn" class="btn btn-primary" type="button">
-    + Add task
+  <button
+    id="add-task-panel-toggle"
+    class="panel-toggle"
+    type="button"
+    aria-expanded="false"
+  >
+    <span class="panel-toggle-caret">▸</span> Add task
   </button>
-  <span id="add-task-note" class="binary-note"></span>
-  <form id="add-task-form" class="project-form">
-    <textarea
-      id="add-task-prompt"
-      class="field"
-      placeholder="Task prompt"
-      autocomplete="off"
-      required
-    ></textarea>
-    <select id="add-task-priority" class="field" aria-label="Priority"></select>
-    <input
-      id="add-task-deps"
-      class="field"
-      type="text"
-      placeholder="Dependencies (comma-separated task ids)"
-      autocomplete="off"
-    />
-    <button class="btn btn-primary" type="submit">Add task</button>
-    <button id="add-task-cancel" class="btn" type="button">Cancel</button>
-  </form>
   <span class="grow"></span>
+  <button id="refresh-project" class="btn" type="button">Refresh</button>
   <span id="loading-indicator" class="loading-indicator" role="status">
     <span class="loading-spinner"></span>
     Updating…
   </span>
+  <div id="add-task-body" class="panel-body hidden">
+    <button id="add-task-btn" class="btn btn-primary" type="button">
+      + Add task
+    </button>
+    <span id="add-task-note" class="binary-note"></span>
+    <form id="add-task-form" class="project-form">
+      <textarea
+        id="add-task-prompt"
+        class="field"
+        placeholder="Task prompt"
+        autocomplete="off"
+        required
+      ></textarea>
+      <select id="add-task-priority" class="field" aria-label="Priority"></select>
+      <input
+        id="add-task-deps"
+        class="field"
+        type="text"
+        placeholder="Dependencies (comma-separated task ids)"
+        autocomplete="off"
+      />
+      <button class="btn btn-primary" type="submit">Add task</button>
+      <button id="add-task-cancel" class="btn" type="button">Cancel</button>
+    </form>
+  </div>
 </div>
 <div id="rollup-panel" class="hidden">
-  <button id="rollup-refresh" class="btn" type="button">
-    Refresh project rollup
+  <button
+    id="rollup-panel-toggle"
+    class="panel-toggle"
+    type="button"
+    aria-expanded="false"
+  >
+    <span class="panel-toggle-caret">▸</span> Project rollup &amp; search
   </button>
-  <span id="rollup-loading" class="loading-indicator" role="status">
-    <span class="loading-spinner"></span>
-    Refreshing…
-  </span>
+  <div id="rollup-body" class="panel-body hidden">
+    <button id="rollup-refresh" class="btn" type="button">
+      Refresh project rollup
+    </button>
+    <span id="rollup-loading" class="loading-indicator" role="status">
+      <span class="loading-spinner"></span>
+      Refreshing…
+    </span>
+    <input
+      id="cross-search-input"
+      class="field"
+      type="search"
+      placeholder="Search all tasks…"
+      autocomplete="off"
+    />
+    <button id="cross-search-btn" class="btn" type="button">Search tasks</button>
+    <div id="rollup-strip" class="rollup-strip hidden"></div>
+    <div id="cross-search-results" class="rollup-strip hidden"></div>
+  </div>
 </div>
-<div id="rollup-strip" class="rollup-strip hidden"></div>
 <div id="content"></div>
 
 <div id="detail-overlay" class="overlay">
@@ -756,6 +839,47 @@
 
 <script>
   "use strict";
+  function loadSavedFilters() {
+    try {
+      var saved = JSON.parse(localStorage.getItem("taskmasterHub.savedFilters"));
+      return Array.isArray(saved)
+        ? saved.filter(function (filter) {
+            return (
+              filter &&
+              typeof filter.name === "string" &&
+              typeof filter.query === "string"
+            );
+          })
+        : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  function loadPanelCollapsed(key) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? true : v === "1";
+    } catch (e) {
+      return true;
+    }
+  }
+  function wirePanelToggle(toggleBtn, bodyEl, storageKey) {
+    var collapsed = loadPanelCollapsed(storageKey);
+    var caret = toggleBtn.querySelector(".panel-toggle-caret");
+    function apply() {
+      bodyEl.classList.toggle("hidden", collapsed);
+      toggleBtn.setAttribute("aria-expanded", String(!collapsed));
+      caret.textContent = collapsed ? "▸" : "▾";
+    }
+    apply();
+    toggleBtn.addEventListener("click", function () {
+      collapsed = !collapsed;
+      try {
+        localStorage.setItem(storageKey, collapsed ? "1" : "0");
+      } catch (e) {}
+      apply();
+    });
+  }
   var state = {
     projects: [],
     servers: [],
@@ -771,9 +895,9 @@
     refreshing: false,
     refreshToken: 0,
     hasLoadedProjectData: false,
-    pollTimer: null,
     otherFilter: "collapsed",
     taskFilter: "",
+    savedFilters: loadSavedFilters(),
     nextSubtasksTaskId: null,
     nextSubtasks: null,
     bulkSelected: {},
@@ -782,6 +906,9 @@
     bulkResults: null,
     rollup: null,
     rollupRunning: false,
+    crossSearchQuery: "",
+    crossSearchResults: [],
+    crossSearchRunning: false,
   };
   var STATUS = [
     "pending",
@@ -798,6 +925,8 @@
     currentTag: document.getElementById("current-tag"),
     switchTag: document.getElementById("switch-tag"),
     taskFilter: document.getElementById("task-filter"),
+    filterPresets: document.getElementById("filter-presets"),
+    saveFilter: document.getElementById("save-filter"),
     addProject: document.getElementById("add-project"),
     projectForm: document.getElementById("project-form"),
     projectName: document.getElementById("project-name"),
@@ -808,6 +937,8 @@
     tagName: document.getElementById("tag-name"),
     cancelTag: document.getElementById("cancel-tag"),
     addTaskPanel: document.getElementById("add-task-panel"),
+    addTaskPanelToggle: document.getElementById("add-task-panel-toggle"),
+    addTaskBody: document.getElementById("add-task-body"),
     addTaskBtn: document.getElementById("add-task-btn"),
     addTaskNote: document.getElementById("add-task-note"),
     addTaskForm: document.getElementById("add-task-form"),
@@ -816,11 +947,17 @@
     addTaskDeps: document.getElementById("add-task-deps"),
     addTaskCancel: document.getElementById("add-task-cancel"),
     banner: document.getElementById("banner"),
+    refreshProject: document.getElementById("refresh-project"),
     loadingIndicator: document.getElementById("loading-indicator"),
     rollupPanel: document.getElementById("rollup-panel"),
+    rollupPanelToggle: document.getElementById("rollup-panel-toggle"),
+    rollupBody: document.getElementById("rollup-body"),
     rollupRefresh: document.getElementById("rollup-refresh"),
     rollupLoading: document.getElementById("rollup-loading"),
     rollupStrip: document.getElementById("rollup-strip"),
+    crossSearchInput: document.getElementById("cross-search-input"),
+    crossSearchBtn: document.getElementById("cross-search-btn"),
+    crossSearchResults: document.getElementById("cross-search-results"),
     content: document.getElementById("content"),
     detailOverlay: document.getElementById("detail-overlay"),
     detail: document.getElementById("detail"),
@@ -895,6 +1032,22 @@
   function projectPath(id) {
     return "/projects/" + encodeURIComponent(id);
   }
+  function renderFilterPresets() {
+    el.filterPresets.textContent = "";
+    var placeholder = elem("option", null, "Filter presets");
+    placeholder.value = "";
+    el.filterPresets.appendChild(placeholder);
+    state.savedFilters.forEach(function (filter, index) {
+      var option = elem("option", null, filter.name);
+      option.value = String(index);
+      el.filterPresets.appendChild(option);
+    });
+  }
+  function applyTaskFilter(value) {
+    el.taskFilter.value = value;
+    state.taskFilter = value.trim().toLowerCase();
+    renderContent();
+  }
   function currentProject() {
     return (
       state.projects.find(function (p) {
@@ -912,6 +1065,7 @@
     state.refreshing = refreshing;
     el.loadingIndicator.classList.toggle("show", refreshing);
     el.content.setAttribute("aria-busy", String(refreshing));
+    el.refreshProject.disabled = refreshing || !state.projectId;
   }
 
   var HUMAN_AGENT_ID = "human";
@@ -1015,7 +1169,7 @@
       }
       row.addEventListener("click", function () {
         if (entry.id === state.projectId) return;
-        selectProject(entry.id, false).catch(handleError);
+        selectProject(entry.id).catch(handleError);
       });
       el.rollupStrip.appendChild(row);
     });
@@ -1050,12 +1204,78 @@
     state.rollupRunning = false;
     renderRollupStrip();
   }
+  function renderCrossSearchResults() {
+    el.crossSearchBtn.disabled = state.crossSearchRunning;
+    el.crossSearchResults.textContent = "";
+    el.crossSearchResults.classList.remove("hidden");
+    if (state.crossSearchRunning) {
+      el.crossSearchResults.appendChild(elem("span", "loading-spinner"));
+      return;
+    }
+    if (!state.crossSearchResults.length) {
+      el.crossSearchResults.appendChild(
+        elem("div", "empty", "No matching tasks found."),
+      );
+      return;
+    }
+    state.crossSearchResults.forEach(function (entry) {
+      var row = elem("div", "rollup-row");
+      row.appendChild(elem("span", "rollup-name", entry.projectName));
+      row.appendChild(
+        elem("span", "chip", entry.taskId + ": " + entry.title),
+      );
+      row.addEventListener("click", function () {
+        selectProject(entry.projectId)
+          .then(function () {
+            applyTaskFilter(entry.taskId);
+          })
+          .catch(handleError);
+      });
+      el.crossSearchResults.appendChild(row);
+    });
+  }
+  async function runCrossProjectSearch() {
+    if (state.crossSearchRunning) return;
+    state.crossSearchQuery = el.crossSearchInput.value.trim().toLowerCase();
+    state.crossSearchRunning = true;
+    state.crossSearchResults = [];
+    renderCrossSearchResults();
+    try {
+      var results = await Promise.all(
+        state.projects.map(function (project) {
+          return api("GET", projectPath(project.id) + "/tasks")
+            .then(function (data) {
+              return ((data && data.tasks) || [])
+                .filter(function (task) {
+                  return matchesTaskQuery(task, state.crossSearchQuery);
+                })
+                .map(function (task) {
+                  return {
+                    projectId: project.id,
+                    projectName: project.name || project.path,
+                    taskId: String(task.id),
+                    title: task.title || "",
+                  };
+                });
+            })
+            .catch(function () {
+              return [];
+            });
+        }),
+      );
+      state.crossSearchResults = results.flat();
+    } finally {
+      state.crossSearchRunning = false;
+      renderCrossSearchResults();
+    }
+  }
   function renderTag() {
     el.currentTag.textContent =
       state.projectId && state.currentTag ? "tag: " + state.currentTag : "";
     el.currentTag.style.display = state.projectId ? "inline-flex" : "none";
     el.switchTag.disabled = !state.projectId;
     el.taskFilter.disabled = !state.projectId;
+    el.refreshProject.disabled = !state.projectId || state.refreshing;
     renderAddTaskGate();
   }
   function renderAddTaskGate() {
@@ -1095,7 +1315,7 @@
       null;
     state.project = currentProject();
     renderProjectSelect();
-    if (state.projectId) await selectProject(state.projectId, false);
+    if (state.projectId) await selectProject(state.projectId);
     else {
       state.tasks = [];
       state.next = null;
@@ -1134,11 +1354,7 @@
     }
     return Array.isArray(data) ? data : [];
   }
-  async function selectProject(id, keepPoll) {
-    if (!keepPoll) {
-      if (state.pollTimer) clearInterval(state.pollTimer);
-      state.pollTimer = null;
-    }
+  async function selectProject(id) {
     state.projectId = id;
     state.project = currentProject();
     state.tasks = [];
@@ -1155,7 +1371,6 @@
     renderTag();
     renderContent();
     await refreshProjectData();
-    if (!keepPoll) startPolling();
   }
   async function refreshProjectData() {
     var id = state.projectId;
@@ -1180,14 +1395,6 @@
     } finally {
       if (state.refreshToken === token) setRefreshState(false);
     }
-  }
-  function startPolling() {
-    if (!state.projectId) return;
-    var projectId = state.projectId;
-    state.pollTimer = setInterval(function () {
-      if (state.projectId !== projectId) return;
-      refreshProjectData().catch(handleError);
-    }, 5000);
   }
   async function refreshAfterUnknown() {
     showBanner(
@@ -1488,10 +1695,13 @@
     );
   }
   function matchesTaskFilter(task) {
-    if (!state.taskFilter) return true;
+    return matchesTaskQuery(task, state.taskFilter);
+  }
+  function matchesTaskQuery(task, query) {
+    if (!query) return true;
     return (
-      String(task.id).toLowerCase().indexOf(state.taskFilter) >= 0 ||
-      (task.title || "").toLowerCase().indexOf(state.taskFilter) >= 0
+      String(task.id).toLowerCase().indexOf(query) >= 0 ||
+      (task.title || "").toLowerCase().indexOf(query) >= 0
     );
   }
   function isReadyTask(task) {
@@ -2148,11 +2358,39 @@
 
   el.projectSelect.addEventListener("change", function () {
     if (el.projectSelect.value)
-      selectProject(el.projectSelect.value, false).catch(handleError);
+      selectProject(el.projectSelect.value).catch(handleError);
   });
   el.taskFilter.addEventListener("input", function () {
-    state.taskFilter = el.taskFilter.value.trim().toLowerCase();
-    renderContent();
+    applyTaskFilter(el.taskFilter.value);
+  });
+  el.refreshProject.addEventListener("click", function () {
+    refreshProjectData().catch(handleError);
+  });
+  el.filterPresets.addEventListener("change", function () {
+    if (el.filterPresets.value === "") return;
+    var index = Number(el.filterPresets.value);
+    var filter = state.savedFilters[index];
+    if (filter) applyTaskFilter(filter.query);
+    el.filterPresets.value = "";
+  });
+  el.saveFilter.addEventListener("click", function () {
+    var name = window.prompt("Save this filter as:");
+    if (!name) return;
+    state.savedFilters.push({ name: name, query: state.taskFilter });
+    localStorage.setItem(
+      "taskmasterHub.savedFilters",
+      JSON.stringify(state.savedFilters),
+    );
+    renderFilterPresets();
+  });
+  el.crossSearchBtn.addEventListener("click", function () {
+    void runCrossProjectSearch();
+  });
+  el.crossSearchInput.addEventListener("keydown", function (event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void runCrossProjectSearch();
+    }
   });
   el.rollupRefresh.addEventListener("click", function () {
     void refreshRollup();
@@ -2280,5 +2518,16 @@
     if (event.key === "Escape") closeDetail();
   });
 
+  wirePanelToggle(
+    el.addTaskPanelToggle,
+    el.addTaskBody,
+    "taskmasterHub.addTaskCollapsed",
+  );
+  wirePanelToggle(
+    el.rollupPanelToggle,
+    el.rollupBody,
+    "taskmasterHub.rollupCollapsed",
+  );
+  renderFilterPresets();
   Promise.all([loadServers(), loadProjects()]).catch(handleError);
 </script>

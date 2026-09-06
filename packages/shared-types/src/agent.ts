@@ -138,6 +138,21 @@ export const AgentUserMessageSchema = z.object({
    * forwarded verbatim. Omit to keep today's fixed-default behavior.
    */
   openrouterModelId: z.string().min(1).max(200).optional(),
+  /**
+   * Per-turn override of the Task Master Hub claim identity labels
+   * (`agentRole`/`agentName`/`agentTool`). Display/claim-label only — the
+   * claim's `agentId` stays `chat-<chatId>`, server-derived, never
+   * client-settable; the security boundary is the auth channel (D3), never
+   * these strings. Omit to keep the deployment's `AGENT_CHAT_*` env
+   * defaults for this turn.
+   */
+  identity: z
+    .object({
+      role: z.string().max(64),
+      name: z.string().max(64),
+      tool: z.string().max(64),
+    })
+    .optional(),
 });
 export type AgentUserMessage = z.infer<typeof AgentUserMessageSchema>;
 
@@ -272,6 +287,12 @@ export const AgentCapabilitiesSchema = z.object({
   reasoningEfforts: z.array(AgentReasoningEffortSchema).min(1),
   defaultModel: AgentModelSchema,
   defaultReasoningEffort: AgentReasoningEffortSchema,
+  /** This deployment's AGENT_CHAT_ROLE/_NAME/_TOOL — the picker's defaults. */
+  defaultIdentity: z.object({
+    role: z.string(),
+    name: z.string(),
+    tool: z.string(),
+  }),
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 

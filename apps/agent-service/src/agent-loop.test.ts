@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 process.env.AZURE_OPENAI_ENDPOINT = "https://example.invalid";
 process.env.AZURE_OPENAI_API_KEY = "test-key";
 process.env.GPT56SOL_DEPLOYMENT = "test-deployment";
+
+const { BrowserHandoffBroker } = await import("./browser-handoff-broker.js");
+const { gateway } = await import("./gateway-client.js");
 
 const {
   sanitizePersistedToolArgs,
@@ -11,6 +14,8 @@ const {
   parseComputerAction,
   formatCodexProviderReply,
   describeStreamError,
+  resolveExecutionIdentity,
+  AgentLoop,
 } = await import("./agent-loop.js");
 
 test("browser arguments omit typed secrets and URL tokens from history", () => {
@@ -308,4 +313,107 @@ test("Agent Chat identity config keys are strings", async () => {
   assert.equal(typeof config.agentChat.identityRole, "string");
   assert.equal(typeof config.agentChat.identityName, "string");
   assert.equal(typeof config.agentChat.identityTool, "string");
+});
+
+test("per-turn identity overrides the Task Master execution identity", () => {
+  assert.deepEqual(
+    resolveExecutionIdentity("identity-override", {
+      role: "BE",
+      name: "backend agent",
+      tool: "Codex CLI",
+    }),
+    {
+      id: "chat-identity-override",
+      role: "BE",
+      name: "backend agent",
+      tool: "Codex CLI",
+    },
+  );
+});
+
+test("Task Master execution identity uses config defaults when omitted", async () => {
+  const { config } = await import("./config.js");
+  assert.deepEqual(resolveExecutionIdentity("identity-default"), {
+    id: "chat-identity-default",
+    role: config.agentChat.identityRole,
+    name: config.agentChat.identityName,
+    tool: config.agentChat.identityTool,
+  });
+});
+
+test("AgentLoop restores an existing Task Master claim during initialization", async () => {
+  const chatId = `d2-active-claim-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const claim = { projectId: "p1", taskId: "5" };
+  const findActiveClaim = mock.method(
+    gateway,
+    "findActiveClaim",
+    async (agentId: string) => {
+      assert.equal(agentId, `chat-${chatId}`);
+      return claim;
+    },
+  );
+  try {
+    const loop = new AgentLoop(
+      () => {},
+      chatId,
+      "d2-terminal-session",
+      new BrowserHandoffBroker(),
+      "d2-user",
+    );
+    await loop.init();
+    assert.deepEqual(
+      (loop as unknown as { activeTask: unknown }).activeTask,
+      claim,
+    );
+    assert.equal(findActiveClaim.mock.calls.length, 1);
+    const execute = (
+      loop as unknown as {
+        execute: (
+          tool: string,
+          args: object,
+          signal: AbortSignal,
+        ) => Promise<string>;
+      }
+    ).execute;
+    assert.equal(
+      await execute.call(loop, "type_text", {}, new AbortController().signal),
+      "error: session_id and text are required",
+    );
+  } finally {
+    findActiveClaim.mock.restore();
+  }
+});
+
+test("AgentLoop fails closed when Task Master claim reconstruction returns no claim", async () => {
+  const findActiveClaim = mock.method(
+    gateway,
+    "findActiveClaim",
+    async () => null,
+  );
+  try {
+    const loop = new AgentLoop(
+      () => {},
+      `d2-no-claim-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      "d2-terminal-session",
+      new BrowserHandoffBroker(),
+      "d2-user",
+    );
+    await loop.init();
+    assert.equal((loop as unknown as { activeTask: unknown }).activeTask, null);
+    const execute = (
+      loop as unknown as {
+        execute: (
+          tool: string,
+          args: object,
+          signal: AbortSignal,
+        ) => Promise<string>;
+      }
+    ).execute;
+    assert.equal(
+      await execute.call(loop, "run_command", {}, new AbortController().signal),
+      "error: Task Master preflight required: list/show an actionable task and call taskmaster_claim before implementation tools.",
+    );
+  } finally {
+    findActiveClaim.mock.restore();
+  }
 });

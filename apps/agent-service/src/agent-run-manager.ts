@@ -4,6 +4,7 @@ import type {
   AgentModel,
   AgentReasoningEffort,
   AgentStatusState,
+  AgentUserMessage,
   AgentWsServerMessage,
 } from "@sparklab/shared-types";
 import { AgentLoop } from "./agent-loop.js";
@@ -112,6 +113,7 @@ export class AgentRun {
     model?: AgentModel,
     reasoningEffort?: AgentReasoningEffort,
     openrouterModelId?: string,
+    identity?: AgentUserMessage["identity"],
   ): Promise<void> {
     await this.loop.handleUserMessage(
       text,
@@ -119,6 +121,7 @@ export class AgentRun {
       model,
       reasoningEffort,
       openrouterModelId,
+      identity,
     );
     await this.flush();
   }

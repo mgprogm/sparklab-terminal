@@ -101,6 +101,12 @@ interface AgentState {
   setModel: (model: AgentModel) => void;
   reasoningEffort: AgentReasoningEffort;
   setReasoningEffort: (effort: AgentReasoningEffort) => void;
+  identityRole: string;
+  identityName: string;
+  identityTool: string;
+  setIdentity: (role: string, name: string, tool: string) => void;
+  /** Current deployment defaults, supplied by the live capabilities frame. */
+  defaultIdentity: { role: string; name: string; tool: string };
   availableModels: AgentModel[];
   availableReasoningEfforts: AgentReasoningEffort[];
 
@@ -214,6 +220,12 @@ export const useAgentStore = create<AgentState>()(
       setModel: (model) => set({ model }),
       reasoningEffort: "medium",
       setReasoningEffort: (reasoningEffort) => set({ reasoningEffort }),
+      identityRole: "",
+      identityName: "",
+      identityTool: "",
+      setIdentity: (identityRole, identityName, identityTool) =>
+        set({ identityRole, identityName, identityTool }),
+      defaultIdentity: { role: "", name: "", tool: "" },
       availableModels: ["gpt-5.6-sol"],
       availableReasoningEfforts: [
         "none",
@@ -271,6 +283,25 @@ export const useAgentStore = create<AgentState>()(
               )
                 ? state.reasoningEffort
                 : frame.defaultReasoningEffort,
+              identityRole:
+                !state.identityRole &&
+                !state.identityName &&
+                !state.identityTool
+                  ? frame.defaultIdentity.role
+                  : state.identityRole,
+              identityName:
+                !state.identityRole &&
+                !state.identityName &&
+                !state.identityTool
+                  ? frame.defaultIdentity.name
+                  : state.identityName,
+              identityTool:
+                !state.identityRole &&
+                !state.identityName &&
+                !state.identityTool
+                  ? frame.defaultIdentity.tool
+                  : state.identityTool,
+              defaultIdentity: frame.defaultIdentity,
             }));
             break;
 
@@ -558,6 +589,9 @@ export const useAgentStore = create<AgentState>()(
         legacyChatId: s.legacyChatId,
         model: s.model,
         reasoningEffort: s.reasoningEffort,
+        identityRole: s.identityRole,
+        identityName: s.identityName,
+        identityTool: s.identityTool,
         openrouterModelId: s.openrouterModelId,
         openrouterModelLabel: s.openrouterModelLabel,
         openrouterModelSupportedEfforts: s.openrouterModelSupportedEfforts,

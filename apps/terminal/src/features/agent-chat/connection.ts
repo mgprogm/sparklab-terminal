@@ -192,6 +192,7 @@ export class AgentConnection {
     model?: AgentModel,
     reasoningEffort?: AgentReasoningEffort,
     openrouterModelId?: string,
+    identity?: { role: string; name: string; tool: string },
   ): void {
     this.sendRaw({
       type: "user_message",
@@ -200,6 +201,7 @@ export class AgentConnection {
       model,
       reasoningEffort,
       openrouterModelId,
+      identity,
     });
   }
 

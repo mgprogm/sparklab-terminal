@@ -266,10 +266,14 @@ pipeline. Shipped:
   `config.agentChat` block. `id` stays `chat-<chatId>`; identity never comes
   from model tool args.
 
-Still deferred (out of Phase C scope): external-CLI claim wrapper script,
-durable preflight grant across an agent-service restart, per-chat composer
-role picker. Known limit: single-user auth means `ownerChannel` separates
-bearer ↔ cookie only, not Hub-UI-human from Agent Chat.
+**All since resolved** — see `docs/TASKMASTER-HUB-PHASE-E-PLAN.md` +
+`docs/TASKMASTER-HUB-PHASE-E-SPEC.md` (built 2026-09-06, named "Phase E" to
+avoid colliding with this document's own "Phase D" below, an unrelated,
+already-shipped tag-grid feature): the Hub MCP resolved the external-CLI
+claim wrapper, `AgentLoop` now reconstructs its claim preflight from the
+gateway on construction, the composer has a per-chat identity picker, and
+`actorOf()`'s `x-pm-actor` handling was extended to cookie-authed calls so
+Hub-UI-human and Agent-Chat-over-cookie are distinct `ownerChannel`s.
 
 ### Phase D — tag task-status grid on the Next Task tile (planned)
 

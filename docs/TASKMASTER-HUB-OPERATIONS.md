@@ -67,8 +67,10 @@ coordination layer is the gateway execution sidecar, not any one CLI:
   _different real channel_ (a scoped-bearer caller vs. the cookie-auth Hub
   UI, or a different `X-PM-Actor`) return **403**. Records created before
   this check carry `ownerChannel: "legacy"` and stay open to any channel.
-  Single-user auth means bearer-vs-cookie is the separation that holds; two
-  cookie-auth callers (Hub UI + in-app Agent Chat) share one channel.
+  Bearer callers separate via `X-PM-Actor`; cookie-auth callers separate the
+  same way since Phase E — Agent Chat sends `x-pm-actor: agent-chat` on its
+  Task Master calls, so the cookie-auth Hub UI (no such header) and the
+  cookie-auth Agent Chat are two distinct channels, not one shared channel.
 - **How each tool reaches the backlog** — see
   [`TASKMASTER-AGENT-SETUP.md`](./TASKMASTER-AGENT-SETUP.md): MCP where the
   CLI supports it (interactive Claude Code, OpenCode), the Hub REST API or
@@ -88,33 +90,65 @@ claim. Claims without a heartbeat/progress update expire after
 
 ## Current limitations and roadmap
 
-- Agent Chat records the identity `Developer · Agent Chat` by default, now
-  overridable per deployment via `AGENT_CHAT_ROLE` / `AGENT_CHAT_NAME` /
-  `AGENT_CHAT_TOOL` (Phase C). The `id` (`chat-<chatId>`) stays per-chat and
-  is never model-settable. Per-_chat_ role selection in the UI and external
-  CLI claim wrappers remain to be added.
-- The preflight grant is held in the running AgentLoop; it is not yet durable
-  across an agent-service restart.
+- **Resolved (Phase E):** Agent Chat identity can now be set per chat from
+  the composer's identity picker (role/name/tool), sent per-turn — not
+  persisted server-side, resets to the deployment's `AGENT_CHAT_*` defaults
+  each session, same posture as the model picker. Env vars still set the
+  deployment-wide default the picker starts from. The `id` (`chat-<chatId>`)
+  stays per-chat and is never model- or client-settable.
+- **Resolved (Phase E):** the Hub MCP (`docs/TASKMASTER-HUB-MCP-PLAN.md`)
+  gives external CLIs (Claude Code, OpenCode) a claim wrapper via
+  `taskmaster_hub_*` tools; Pi and `codex exec` use the REST API directly
+  (`TASKMASTER-AGENT-SETUP.md`).
+- **Resolved (Phase E):** the claim preflight (`AgentLoop.activeTask`) is now
+  reconstructed from the gateway's execution sidecar on construction
+  (`gateway.findActiveClaim()`), rather than trusted from in-memory state
+  alone — an agent-service restart no longer loses in-progress claim
+  context. Fails closed (requires a fresh `taskmaster_claim`) if the gateway
+  is unreachable during reconstruction.
 - **Resolved (Phase C):** each execution record is now bound to the gateway
   auth channel that created it (`ownerChannel`, derived from `actorOf(req)`);
   `update`/`release` reject a caller on a different real channel with 403.
   This closes the "direct artifact API callers can provide arbitrary
-  execution labels" hole for the scoped-bearer case. **Limitation:** the
-  gateway authenticates one user and agent-service calls it with that same
-  cookie, so `ownerChannel` separates bearer ↔ cookie but _not_ a human
-  clicking in the Hub UI from Agent Chat — both are the same cookie channel.
-  Pre-Phase-C records load with `ownerChannel: "legacy"`, which matches any
-  channel so they are never locked out. Two paths transfer ownership without
-  a channel check, both by design: `releaseForTask()` (task status →
+  execution labels" hole for the scoped-bearer case. Pre-Phase-C records
+  load with `ownerChannel: "legacy"`, which matches any channel so they are
+  never locked out. Two paths transfer ownership without a channel check,
+  both by design: `releaseForTask()` (task status →
   `done`/`cancelled`/`deferred`) and TTL expiry (an `expired` claim leaves
   the active set, so the next `claim` starts fresh and any channel may take
   it).
+- **Resolved (Phase E):** the gateway `actorOf()` channel derivation now
+  honors `x-pm-actor` on cookie-authed calls too (previously bearer-only),
+  and agent-service's Task Master calls send `x-pm-actor: agent-chat`. A
+  human clicking in the Hub UI and Agent Chat now resolve to different real
+  channels (`user:<name>` vs. `user:<name>:agent-chat`) even though both are
+  cookie-authed, closing the one gap Phase C's own note called out. Scoped
+  to Task Master calls only (a dedicated `taskmasterCall()` wrapper in
+  `gateway-client.ts`), so PM/Kanban/Notes `reporter`/notification-actor
+  labels are unaffected.
 - **Resolved (UI v2 Phase A):** the Hub detail panel offers human
   claim / mark-working / mark-blocked / mark-review / release controls
   (`agentId: "human"`), plus relative-time / stale-claim styling on claim
   chips.
-- Task Master dependencies are per project. Cross-project dependency views,
-  bulk operations, real-time push, and saved filters remain post-v1 work.
+- **Resolved (Phase E):** saved filter presets (`localStorage`) and a
+  cross-project task search (parallel per-project task fetch, client-side
+  match) are in the Hub UI. Bulk status-change (Phase B) and the
+  cross-project rollup strip (Phase B) were already shipped separately.
+- Task Master dependencies remain strictly per project by design — there is
+  no cross-project dependency edge, and the search above is a filter over
+  independently-fetched project task lists, not a graph. Real-time push
+  remains unimplemented.
+- **Changed (post-Phase-E UI polish, 2026-09-06):** the board's background
+  `setInterval(refreshProjectData, 5000)` poll was removed in favor of an
+  explicit **Refresh** button — the Hub UI is now manual-refresh-only
+  everywhere (main board, rollup strip, cross-project search all share this
+  pattern). Selecting a project or switching tag still triggers one
+  immediate load; only the periodic background re-fetch is gone. The Add
+  task and Project-rollup-and-search panels are also now collapsible
+  (disclosure toggle, `localStorage`-persisted, collapsed by default) to
+  save vertical space.
+- Full design + as-built deviations: `docs/TASKMASTER-HUB-PHASE-E-PLAN.md` +
+  `docs/TASKMASTER-HUB-PHASE-E-SPEC.md`.
 
 ## Verification
 

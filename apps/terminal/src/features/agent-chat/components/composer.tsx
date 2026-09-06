@@ -15,6 +15,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@sparklab/ui/components/ui/dropdown-menu";
+import { Input } from "@sparklab/ui/components/ui/input";
 import { cn } from "@sparklab/ui/lib/utils";
 import {
   ArrowLeft,
@@ -27,6 +28,7 @@ import {
   Search,
   SlidersHorizontal,
   Square,
+  User as UserIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -144,6 +146,11 @@ export function Composer({
   const setModel = useAgentStore((s) => s.setModel);
   const reasoningEffort = useAgentStore((s) => s.reasoningEffort);
   const setReasoningEffort = useAgentStore((s) => s.setReasoningEffort);
+  const identityRole = useAgentStore((s) => s.identityRole);
+  const identityName = useAgentStore((s) => s.identityName);
+  const identityTool = useAgentStore((s) => s.identityTool);
+  const setIdentity = useAgentStore((s) => s.setIdentity);
+  const identityPlaceholder = useAgentStore((s) => s.defaultIdentity);
   const availableModels = useAgentStore((s) => s.availableModels);
   const availableReasoningEfforts = useAgentStore(
     (s) => s.availableReasoningEfforts,
@@ -527,6 +534,55 @@ export function Composer({
                     )}
                   </>
                 )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  disabled={working || disabled}
+                  aria-label="Set claim identity for Task Master Hub"
+                  className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 min-w-0 shrink items-center gap-1 rounded-sm px-1.5 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <UserIcon className="size-3 shrink-0" />
+                  <span className="max-w-32 truncate">
+                    {identityRole || identityPlaceholder.role}
+                  </span>
+                  <ChevronDown className="size-3 shrink-0" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                className="flex min-w-56 flex-col gap-1.5 p-2"
+              >
+                <DropdownMenuLabel>
+                  Task Master Hub claim identity
+                </DropdownMenuLabel>
+                <Input
+                  value={identityRole}
+                  placeholder={identityPlaceholder.role}
+                  onChange={(e) =>
+                    setIdentity(e.target.value, identityName, identityTool)
+                  }
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
+                <Input
+                  value={identityName}
+                  placeholder={identityPlaceholder.name}
+                  onChange={(e) =>
+                    setIdentity(identityRole, e.target.value, identityTool)
+                  }
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
+                <Input
+                  value={identityTool}
+                  placeholder={identityPlaceholder.tool}
+                  onChange={(e) =>
+                    setIdentity(identityRole, identityName, e.target.value)
+                  }
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

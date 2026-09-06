@@ -448,6 +448,24 @@ class GatewayClient {
     if (res.status !== 204) throw await this.error(res);
   }
 
+  /**
+   * Task Master Hub calls only. Adds x-pm-actor so the gateway's actorOf()
+   * (server.js) can separate Agent Chat's cookie-authed calls from a human
+   * clicking in the Hub UI, which sends no such header — both are otherwise
+   * the same auth cookie (Phase E §D3). Deliberately NOT folded into the
+   * shared call() used by fs/git/servers/PM/Kanban/Notes routes: this header
+   * would also perturb their own actorOf()-derived reporter/notification
+   * labels, which is out of scope here.
+   */
+  private async taskmasterCall(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("x-pm-actor", "agent-chat");
+    return this.call(path, { ...init, headers });
+  }
+
   // --- Task Master Hub ------------------------------------------------------
   // REST-client-only (D7): every one of these calls the gateway's
   // /api/taskmaster/* routes. Never reads data/taskmaster-projects.json or a
@@ -455,7 +473,7 @@ class GatewayClient {
 
   async listTaskmasterProjects(): Promise<TaskMasterProject[]> {
     const r = await this.json<{ projects: TaskMasterProject[] }>(
-      await this.call("/api/taskmaster/projects"),
+      await this.taskmasterCall("/api/taskmaster/projects"),
     );
     return r.projects;
   }
@@ -464,7 +482,7 @@ class GatewayClient {
     projectId: string,
   ): Promise<TaskMasterListTasksResponse> {
     return this.json<TaskMasterListTasksResponse>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks`,
       ),
     );
@@ -475,7 +493,7 @@ class GatewayClient {
     taskId: string,
   ): Promise<TaskMasterTask> {
     return this.json<TaskMasterTask>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
       ),
     );
@@ -483,7 +501,7 @@ class GatewayClient {
 
   async getTaskmasterNext(projectId: string): Promise<TaskMasterNextResponse> {
     return this.json<TaskMasterNextResponse>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/next`,
       ),
     );
@@ -491,7 +509,7 @@ class GatewayClient {
 
   async getTaskmasterOverview(projectId: string): Promise<unknown> {
     return this.json<unknown>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/overview`,
       ),
     );
@@ -503,7 +521,7 @@ class GatewayClient {
     identity: { id: string; name: string; role: string; tool: string },
   ): Promise<unknown> {
     return this.json<unknown>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/claim`,
         {
           method: "POST",
@@ -527,7 +545,7 @@ class GatewayClient {
     note?: string,
   ): Promise<unknown> {
     return this.json<unknown>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/execution`,
         {
           method: "PATCH",
@@ -547,7 +565,7 @@ class GatewayClient {
     taskId: string,
     agentId: string,
   ): Promise<void> {
-    const res = await this.call(
+    const res = await this.taskmasterCall(
       `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/execution`,
       {
         method: "DELETE",
@@ -564,7 +582,7 @@ class GatewayClient {
     status: string,
   ): Promise<TaskMasterTask> {
     return this.json<TaskMasterTask>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/status`,
         {
           method: "POST",
@@ -580,7 +598,7 @@ class GatewayClient {
     body: { prompt: string; priority?: string; dependencies?: string[] },
   ): Promise<{ tasks: TaskMasterTaskSummary[] }> {
     return this.json<{ tasks: TaskMasterTaskSummary[] }>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks`,
         {
           method: "POST",
@@ -597,7 +615,7 @@ class GatewayClient {
     body: { prompt: string },
   ): Promise<TaskMasterTask> {
     return this.json<TaskMasterTask>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`,
         {
           method: "PATCH",
@@ -614,7 +632,7 @@ class GatewayClient {
     body: { research?: boolean; num?: number },
   ): Promise<TaskMasterTask> {
     return this.json<TaskMasterTask>(
-      await this.call(
+      await this.taskmasterCall(
         `/api/taskmaster/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/expand`,
         {
           method: "POST",
@@ -639,7 +657,7 @@ class GatewayClient {
   ): Promise<
     { cycle: false; task: TaskMasterTask } | { cycle: true; message: string }
   > {
-    const res = await this.call(
+    const res = await this.taskmasterCall(
       `/api/taskmaster/projects/${encodeURIComponent(projectId)}/dependencies`,
       {
         method: "POST",
@@ -661,6 +679,41 @@ class GatewayClient {
       throw new GatewayError(400, b.error || "bad request");
     }
     return { cycle: false, task: await this.json<TaskMasterTask>(res) };
+  }
+
+  /**
+   * Best-effort reconstruction of an already-held claim after a fresh
+   * AgentLoop is constructed (a genuinely new chat, or — the case this
+   * exists for — an agent-service restart losing the in-memory preflight
+   * gate). Queries every registered project's overview, which already
+   * returns full execution records including agentId
+   * (taskmasterExecution.list(), server.js:3169) — no new gateway route.
+   * Bounded by the number of registered Hub projects; acceptable at Hub
+   * scale (see Phase E plan §D2).
+   */
+  async findActiveClaim(
+    agentId: string,
+  ): Promise<{ projectId: string; taskId: string } | null> {
+    const projects = await this.listTaskmasterProjects();
+    for (const project of projects) {
+      let overview: {
+        executions?: Array<{
+          projectId: string;
+          taskId: string;
+          agentId: string;
+        }>;
+      };
+      try {
+        overview = (await this.getTaskmasterOverview(
+          project.id,
+        )) as typeof overview;
+      } catch {
+        continue; // an unreachable/misconfigured project must not block preflight
+      }
+      const match = overview.executions?.find((x) => x.agentId === agentId);
+      if (match) return { projectId: match.projectId, taskId: match.taskId };
+    }
+    return null;
   }
 
   // --- Project management (PM) -------------------------------------------

@@ -136,6 +136,7 @@ export function useAgentChat() {
       model?: AgentModel,
       reasoningEffort?: AgentReasoningEffort,
       openrouterModelId?: string,
+      identity?: { role: string; name: string; tool: string },
     ) => {
       conn?.sendUserMessage(
         text,
@@ -143,6 +144,7 @@ export function useAgentChat() {
         model,
         reasoningEffort,
         openrouterModelId,
+        identity,
       );
     },
     [],

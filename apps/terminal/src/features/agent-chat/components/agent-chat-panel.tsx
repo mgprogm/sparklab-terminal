@@ -81,6 +81,9 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
   const setAutoApprove = useAgentStore((s) => s.setAutoApprove);
   const addUserMessage = useAgentStore((s) => s.addUserMessage);
   const openrouterModelId = useAgentStore((s) => s.openrouterModelId);
+  const identityRole = useAgentStore((s) => s.identityRole);
+  const identityName = useAgentStore((s) => s.identityName);
+  const identityTool = useAgentStore((s) => s.identityTool);
   const recoveryPending = entries.some(
     (entry) => entry.kind === "recovery" && entry.state === "pending",
   );
@@ -155,6 +158,9 @@ export function AgentChatPanel({ isMobile }: { isMobile: boolean }) {
       // different model.
       model === "openrouter-gpt-latest"
         ? (openrouterModelId ?? undefined)
+        : undefined,
+      identityRole || identityName || identityTool
+        ? { role: identityRole, name: identityName, tool: identityTool }
         : undefined,
     );
   };

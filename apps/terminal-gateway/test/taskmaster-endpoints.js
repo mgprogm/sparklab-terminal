@@ -560,6 +560,105 @@ async function main() {
   );
 
   // ===========================================================================
+  // D3: cookie-channel separation — Hub-UI-human vs. Agent-Chat-over-cookie
+  // ===========================================================================
+  {
+    // Case 1: a human (plain cookie, no x-pm-actor) claims; a cookie request
+    // WITH x-pm-actor: agent-chat tries to mutate the same agentId -> 403.
+    const d3c1claim = await req(
+      "POST",
+      `/api/taskmaster/projects/${projectId}/tasks/1/claim`,
+      { body: { agentId: "human-claim" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      d3c1claim.status === 201,
+      `d3 case1 claim -> ${d3c1claim.status}, expected 201`,
+    );
+    const d3c1patch = await req(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "human-claim", status: "review" },
+        origin: ALLOWED_ORIGIN,
+        headers: { "x-pm-actor": "agent-chat" },
+      },
+    );
+    assert(
+      d3c1patch.status === 403,
+      `d3 case1 cookie+actor PATCH -> ${d3c1patch.status}, expected 403`,
+    );
+
+    // Case 2 (symmetric): a cookie+x-pm-actor:agent-chat claim cannot be
+    // mutated by a plain cookie (no actor) request either.
+    const d3c2rel = await req(
+      "DELETE",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      { body: { agentId: "human-claim" }, origin: ALLOWED_ORIGIN },
+    );
+    assert(
+      d3c2rel.status === 204,
+      `d3 case2 pre-release -> ${d3c2rel.status}, expected 204`,
+    );
+    const d3c2claim = await req(
+      "POST",
+      `/api/taskmaster/projects/${projectId}/tasks/1/claim`,
+      {
+        body: { agentId: "agent-chat-claim" },
+        origin: ALLOWED_ORIGIN,
+        headers: { "x-pm-actor": "agent-chat" },
+      },
+    );
+    assert(
+      d3c2claim.status === 201,
+      `d3 case2 claim -> ${d3c2claim.status}, expected 201`,
+    );
+    const d3c2patch = await req(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "agent-chat-claim", status: "review" },
+        origin: ALLOWED_ORIGIN,
+      },
+    );
+    assert(
+      d3c2patch.status === 403,
+      `d3 case2 plain-cookie PATCH -> ${d3c2patch.status}, expected 403`,
+    );
+
+    // Case 3: same channel (cookie + x-pm-actor:agent-chat both times) still
+    // works end to end.
+    const d3c3patch = await req(
+      "PATCH",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "agent-chat-claim", status: "review" },
+        origin: ALLOWED_ORIGIN,
+        headers: { "x-pm-actor": "agent-chat" },
+      },
+    );
+    assert(
+      d3c3patch.status === 200,
+      `d3 case3 same-channel PATCH -> ${d3c3patch.status}, expected 200`,
+    );
+    const d3c3del = await req(
+      "DELETE",
+      `/api/taskmaster/projects/${projectId}/tasks/1/execution`,
+      {
+        body: { agentId: "agent-chat-claim" },
+        origin: ALLOWED_ORIGIN,
+        headers: { "x-pm-actor": "agent-chat" },
+      },
+    );
+    assert(
+      d3c3del.status === 204,
+      `d3 case3 same-channel DELETE -> ${d3c3del.status}, expected 204`,
+    );
+  }
+  console.log(
+    "  ok: D3 cookie-channel separation — Hub-UI-human vs. Agent-Chat-over-cookie",
+  );
+
+  // ===========================================================================
   // GET next
   // ===========================================================================
   {
