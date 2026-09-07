@@ -419,7 +419,7 @@ const TOOLS = [
         prompt: { type: "string" },
         priority: {
           type: "string",
-          enum: ["low", "medium", "high", "urgent"],
+          enum: ["low", "medium", "high"],
         },
       },
       required: ["project_id", "prompt"],

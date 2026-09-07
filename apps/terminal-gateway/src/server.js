@@ -659,7 +659,11 @@ async function serverExecStdin(server, tmuxArgs, input) {
 const FS_CMD_MAX_BUFFER = 16 * 1024 * 1024;
 const FS_CMD_TIMEOUT_MS = 15_000;
 
-function serverCmdArgv(server, argv, { tty = false, cwd } = {}) {
+function serverCmdArgv(
+  server,
+  argv,
+  { tty = false, cwd, interactiveShell = false } = {},
+) {
   if (!server || server.type === "local") {
     return argv;
   }
@@ -674,7 +678,22 @@ function serverCmdArgv(server, argv, { tty = false, cwd } = {}) {
   // flag substitute (verified live, see docs/TASKMASTER-HUB-PLAN.md §1e #3 —
   // `--file` from an unrelated cwd silently picked the wrong AI provider), so
   // a legacy command run against a remote project must actually `cd` there.
-  const remoteCmd = cwd ? `cd ${shellQuote(cwd)} && ${quotedArgv}` : quotedArgv;
+  let remoteCmd = cwd ? `cd ${shellQuote(cwd)} && ${quotedArgv}` : quotedArgv;
+  // `interactiveShell`: a plain `ssh host "<cmd>"` runs a non-interactive,
+  // non-login shell, which never sources ~/.bashrc — so an nvm-managed
+  // `task-master`/`node` (added to PATH only inside ~/.bashrc's nvm init
+  // block, the common install layout) resolves to ENOENT even though it's
+  // installed. Bash DOES source ~/.bashrc for an *interactive* shell
+  // regardless of login status, so wrapping in `bash -ic '<cmd>'` picks up
+  // nvm's PATH (verified live against a real nvm-managed remote host, Task
+  // Master Hub setup, 2026-09-06). Opt-in only — used by the Task Master Hub
+  // routes, which need this; other serverCmd callers (fs/git routes) are
+  // unaffected. `bash -ic` prints harmless job-control warnings to stderr
+  // ("cannot set terminal process group", "no job control in this shell");
+  // stdout stays clean.
+  if (interactiveShell) {
+    remoteCmd = `bash -ic ${shellQuote(remoteCmd)}`;
+  }
   ssh.push(...sshOptsFor(server), sshHost(server), remoteCmd);
   return ssh;
 }
@@ -683,13 +702,28 @@ function serverCmdArgv(server, argv, { tty = false, cwd } = {}) {
 // `opts.cwd`: local exec passes it straight through to execFileAsync (a real
 // cwd); remote exec bakes it into the ssh command string via serverCmdArgv
 // (see its comment — there's no execFile-option equivalent over ssh).
+// `opts.interactiveShell`: see serverCmdArgv — forces `bash -ic` over ssh so
+// an nvm-managed binary resolves; no-op for local exec.
 async function serverCmd(server, argv, opts = {}) {
-  const a = serverCmdArgv(server, argv, { cwd: opts.cwd });
+  const { cwd, interactiveShell, ...execOpts } = opts;
+  const a = serverCmdArgv(server, argv, { cwd, interactiveShell });
+  const isLocal = !server || server.type === "local";
+  // BUG (fixed 2026-09-07): `cwd` must never reach execFileAsync's own
+  // options for a REMOTE server — argv[0] is "ssh" (a local command), so a
+  // remote-only path there makes Node try to chdir the local ssh client
+  // process into a directory that doesn't exist on this host, throwing a
+  // real `ENOENT` before ssh even spawns. That's misclassified by
+  // isTaskmasterUnavailableError as "task-master CLI is not installed" —
+  // a completely wrong diagnosis for what's actually a local chdir failure.
+  // For a local server, `cwd` is correct and required (execFileAsync's own
+  // real working-directory option); for remote, it's already baked into the
+  // ssh command string by serverCmdArgv above and must not be repeated here.
   return execFileAsync(a[0], a.slice(1), {
     env: childEnvFor(server),
     timeout: FS_CMD_TIMEOUT_MS,
     maxBuffer: FS_CMD_MAX_BUFFER,
-    ...opts,
+    ...execOpts,
+    ...(isLocal && cwd ? { cwd } : {}),
   });
 }
 
@@ -3040,6 +3074,7 @@ async function runTaskmasterCore(server, projectPath, command, args = []) {
   try {
     const { stdout } = await serverCmd(server, argv, {
       timeout: TASKMASTER_TIMEOUT_MS,
+      interactiveShell: true,
     });
     let json = null;
     try {
@@ -3091,6 +3126,7 @@ async function runTaskmasterLegacy(server, projectPath, command, args = []) {
     const { stdout, stderr } = await serverCmd(server, argv, {
       cwd: projectPath,
       timeout: TASKMASTER_TIMEOUT_MS,
+      interactiveShell: true,
     });
     return { exitCode: 0, stdout, stderr };
   } catch (err) {
@@ -3321,7 +3357,9 @@ async function handleTaskmaster(req, res, url) {
       // commands (§1e #5 — never combine npx with the legacy family's `cd`).
       let binaryMode = "core-only-npx";
       try {
-        await serverCmd(server, [...TASKMASTER_COMMAND, "--version"]);
+        await serverCmd(server, [...TASKMASTER_COMMAND, "--version"], {
+          interactiveShell: true,
+        });
         binaryMode = "binary";
       } catch {
         binaryMode = "core-only-npx";

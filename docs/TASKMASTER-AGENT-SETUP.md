@@ -112,11 +112,21 @@ project into it and coordinate through claims**, register
 `tools/taskmaster-hub-mcp/server.mjs` instead (or in addition):
 
 ```bash
-claude mcp add taskmaster-hub -- node /abs/tools/taskmaster-hub-mcp/server.mjs \
+claude mcp add taskmaster-hub \
   -e TASKMASTER_HUB_API_TOKEN=<gateway bearer> \
   -e TASKMASTER_HUB_BASE_URL=<gateway/proxy URL> \
-  -e TASKMASTER_HUB_ACTOR=<stable-worker-id>   # its own ownerChannel (Phase C)
+  -e TASKMASTER_HUB_ACTOR=<stable-worker-id> \
+  -- node /abs/tools/taskmaster-hub-mcp/server.mjs   # its own ownerChannel (Phase C)
 ```
+
+**Flag order matters**: every `-e KEY=VALUE` must come _before_ the `--`
+separator — anything after `--` is the literal child-process command line,
+so `-e` flags placed there get passed as bare argv to `node` (ignored) and
+the server starts with an empty env, silently unauthenticated. `claude mcp
+list` still shows "✔ Connected" in that broken state (it only checks the
+stdio handshake) — always verify with a real tool call, not just `list`
+(hit live, 2026-09-06, full recovery steps in
+`docs/TASKMASTER-HUB-PROJECT-ONBOARDING.md`).
 
 It exposes `taskmaster_hub_init` (register the current project + get the
 claim protocol) plus `_claim` / `_update_progress` / `_release` / `_next` /
@@ -124,7 +134,10 @@ claim protocol) plus `_claim` / `_update_progress` / `_release` / `_next` /
 client, no cookie. Set `TASKMASTER_HUB_ACTOR` to a distinct value per worker
 so each one's claims are channel-isolated (an invalid value fails the server
 at startup rather than silently sharing a channel). Full reference:
-`tools/taskmaster-hub-mcp/README.md` and `docs/TASKMASTER-HUB-MCP-PLAN.md`.
+`tools/taskmaster-hub-mcp/README.md`, `docs/TASKMASTER-HUB-MCP-PLAN.md`, and
+the step-by-step onboarding checklist in
+`docs/TASKMASTER-HUB-PROJECT-ONBOARDING.md` (covers both local and
+remote/SSH hosts, plus the binaryMode/npx and SSH-PATH gotchas).
 
 ## 3. Confirm each actually connected
 
@@ -191,6 +204,10 @@ so the choice is remembered.
 
 ## See also
 
+- `docs/TASKMASTER-HUB-PROJECT-ONBOARDING.md` — the step-by-step checklist
+  for putting one more project onto a running Hub (local or remote/SSH),
+  written from the actual live procedure, incl. the `binaryMode`/npx errata
+  and the SSH-PATH fix for nvm-managed remote hosts.
 - `docs/TASKMASTER-HUB-OPERATIONS.md` — the runtime protocol: the five-step
   claim workflow, and §"Multiple agent tools on one backlog" (per-tool
   identity labels, 409/403/TTL semantics, handoff).

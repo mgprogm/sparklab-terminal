@@ -358,6 +358,19 @@ server actually supports at registration time (probe: does `task-master
 return `503 taskmaster_unavailable` with a message naming the gap, core-family
 routes still work via the npx fallback).
 
+> **Errata (2026-09-06):** the npx fallback described in this paragraph was
+> never actually implemented — `TASKMASTER_COMMAND` in the shipped
+> `server.js` is a single global argv prefix (default literal
+> `["task-master"]`) used identically for every route regardless of
+> `binaryMode`; there is no npx invocation anywhere in the code. A project
+> registered as `"core-only-npx"` gets 503s on **every** route except
+> `claim`/`update-progress`/`release` (pure gateway-sidecar ops), not just
+> the legacy family. Found while onboarding the first real remote (SSH)
+> project — full detail and the practical workaround (install a real binary)
+> in `docs/TASKMASTER-HUB-PROJECT-ONBOARDING.md`. Whether the npx fallback
+> as originally designed here is still wanted is an open decision, not
+> silently closed — see §8.
+
 **D6 — v1 action surface, now backed by live verification for every entry
 (§1e).** Ship `list`, `show`, `next`, `set-status` (core, always available)
 plus `add-task`, `update-task`, `expand`, `add-dependency` (legacy, requires
@@ -594,7 +607,11 @@ the rest of `tags *` as Hub actions (§7); real-time push (D9); a
 "which terminal session is working this task" heuristic (mentioned in the
 original brainstorm — needs session cwd ↔ project path matching, deferred
 until the core Hub is real); bulk operations (multi-select status change);
-a saved per-project view/filter.
+a saved per-project view/filter; **the npx fallback for `"core-only-npx"`
+projects described in D5 (never actually implemented — see the 2026-09-06
+errata above; decide whether it's still wanted or the design should instead
+just say "core-only-npx" is a 503-everything-but-claims placeholder state
+until a real binary is installed)**.
 
 ---
 
