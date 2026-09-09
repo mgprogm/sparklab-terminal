@@ -229,14 +229,24 @@ async function main() {
   stubPath = path.join(scratch, "task-master-stub.sh");
   fs.writeFileSync(stubPath, STUB, { mode: 0o755 });
 
-  // A real .taskmaster/ dir with a real state.json — the registration probe
-  // (D1) and the tags/current route (D12, reads state.json directly) both
-  // touch the real filesystem, never the stub.
+  // A real .taskmaster/ dir with a real state.json and tasks.json — the
+  // registration probe (D1) and the tags route (D12, reads both files
+  // directly — currentTag from state.json, the tag list from tasks.json's
+  // top-level keys) all touch the real filesystem, never the stub.
   const projectDir = path.join(scratch, "project");
-  fs.mkdirSync(path.join(projectDir, ".taskmaster"), { recursive: true });
+  fs.mkdirSync(path.join(projectDir, ".taskmaster", "tasks"), {
+    recursive: true,
+  });
   fs.writeFileSync(
     path.join(projectDir, ".taskmaster", "state.json"),
     JSON.stringify({ currentTag: "master" }),
+  );
+  fs.writeFileSync(
+    path.join(projectDir, ".taskmaster", "tasks", "tasks.json"),
+    JSON.stringify({
+      master: { tasks: [], metadata: {} },
+      "feature-x": { tasks: [], metadata: {} },
+    }),
   );
 
   await startServer();
@@ -712,7 +722,8 @@ async function main() {
   );
 
   // ===========================================================================
-  // tags: GET current (reads state.json directly, D12) + POST use
+  // tags: GET current + list (reads state.json + tasks.json directly, D12) +
+  // POST use
   // ===========================================================================
   {
     const res = await req("GET", `/api/taskmaster/projects/${projectId}/tags`);
@@ -720,6 +731,12 @@ async function main() {
     assert(
       j.currentTag === "master",
       `currentTag=${j.currentTag}, expected master`,
+    );
+    assert(
+      Array.isArray(j.tags) &&
+        j.tags.includes("master") &&
+        j.tags.includes("feature-x"),
+      `tags=${JSON.stringify(j.tags)}, expected to include master + feature-x`,
     );
   }
   {

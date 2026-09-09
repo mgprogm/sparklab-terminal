@@ -65,23 +65,46 @@
     cursor: not-allowed;
     opacity: 0.5;
   }
-  .topbar {
+  .workspace-toolbar {
     align-items: center;
+    background: var(--canvas);
     border-bottom: 1px solid var(--hairline);
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    gap: 0;
+  }
+  .topbar {
+    display: contents;
+  }
+  .topbar-main,
+  .topbar-tools,
+  .panel-header {
+    align-items: center;
+    display: flex;
     gap: 8px;
-    overflow-x: auto;
-    overflow-y: hidden;
+  }
+  .topbar-main {
+    flex: 1 1 420px;
+    flex-wrap: wrap;
     padding: 10px 16px;
   }
-  .topbar > * {
+  .topbar-main > *,
+  .topbar-tools > * {
     flex-shrink: 0;
   }
-  .topbar .project-select,
-  .topbar #task-filter,
-  .topbar #filter-presets {
+  .topbar-main .project-select,
+  .topbar-tools #task-filter,
+  .topbar-tools #filter-presets {
     flex-shrink: 1;
+  }
+  .topbar-tools {
+    border-top: 1px solid var(--hairline);
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    padding: 10px 16px;
+  }
+  .topbar-tools.hidden {
+    display: none;
   }
   .grow {
     flex: 1 1 auto;
@@ -228,24 +251,13 @@
     width: 180px;
   }
   #add-task-panel {
-    align-items: center;
-    background: var(--canvas-soft);
-    border-bottom: 1px solid var(--hairline);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 16px;
+    background: transparent;
   }
   #add-task-panel.hidden {
     display: none;
   }
   #rollup-panel {
-    align-items: center;
-    border-bottom: 1px solid var(--hairline);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 16px;
+    background: transparent;
   }
   #rollup-panel.hidden {
     display: none;
@@ -260,7 +272,7 @@
     font-size: 13px;
     font-weight: 500;
     gap: 5px;
-    padding: 2px 0;
+    padding: 4px 0;
   }
   .panel-toggle:hover {
     color: var(--ink);
@@ -275,9 +287,37 @@
     flex: 1 1 100%;
     flex-wrap: wrap;
     gap: 8px;
+    padding: 10px 0 0;
   }
   .panel-body.hidden {
     display: none;
+  }
+  .workspace-panels {
+    align-items: stretch;
+    display: flex;
+    flex: 0 1 auto;
+  }
+  .workspace-panel {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 150px;
+    padding: 10px 14px;
+  }
+  .workspace-panel:has(.panel-body:not(.hidden)) {
+    flex: 1 1 100%;
+  }
+  .workspace-panel + .workspace-panel {
+    border-left: 1px solid var(--hairline);
+  }
+  .workspace-panel.hidden {
+    display: none;
+  }
+  .workspace-panel .panel-header {
+    flex: 1 1 100%;
+  }
+  .workspace-panel .panel-body {
+    min-width: 0;
   }
   .rollup-strip {
     border-bottom: 1px solid var(--hairline);
@@ -356,7 +396,7 @@
   .overview {
     display: grid;
     gap: 7px;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
   }
   .metric {
     background: var(--canvas);
@@ -476,17 +516,42 @@
   .progress-cell {
     border-radius: 2px;
     display: inline-block;
-    height: 12px;
-    width: 12px;
+    height: 36px;
+    width: 36px;
   }
   .progress-cell.status-pending {
     background: var(--status-pending);
   }
   .progress-cell.status-in-progress {
     background: var(--status-in-progress);
+    animation: progress-in-progress-blink 1s ease-in-out infinite alternate;
+  }
+  @keyframes progress-in-progress-blink {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0.35;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .progress-cell.status-in-progress,
+    .progress-cell.status-review {
+      animation: none;
+    }
   }
   .progress-cell.status-review {
     background: var(--status-review);
+    animation: progress-review-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes progress-review-pulse {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(0.82);
+    }
   }
   .progress-cell.status-done {
     background: var(--status-done);
@@ -700,137 +765,185 @@
     .project-select {
       max-width: 100%;
     }
+    .topbar-main {
+      flex-wrap: wrap;
+    }
+    .workspace-panels {
+      border-top: 1px solid var(--hairline);
+      flex: 1 1 100%;
+    }
+    .workspace-panel + .workspace-panel {
+      border-left: 0;
+      border-top: 1px solid var(--hairline);
+    }
   }
 </style>
 
+<section class="workspace-toolbar" aria-label="Project workspace controls">
 <div class="topbar">
-  <select
-    id="project-select"
-    class="project-select"
-    aria-label="Select project"
-  ></select>
-  <button id="remove-project" class="btn btn-danger" type="button">
-    Remove project
-  </button>
-  <span id="current-tag" class="tag"></span>
-  <button id="switch-tag" class="btn" type="button">Switch tag</button>
-  <input
-    id="task-filter"
-    class="field"
-    type="search"
-    placeholder="Filter tasks…"
-    autocomplete="off"
-  />
-  <select id="filter-presets" class="field" aria-label="Filter presets"></select>
-  <button id="save-filter" class="btn" type="button">Save filter</button>
-  <span class="grow"></span>
-  <button id="add-project" class="btn btn-primary" type="button">
-    Add project
-  </button>
-  <form id="project-form" class="project-form">
-    <input
-      id="project-name"
-      class="field"
-      type="text"
-      placeholder="Name (optional)"
-      autocomplete="off"
-    />
-    <select id="server-select" class="field" aria-label="Server"></select>
-    <input
-      id="project-path"
-      class="field"
-      type="text"
-      placeholder="/home/user/my-project"
-      autocomplete="off"
-      required
-    />
-    <button class="btn btn-primary" type="submit">Add</button>
-    <button id="cancel-project" class="btn" type="button">Cancel</button>
-  </form>
-  <form id="tag-form" class="tag-form">
-    <input
-      id="tag-name"
-      class="field"
-      type="text"
-      placeholder="Tag name"
-      autocomplete="off"
-      required
-    />
-    <button class="btn btn-primary" type="submit">Switch</button>
-    <button id="cancel-tag" class="btn" type="button">Cancel</button>
-  </form>
-</div>
-<div id="banner" class="banner" role="alert"></div>
-<div id="add-task-panel" class="hidden">
-  <button
-    id="add-task-panel-toggle"
-    class="panel-toggle"
-    type="button"
-    aria-expanded="false"
-  >
-    <span class="panel-toggle-caret">▸</span> Add task
-  </button>
-  <span class="grow"></span>
-  <button id="refresh-project" class="btn" type="button">Refresh</button>
-  <span id="loading-indicator" class="loading-indicator" role="status">
-    <span class="loading-spinner"></span>
-    Updating…
-  </span>
-  <div id="add-task-body" class="panel-body hidden">
-    <button id="add-task-btn" class="btn btn-primary" type="button">
-      + Add task
+  <div class="topbar-main">
+    <select
+      id="project-select"
+      class="project-select"
+      aria-label="Select project"
+    ></select>
+    <span id="current-tag" class="tag"></span>
+    <span class="grow"></span>
+    <button id="refresh-project" class="btn" type="button">Refresh</button>
+    <button
+      id="auto-refresh-project"
+      class="btn"
+      type="button"
+      aria-pressed="false"
+    >
+      Auto-refresh: Off
     </button>
-    <span id="add-task-note" class="binary-note"></span>
-    <form id="add-task-form" class="project-form">
-      <textarea
-        id="add-task-prompt"
-        class="field"
-        placeholder="Task prompt"
-        autocomplete="off"
-        required
-      ></textarea>
-      <select id="add-task-priority" class="field" aria-label="Priority"></select>
+    <button
+      id="topbar-tools-toggle"
+      class="panel-toggle"
+      type="button"
+      aria-expanded="false"
+      aria-controls="topbar-tools"
+    >
+      <span class="panel-toggle-caret">▸</span> Project &amp; filters
+    </button>
+  </div>
+  <div id="topbar-tools" class="topbar-tools hidden">
+    <input
+      id="task-filter"
+      class="field"
+      type="search"
+      placeholder="Filter tasks…"
+      autocomplete="off"
+    />
+    <select
+      id="filter-presets"
+      class="field"
+      aria-label="Filter presets"
+    ></select>
+    <button id="save-filter" class="btn" type="button">Save filter</button>
+    <button id="switch-tag" class="btn" type="button">Switch tag</button>
+    <button id="add-project" class="btn btn-primary" type="button">
+      Add project
+    </button>
+    <button id="remove-project" class="btn btn-danger" type="button">
+      Remove project
+    </button>
+    <form id="project-form" class="project-form">
       <input
-        id="add-task-deps"
+        id="project-name"
         class="field"
         type="text"
-        placeholder="Dependencies (comma-separated task ids)"
+        placeholder="Name (optional)"
         autocomplete="off"
       />
-      <button class="btn btn-primary" type="submit">Add task</button>
-      <button id="add-task-cancel" class="btn" type="button">Cancel</button>
+      <select id="server-select" class="field" aria-label="Server"></select>
+      <input
+        id="project-path"
+        class="field"
+        type="text"
+        placeholder="/home/user/my-project"
+        autocomplete="off"
+        required
+      />
+      <button class="btn btn-primary" type="submit">Add</button>
+      <button id="cancel-project" class="btn" type="button">Cancel</button>
+    </form>
+    <form id="tag-form" class="tag-form">
+      <select
+        id="tag-name"
+        class="field"
+        aria-label="Tag to switch to"
+        required
+      ></select>
+      <button class="btn btn-primary" type="submit">Switch</button>
+      <button id="cancel-tag" class="btn" type="button">Cancel</button>
     </form>
   </div>
 </div>
-<div id="rollup-panel" class="hidden">
-  <button
-    id="rollup-panel-toggle"
-    class="panel-toggle"
-    type="button"
-    aria-expanded="false"
-  >
-    <span class="panel-toggle-caret">▸</span> Project rollup &amp; search
-  </button>
-  <div id="rollup-body" class="panel-body hidden">
-    <button id="rollup-refresh" class="btn" type="button">
-      Refresh project rollup
-    </button>
-    <span id="rollup-loading" class="loading-indicator" role="status">
-      <span class="loading-spinner"></span>
-      Refreshing…
-    </span>
-    <input
-      id="cross-search-input"
-      class="field"
-      type="search"
-      placeholder="Search all tasks…"
-      autocomplete="off"
-    />
-    <button id="cross-search-btn" class="btn" type="button">Search tasks</button>
-    <div id="rollup-strip" class="rollup-strip hidden"></div>
-    <div id="cross-search-results" class="rollup-strip hidden"></div>
+<div id="banner" class="banner" role="alert"></div>
+<div class="workspace-panels">
+  <div id="add-task-panel" class="workspace-panel hidden">
+    <div class="panel-header">
+      <button
+        id="add-task-panel-toggle"
+        class="panel-toggle"
+        type="button"
+        aria-expanded="false"
+      >
+        <span class="panel-toggle-caret">▸</span> Add task
+      </button>
+      <span class="grow"></span>
+      <span id="loading-indicator" class="loading-indicator" role="status">
+        <span class="loading-spinner"></span>
+        Updating…
+      </span>
+    </div>
+    <div id="add-task-body" class="panel-body hidden">
+      <button id="add-task-btn" class="btn btn-primary" type="button">
+        + Add task
+      </button>
+      <span id="add-task-note" class="binary-note"></span>
+      <form id="add-task-form" class="project-form">
+        <textarea
+          id="add-task-prompt"
+          class="field"
+          placeholder="Task prompt"
+          autocomplete="off"
+          required
+        ></textarea>
+        <select
+          id="add-task-priority"
+          class="field"
+          aria-label="Priority"
+        ></select>
+        <input
+          id="add-task-deps"
+          class="field"
+          type="text"
+          placeholder="Dependencies (comma-separated task ids)"
+          autocomplete="off"
+        />
+        <button class="btn btn-primary" type="submit">Add task</button>
+        <button id="add-task-cancel" class="btn" type="button">Cancel</button>
+      </form>
+    </div>
+  </div>
+  <div id="rollup-panel" class="workspace-panel hidden">
+    <div class="panel-header">
+      <button
+        id="rollup-panel-toggle"
+        class="panel-toggle"
+        type="button"
+        aria-expanded="false"
+      >
+        <span class="panel-toggle-caret">▸</span> Search all projects
+      </button>
+    </div>
+    <div id="rollup-body" class="panel-body hidden">
+      <button id="rollup-refresh" class="btn" type="button">
+        Refresh project rollup
+      </button>
+      <span id="rollup-loading" class="loading-indicator" role="status">
+        <span class="loading-spinner"></span>
+        Refreshing…
+      </span>
+      <input
+        id="cross-search-input"
+        class="field"
+        type="search"
+        placeholder="Search all tasks…"
+        autocomplete="off"
+      />
+      <button id="cross-search-btn" class="btn" type="button">
+        Search tasks
+      </button>
+      <div id="rollup-strip" class="rollup-strip hidden"></div>
+      <div id="cross-search-results" class="rollup-strip hidden"></div>
+    </div>
   </div>
 </div>
+</section>
 <div id="content"></div>
 
 <div id="detail-overlay" class="overlay">
@@ -889,11 +1002,14 @@
     next: null,
     overview: null,
     currentTag: null,
+    tags: [],
     detailTaskId: null,
     detailTask: null,
     detailLoading: false,
     refreshing: false,
     refreshToken: 0,
+    autoRefreshEnabled: false,
+    autoRefreshInterval: null,
     hasLoadedProjectData: false,
     otherFilter: "collapsed",
     taskFilter: "",
@@ -927,6 +1043,8 @@
     taskFilter: document.getElementById("task-filter"),
     filterPresets: document.getElementById("filter-presets"),
     saveFilter: document.getElementById("save-filter"),
+    topbarToolsToggle: document.getElementById("topbar-tools-toggle"),
+    topbarToolsBody: document.getElementById("topbar-tools"),
     addProject: document.getElementById("add-project"),
     projectForm: document.getElementById("project-form"),
     projectName: document.getElementById("project-name"),
@@ -948,6 +1066,7 @@
     addTaskCancel: document.getElementById("add-task-cancel"),
     banner: document.getElementById("banner"),
     refreshProject: document.getElementById("refresh-project"),
+    autoRefreshProject: document.getElementById("auto-refresh-project"),
     loadingIndicator: document.getElementById("loading-indicator"),
     rollupPanel: document.getElementById("rollup-panel"),
     rollupPanelToggle: document.getElementById("rollup-panel-toggle"),
@@ -1066,6 +1185,29 @@
     el.loadingIndicator.classList.toggle("show", refreshing);
     el.content.setAttribute("aria-busy", String(refreshing));
     el.refreshProject.disabled = refreshing || !state.projectId;
+  }
+  function renderAutoRefreshToggle() {
+    el.autoRefreshProject.textContent = state.autoRefreshEnabled
+      ? "Auto-refresh: On (30s)"
+      : "Auto-refresh: Off";
+    el.autoRefreshProject.setAttribute(
+      "aria-pressed",
+      String(state.autoRefreshEnabled),
+    );
+  }
+  function setAutoRefresh(enabled) {
+    state.autoRefreshEnabled = enabled;
+    if (state.autoRefreshInterval !== null) {
+      window.clearInterval(state.autoRefreshInterval);
+      state.autoRefreshInterval = null;
+    }
+    if (enabled) {
+      state.autoRefreshInterval = window.setInterval(function () {
+        if (!state.projectId || state.refreshing) return;
+        refreshProjectData().catch(handleError);
+      }, 30000);
+    }
+    renderAutoRefreshToggle();
   }
 
   var HUMAN_AGENT_ID = "human";
@@ -1273,10 +1415,20 @@
     el.currentTag.textContent =
       state.projectId && state.currentTag ? "tag: " + state.currentTag : "";
     el.currentTag.style.display = state.projectId ? "inline-flex" : "none";
-    el.switchTag.disabled = !state.projectId;
+    el.switchTag.disabled = !state.projectId || state.tags.length < 2;
     el.taskFilter.disabled = !state.projectId;
     el.refreshProject.disabled = !state.projectId || state.refreshing;
+    renderTagOptions();
     renderAddTaskGate();
+  }
+  function renderTagOptions() {
+    el.tagName.textContent = "";
+    state.tags.forEach(function (name) {
+      var opt = elem("option", null, name);
+      opt.value = name;
+      if (name === state.currentTag) opt.selected = true;
+      el.tagName.appendChild(opt);
+    });
   }
   function renderAddTaskGate() {
     var disabled = !state.project || !isBinary(),
@@ -1320,6 +1472,7 @@
       state.tasks = [];
       state.next = null;
       state.currentTag = null;
+      state.tags = [];
       renderTag();
       renderContent();
     }
@@ -1364,6 +1517,7 @@
     state.bulkSelected = {};
     state.bulkResults = null;
     state.currentTag = null;
+    state.tags = [];
     state.detailTaskId = null;
     state.detailTask = null;
     state.hasLoadedProjectData = false;
@@ -1388,6 +1542,7 @@
       state.tasks = (results[0] && results[0].tasks) || [];
       state.next = results[1] || null;
       state.currentTag = results[2] && results[2].currentTag;
+      state.tags = (results[2] && results[2].tags) || [];
       state.overview = results[3] || null;
       state.hasLoadedProjectData = true;
       renderTag();
@@ -1466,7 +1621,17 @@
     var box = elem("section", "next-tile");
     box.appendChild(elem("div", "next-title", "PM overview"));
     var grid = elem("div", "overview"),
-      c = (state.overview && state.overview.counts) || {};
+      c = (state.overview && state.overview.counts) || {},
+      runs = (state.overview && state.overview.executions) || [],
+      subAgentCount = new Set(
+        runs
+          .filter(function (run) {
+            return run.agentId !== HUMAN_AGENT_ID;
+          })
+          .map(function (run) {
+            return run.agentId;
+          }),
+      ).size;
     [
       ["total", "tasks"],
       ["ready", "ready"],
@@ -1474,14 +1639,16 @@
       ["blocked", "blocked"],
       ["done", "done"],
       ["activeAgents", "active agents"],
+      [subAgentCount, "sub-agents"],
     ].forEach(function (item) {
       var card = elem("div", "metric");
-      card.appendChild(elem("b", null, String(c[item[0]] || 0)));
+      card.appendChild(
+        elem("b", null, String(typeof item[0] === "string" ? c[item[0]] || 0 : item[0])),
+      );
       card.appendChild(elem("span", null, item[1]));
       grid.appendChild(card);
     });
     box.appendChild(grid);
-    var runs = (state.overview && state.overview.executions) || [];
     if (runs.length) {
       var list = elem("div", "exec-list");
       runs.forEach(function (run) {
@@ -2366,6 +2533,9 @@
   el.refreshProject.addEventListener("click", function () {
     refreshProjectData().catch(handleError);
   });
+  el.autoRefreshProject.addEventListener("click", function () {
+    setAutoRefresh(!state.autoRefreshEnabled);
+  });
   el.filterPresets.addEventListener("change", function () {
     if (el.filterPresets.value === "") return;
     var index = Number(el.filterPresets.value);
@@ -2396,6 +2566,9 @@
     void refreshRollup();
   });
   el.addProject.addEventListener("click", function () {
+    if (el.topbarToolsToggle.getAttribute("aria-expanded") === "false") {
+      el.topbarToolsToggle.click();
+    }
     el.projectForm.classList.add("show");
     el.projectName.focus();
   });
@@ -2437,6 +2610,9 @@
       .catch(handleError);
   });
   el.switchTag.addEventListener("click", function () {
+    if (el.topbarToolsToggle.getAttribute("aria-expanded") === "false") {
+      el.topbarToolsToggle.click();
+    }
     el.tagForm.classList.add("show");
     el.tagName.focus();
   });
@@ -2447,6 +2623,10 @@
     event.preventDefault();
     var name = el.tagName.value.trim();
     if (!name || !state.projectId) return;
+    if (name === state.currentTag) {
+      el.tagForm.classList.remove("show");
+      return;
+    }
     if (
       !window.confirm(
         'Switch the active tag for this project to "' +
@@ -2518,6 +2698,11 @@
     if (event.key === "Escape") closeDetail();
   });
 
+  wirePanelToggle(
+    el.topbarToolsToggle,
+    el.topbarToolsBody,
+    "taskmasterHub.topbarToolsCollapsed",
+  );
   wirePanelToggle(
     el.addTaskPanelToggle,
     el.addTaskBody,

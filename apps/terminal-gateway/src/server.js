@@ -3388,12 +3388,16 @@ async function handleTaskmaster(req, res, url) {
       return true;
     }
 
-    // GET /api/taskmaster/projects/:id/tags — read-only: current tag only
-    // (D12). task-master's `tags list` has no JSON mode (§1a) and parsing its
-    // styled table is exactly the kind of unverified contract §7 warns
-    // against — v1 exposes only the current tag, read directly from
-    // .taskmaster/state.json (a scoped, read-only exception to D2: there is
-    // no JSON-capable CLI equivalent for "what's the current tag").
+    // GET /api/taskmaster/projects/:id/tags — read-only: current tag plus
+    // the full tag list (D12, extended). task-master's `tags list` has no
+    // JSON mode (§1a) and parsing its styled table is exactly the kind of
+    // unverified contract §7 warns against, so neither value is derived from
+    // that command. currentTag is read directly from .taskmaster/state.json
+    // (the original scoped, read-only exception to D2). The tag list is
+    // derived the same way, from .taskmaster/tasks/tasks.json: task-master
+    // stores each tag as a top-level object key holding that tag's own
+    // {tasks, metadata} — verified against real multi-tag projects — so
+    // Object.keys() is a reliable, CLI-independent tag enumeration.
     if (
       req.method === "GET" &&
       seg.length === 3 &&
@@ -3403,18 +3407,34 @@ async function handleTaskmaster(req, res, url) {
       const resolved = resolveTaskmasterProject(res, seg[1]);
       if (!resolved) return true;
       const { project, server } = resolved;
+      let currentTag = "master";
       try {
         const { stdout } = await serverCmd(server, [
           "cat",
           `${project.path}/.taskmaster/state.json`,
         ]);
         const state = JSON.parse(stdout);
-        return sendJson(res, 200, {
-          currentTag: state.currentTag || "master",
-        });
+        currentTag = state.currentTag || "master";
       } catch {
-        return sendJson(res, 200, { currentTag: "master" });
+        // no state.json yet (fresh project) — fall back to "master".
       }
+      let tags = [currentTag];
+      try {
+        const { stdout } = await serverCmd(server, [
+          "cat",
+          `${project.path}/.taskmaster/tasks/tasks.json`,
+        ]);
+        const allTags = JSON.parse(stdout);
+        if (allTags && typeof allTags === "object") {
+          tags = Object.keys(allTags).filter(
+            (k) => allTags[k] && Array.isArray(allTags[k].tasks),
+          );
+          if (!tags.includes(currentTag)) tags.push(currentTag);
+        }
+      } catch {
+        // tasks.json missing/unparseable — fall back to just the current tag.
+      }
+      return sendJson(res, 200, { currentTag, tags });
     }
 
     // POST /api/taskmaster/projects/:id/tags/use — the single confirmed
