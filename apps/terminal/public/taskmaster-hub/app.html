@@ -515,9 +515,15 @@
   }
   .progress-cell {
     border-radius: 2px;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     height: 36px;
     width: 36px;
+    font-size: 15px;
+    line-height: 1;
+    color: rgba(43, 38, 34, 0.72);
+    user-select: none;
   }
   .progress-cell.status-pending {
     background: var(--status-pending);
@@ -1180,6 +1186,11 @@
   function statusClass(status) {
     return "status-" + String(status || "other").replace(/[^a-z-]/g, "");
   }
+  function statusIcon(status) {
+    if (status === "in-progress") return "▶"; // ▶ ongoing
+    if (status === "review") return "◉"; // ◉ under review
+    return "";
+  }
   function setRefreshState(refreshing) {
     state.refreshing = refreshing;
     el.loadingIndicator.classList.toggle("show", refreshing);
@@ -1718,7 +1729,7 @@
     filtered.forEach(function (task) {
       var cls = "progress-cell " + statusClass(task.status);
       if (isReadyTask(task)) cls += " ready";
-      var cell = elem("span", cls);
+      var cell = elem("span", cls, statusIcon(task.status) || null);
       cell.title =
         "#" +
         task.id +
@@ -1772,7 +1783,13 @@
     legendItems.forEach(function (item) {
       if (item[2] === 0) return;
       var row = elem("span", "task-grid-legend-item");
-      row.appendChild(elem("span", "progress-cell " + item[0]));
+      row.appendChild(
+        elem(
+          "span",
+          "progress-cell " + item[0],
+          statusIcon(item[0].replace(/^status-/, "")) || null,
+        ),
+      );
       row.appendChild(document.createTextNode(item[1] + " " + item[2]));
       legend.appendChild(row);
     });
@@ -1807,7 +1824,11 @@
         var grid = elem("div", "progress-grid");
         grid.setAttribute("aria-label", "Subtask progress");
         subtasks.forEach(function (subtask) {
-          var cell = elem("span", "progress-cell " + statusClass(subtask.status));
+          var cell = elem(
+            "span",
+            "progress-cell " + statusClass(subtask.status),
+            statusIcon(subtask.status) || null,
+          );
           cell.title =
             String(subtask.id) +
             " · " +
