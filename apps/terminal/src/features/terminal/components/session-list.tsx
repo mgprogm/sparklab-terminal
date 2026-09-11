@@ -1123,15 +1123,12 @@ export function SessionList({
         </div>
       </ScrollArea>
 
-      {/* Account footer — expanded: one 42px line mirroring the header, identity
-          (glyph + username) on the left and a compact icon-action group on the
-          right. Collapsed rail: the identity text is dropped and the icon group
-          stacks VERTICALLY (three 24px icons won't fit side-by-side in the 52px
-          rail — horizontal would overflow/clip), matching the vertical icon-rail
-          pattern; tooltips are side="right", already correct for the rail. The
-          primary "New" action leads the group as a filled button so it reads as
-          primary while sharing the row's icon geometry; settings gear and
-          sign-out follow as ghost icons. */}
+      {/* Account footer — a compact 34px line (was 42px). Settings + sign-out
+          are folded into a single "more" dropdown so only two controls ever
+          show (identity/more on the left, New on the right), instead of three
+          separate icon buttons. Collapsed rail: identity text drops and the
+          two icons stack vertically, matching the rail's icon pattern;
+          tooltips stay side="right" there. */}
       {showAccountFooter && (
         <>
           <Separator />
@@ -1139,17 +1136,56 @@ export function SessionList({
             className={cn(
               "flex shrink-0 items-center",
               collapsed
-                ? "flex-col justify-center gap-1 px-0 py-2"
-                : "h-[42px] justify-between gap-2 px-2.5",
+                ? "flex-col justify-center gap-1 px-0 py-1.5"
+                : "h-9 justify-between gap-1.5 px-2",
             )}
           >
-            {!collapsed && onLogout && (
-              <div className="flex min-w-0 items-center gap-2" title={username}>
-                <CircleUser className="text-muted-foreground size-4 shrink-0" />
-                <span className="text-foreground truncate text-xs font-medium">
-                  {username ?? "Signed in"}
-                </span>
-              </div>
+            {!collapsed && (onOpenSettings || onLogout) ? (
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="hover:bg-accent dark:hover:bg-accent/50 flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left"
+                        aria-label="Account menu"
+                      >
+                        <CircleUser className="text-muted-foreground size-4 shrink-0" />
+                        <span className="text-foreground truncate text-xs font-medium">
+                          {username ?? "Signed in"}
+                        </span>
+                      </button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    {username ? `Signed in as ${username}` : "Account"}
+                  </TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="start" className="w-44">
+                  {onOpenSettings && (
+                    <DropdownMenuItem onClick={onOpenSettings}>
+                      <Settings className="size-3.5" />
+                      Settings
+                    </DropdownMenuItem>
+                  )}
+                  {onOpenSettings && onLogout && <DropdownMenuSeparator />}
+                  {onLogout && (
+                    <DropdownMenuItem
+                      onClick={onLogout}
+                      disabled={logoutPending}
+                    >
+                      {logoutPending ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <LogOut className="size-3.5" />
+                      )}
+                      {username ? `Sign out (${username})` : "Sign out"}
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <div />
             )}
             <div
               className={cn(
@@ -1157,6 +1193,53 @@ export function SessionList({
                 collapsed && "flex-col gap-1",
               )}
             >
+              {collapsed && (onOpenSettings || onLogout) && (
+                <DropdownMenu>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label="Account menu"
+                          className="text-muted-foreground hover:text-secondary-foreground shrink-0"
+                        >
+                          <MoreHorizontal className="size-3.5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">
+                      {username ? `Signed in as ${username}` : "Account"}
+                    </TooltipContent>
+                  </Tooltip>
+                  <DropdownMenuContent
+                    align="start"
+                    side="right"
+                    className="w-44"
+                  >
+                    {onOpenSettings && (
+                      <DropdownMenuItem onClick={onOpenSettings}>
+                        <Settings className="size-3.5" />
+                        Settings
+                      </DropdownMenuItem>
+                    )}
+                    {onOpenSettings && onLogout && <DropdownMenuSeparator />}
+                    {onLogout && (
+                      <DropdownMenuItem
+                        onClick={onLogout}
+                        disabled={logoutPending}
+                      >
+                        {logoutPending ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <LogOut className="size-3.5" />
+                        )}
+                        {username ? `Sign out (${username})` : "Sign out"}
+                      </DropdownMenuItem>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -1173,45 +1256,6 @@ export function SessionList({
                   Create a new session
                 </TooltipContent>
               </Tooltip>
-              {onOpenSettings && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Settings"
-                      onClick={onOpenSettings}
-                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
-                    >
-                      <Settings className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">Settings</TooltipContent>
-                </Tooltip>
-              )}
-              {onLogout && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Sign out"
-                      onClick={onLogout}
-                      disabled={logoutPending}
-                      className="text-muted-foreground hover:text-secondary-foreground shrink-0"
-                    >
-                      {logoutPending ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                      ) : (
-                        <LogOut className="size-3.5" />
-                      )}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="right">
-                    {username ? `Sign out (${username})` : "Sign out"}
-                  </TooltipContent>
-                </Tooltip>
-              )}
             </div>
           </div>
         </>
