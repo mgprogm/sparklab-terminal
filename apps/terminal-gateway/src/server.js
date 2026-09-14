@@ -541,11 +541,33 @@ function sshEnvFor(server) {
   return {};
 }
 
+// The gateway process itself may be launched from inside a tmux pane (e.g. a
+// dev shell, or PM2 replaying a resurrected dump that captured env from a
+// tmux session before a host reboot). tmux treats a set $TMUX as "you are
+// already inside this session" and targets ITS socket instead of the default
+// `/tmp/tmux-<uid>/default` -- so every child tmux invocation (new-session,
+// attach-session, set-option, send-keys...) fights over that inherited,
+// often-dead socket instead of the real one. Strip TMUX/TMUX_PANE so every
+// spawned tmux client always resolves the default socket independently of
+// whatever tmux pane the gateway process happens to be running in.
+let cachedSanitizedEnv = null;
+function sanitizedProcessEnv() {
+  if (!("TMUX" in process.env) && !("TMUX_PANE" in process.env)) {
+    return process.env;
+  }
+  if (!cachedSanitizedEnv) {
+    const { TMUX, TMUX_PANE, ...rest } = process.env;
+    cachedSanitizedEnv = rest;
+  }
+  return cachedSanitizedEnv;
+}
+
 // Merge process.env with the server's extra ssh env. Only allocates a new object
 // when there's something to add.
 function childEnvFor(server) {
   const extra = sshEnvFor(server);
-  return Object.keys(extra).length ? { ...process.env, ...extra } : process.env;
+  const base = sanitizedProcessEnv();
+  return Object.keys(extra).length ? { ...base, ...extra } : base;
 }
 
 // Shared ssh options for BOTH control execs and the reachability probe. Two
