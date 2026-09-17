@@ -752,6 +752,19 @@ export const TestServerResponseSchema = z.object({
 });
 export type TestServerResponse = z.infer<typeof TestServerResponseSchema>;
 
+/** Request body for PATCH /api/servers/:id — rename only (connection fields
+ *  are immutable after add; remove + re-add to change host/user/port/auth).
+ *  Also valid for the implicit "local" server ("This machine"), which has no
+ *  connection fields to begin with. */
+export const UpdateServerRequestSchema = z.object({
+  name: z.string().min(1).max(64),
+});
+export type UpdateServerRequest = z.infer<typeof UpdateServerRequestSchema>;
+
+/** Response body for PATCH /api/servers/:id (200 OK): the updated entry. */
+export const UpdateServerResponseSchema = ServerInfoSchema;
+export type UpdateServerResponse = z.infer<typeof UpdateServerResponseSchema>;
+
 // ---------------------------------------------------------------------------
 // REST: Kanban /api/kanban/*
 // ---------------------------------------------------------------------------

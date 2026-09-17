@@ -7,6 +7,9 @@ import {
   type TestServerRequest,
   type TestServerResponse,
   TestServerResponseSchema,
+  type UpdateServerRequest,
+  type UpdateServerResponse,
+  UpdateServerResponseSchema,
 } from "@sparklab/shared-types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -61,6 +64,26 @@ async function deleteServerApi(id: string): Promise<void> {
   }
 }
 
+async function updateServerApi({
+  id,
+  ...body
+}: UpdateServerRequest & { id: string }): Promise<UpdateServerResponse> {
+  const res = await fetch(`/api/servers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) {
+    const err = (await res
+      .json()
+      .catch(() => ({ error: String(res.status) }))) as { error?: string };
+    throw new Error(err.error ?? String(res.status));
+  }
+  const data: unknown = await res.json();
+  return UpdateServerResponseSchema.parse(data);
+}
+
 async function testServerApi(
   body: TestServerRequest,
 ): Promise<TestServerResponse> {
@@ -105,6 +128,16 @@ export function useDeleteServer() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: deleteServerApi,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: serverKeys.list() });
+    },
+  });
+}
+
+export function useUpdateServer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateServerApi,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: serverKeys.list() });
     },

@@ -4,8 +4,15 @@
 // .env (NOT in tmux, NOT in the metadata sidecar). SSH auth is key-based by
 // default; an optional per-server `password` may be stored here (plaintext, this
 // gitignored file only) for hosts that require password auth. The implicit
-// "local" server (the gateway host's own tmux, no ssh) is ALWAYS present, is
-// never written to the file, and cannot be removed.
+// "local" server (the gateway host's own tmux, no ssh) is ALWAYS present and
+// cannot be removed or have its connection fields changed — but its display
+// NAME can be renamed, which is the one thing about it that IS persisted (as
+// `localName` alongside the ssh server list, see the file shape below).
+//
+// File shape is `{ localName?: string, servers: SshServerRecord[] }`. An
+// older file that is a bare array (pre-rename-feature) is still read as
+// `servers` with no `localName` override; the next persist() rewrites it to
+// the object shape.
 //
 // Atomic writes mirror metadata.js: serialize to servers.json.tmp then rename
 // over the live file (same directory => same filesystem). A missing/corrupt
@@ -33,7 +40,8 @@ const LOCAL_SERVER = Object.freeze({
 // "/" in a qualified session id).
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-let store = []; // array of ssh server records; "local" is implicit, never stored
+let store = []; // array of ssh server records; "local" is implicit
+let localName = null; // display-name override for "local"; null => default
 
 function sanitize(entry) {
   if (!entry || typeof entry !== "object") return null;
@@ -64,27 +72,46 @@ function load() {
   try {
     const raw = fs.readFileSync(FILE, "utf8");
     const parsed = JSON.parse(raw);
-    store = Array.isArray(parsed) ? parsed.map(sanitize).filter(Boolean) : [];
+    // Back-compat: a bare array is the pre-rename-feature shape (servers only).
+    const rawServers = Array.isArray(parsed) ? parsed : parsed?.servers;
+    store = Array.isArray(rawServers)
+      ? rawServers.map(sanitize).filter(Boolean)
+      : [];
+    localName =
+      !Array.isArray(parsed) &&
+      typeof parsed?.localName === "string" &&
+      parsed.localName.trim()
+        ? parsed.localName.trim()
+        : null;
   } catch {
     // Missing or corrupt file: just the implicit local server.
     store = [];
+    localName = null;
   }
   return store;
 }
 
 function persist() {
-  const json = JSON.stringify(store, null, 2);
+  const json = JSON.stringify(
+    { ...(localName ? { localName } : {}), servers: store },
+    null,
+    2,
+  );
   fs.writeFileSync(TMP, json, "utf8");
   fs.renameSync(TMP, FILE);
 }
 
+function localServer() {
+  return localName ? { ...LOCAL_SERVER, name: localName } : { ...LOCAL_SERVER };
+}
+
 // All servers, local ALWAYS first. Returns copies (callers must not mutate).
 function list() {
-  return [{ ...LOCAL_SERVER }, ...store.map((s) => ({ ...s }))];
+  return [localServer(), ...store.map((s) => ({ ...s }))];
 }
 
 function get(id) {
-  if (id === "local") return { ...LOCAL_SERVER };
+  if (id === "local") return localServer();
   const found = store.find((s) => s.id === id);
   return found ? { ...found } : undefined;
 }
@@ -111,6 +138,25 @@ function remove(id) {
   return true;
 }
 
+// Rename a server (the only mutable field post-add; connection params are
+// immutable — remove + re-add to change host/user/port/auth). Works for
+// "local" too (persists as `localName`). Returns the updated entry, or
+// undefined if `id` isn't "local" and isn't a known ssh server.
+function update(id, patch) {
+  const name = typeof patch?.name === "string" ? patch.name.trim() : "";
+  if (!name) throw new Error("name is required");
+  if (id === "local") {
+    localName = name === LOCAL_SERVER.name ? null : name;
+    persist();
+    return localServer();
+  }
+  const found = store.find((s) => s.id === id);
+  if (!found) return undefined;
+  found.name = name;
+  persist();
+  return { ...found };
+}
+
 load();
 
-export default { load, list, get, add, remove, LOCAL_SERVER };
+export default { load, list, get, add, update, remove, LOCAL_SERVER };

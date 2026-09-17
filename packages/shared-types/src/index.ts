@@ -83,6 +83,8 @@ export {
   CreateServerResponseSchema,
   TestServerRequestSchema,
   TestServerResponseSchema,
+  UpdateServerRequestSchema,
+  UpdateServerResponseSchema,
   type ServerId,
   type ServerType,
   type ServerReachability,
@@ -93,6 +95,8 @@ export {
   type CreateServerResponse,
   type TestServerRequest,
   type TestServerResponse,
+  type UpdateServerRequest,
+  type UpdateServerResponse,
   // REST: Kanban /api/kanban/*
   KanbanCardSchema,
   KanbanColumnSchema,

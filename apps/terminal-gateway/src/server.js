@@ -7486,6 +7486,47 @@ async function handleApi(req, res, url) {
     return true;
   }
 
+  // PATCH /api/servers/:id — rename only (works for "local" too).
+  if (req.method === "PATCH" && parts.length === 3 && parts[1] === "servers") {
+    const id = decodeURIComponent(parts[2]);
+    if (!registry.get(id)) {
+      return sendJson(res, 404, { error: "server not found" });
+    }
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "body must be a JSON object" });
+      }
+    } catch (err) {
+      if (err.code === "BODY_TOO_LARGE") {
+        res.writeHead(413, {
+          "content-type": "application/json; charset=utf-8",
+        });
+        res.end(JSON.stringify({ error: "request too large" }));
+        return true;
+      }
+      return sendJson(res, 400, { error: "malformed JSON body" });
+    }
+    if (
+      typeof body.name !== "string" ||
+      body.name.trim().length < 1 ||
+      body.name.length > 64
+    ) {
+      return sendJson(res, 400, { error: "name must be 1-64 characters" });
+    }
+    let updated;
+    try {
+      updated = registry.update(id, { name: body.name });
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+    if (!updated) return sendJson(res, 404, { error: "server not found" });
+    const probe = await probeServer(updated);
+    return sendJson(res, 200, serverInfoOf(updated, probe));
+  }
+
   // POST /api/sessions
   if (req.method === "POST" && parts.length === 2 && parts[1] === "sessions") {
     let body = {};

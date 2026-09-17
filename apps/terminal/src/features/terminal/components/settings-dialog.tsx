@@ -31,9 +31,12 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@sparklab/ui/components/ui/dialog";
+import { Input } from "@sparklab/ui/components/ui/input";
+import { Label } from "@sparklab/ui/components/ui/label";
 import { cn } from "@sparklab/ui/lib/utils";
 import {
   Bell,
@@ -42,6 +45,7 @@ import {
   CircleUser,
   Loader2,
   LogOut,
+  Pencil,
   Plug,
   Plus,
   Server,
@@ -56,7 +60,11 @@ import {
   usePushNotifications,
   usePushSettings,
 } from "../hooks/use-push-notifications";
-import { useServers, useDeleteServer } from "../hooks/use-servers";
+import {
+  useServers,
+  useDeleteServer,
+  useUpdateServer,
+} from "../hooks/use-servers";
 import {
   isServerUnreachable,
   serverDotClass,
@@ -128,10 +136,37 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
     refetch,
   } = useServers();
   const deleteServer = useDeleteServer();
+  const updateServer = useUpdateServer();
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<ServerInfo | null>(null);
+  const [renameTarget, setRenameTarget] = useState<ServerInfo | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const sshServers = (servers ?? []).filter((s) => s.type !== "local");
+
+  const openRename = (s: ServerInfo) => {
+    setRenameError(null);
+    setRenameValue(s.name);
+    setRenameTarget(s);
+  };
+
+  const handleRename = () => {
+    if (!renameTarget || updateServer.isPending) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === renameTarget.name) {
+      setRenameTarget(null);
+      return;
+    }
+    setRenameError(null);
+    updateServer.mutate(
+      { id: renameTarget.id, name: trimmed },
+      {
+        onSuccess: () => setRenameTarget(null),
+        onError: (err: Error) => setRenameError(err.message),
+      },
+    );
+  };
 
   return (
     <Section>
@@ -203,16 +238,26 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
                     </span>
                   </div>
                 </div>
-                {s.type !== "local" && (
+                <div className="flex shrink-0 items-center gap-0.5">
                   <button
                     type="button"
-                    className="text-muted-foreground hover:text-destructive shrink-0 rounded-sm p-1 transition-colors"
-                    title="Remove server"
-                    onClick={() => setRemoveTarget(s)}
+                    className="text-muted-foreground hover:bg-accent hover:text-secondary-foreground rounded-sm p-1 transition-colors"
+                    title="Rename server"
+                    onClick={() => openRename(s)}
                   >
-                    <Trash2 className="size-3.5" />
+                    <Pencil className="size-3.5" />
                   </button>
-                )}
+                  {s.type !== "local" && (
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:text-destructive rounded-sm p-1 transition-colors"
+                      title="Remove server"
+                      onClick={() => setRemoveTarget(s)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -229,6 +274,68 @@ function ServersSection({ onDialogClose }: { onDialogClose?: () => void }) {
         onOpenChange={setAddOpen}
         onDialogClose={onDialogClose}
       />
+
+      <Dialog
+        open={!!renameTarget}
+        onOpenChange={(open) => {
+          if (!open && !updateServer.isPending) setRenameTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename server</DialogTitle>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleRename();
+            }}
+          >
+            <div className="space-y-1.5">
+              <Label
+                htmlFor="server-rename-name"
+                className="text-muted-foreground text-xs"
+              >
+                Display name
+              </Label>
+              <Input
+                id="server-rename-name"
+                value={renameValue}
+                onChange={(e) => {
+                  setRenameValue(e.target.value);
+                  setRenameError(null);
+                }}
+                autoFocus
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={64}
+              />
+              {renameError && (
+                <p className="text-destructive text-xs">{renameError}</p>
+              )}
+            </div>
+            <DialogFooter className="mt-4">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={updateServer.isPending}
+                onClick={() => setRenameTarget(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={updateServer.isPending || !renameValue.trim()}
+              >
+                {updateServer.isPending && (
+                  <Loader2 className="size-3.5 animate-spin" />
+                )}
+                {updateServer.isPending ? "Saving…" : "Save"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={!!removeTarget}
