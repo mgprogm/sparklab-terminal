@@ -54,7 +54,6 @@ import {
   EyeOff,
   File as FileIcon,
   FileSymlink,
-  Folder,
   FolderPlus,
   HardDrive,
   Loader2,
@@ -73,6 +72,7 @@ import {
 
 import { FileConflictView } from "./file-conflict-view";
 import { FileEditor } from "./file-editor";
+import { FileTypeIcon } from "../file-icons/file-type-icon";
 import {
   basename,
   dirname,
@@ -158,12 +158,20 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
   });
 }
 
-function EntryIcon({ type }: { type: FsEntry["type"] }) {
-  if (type === "dir")
-    return <Folder className="text-chart-2 size-4 shrink-0" />;
+/**
+ * Per-entry icon. Files and directories get their vscode-icons file-type glyph
+ * (see features/terminal/file-icons); symlinks and "other" (socket/fifo/device)
+ * keep their lucide glyph, because those are entry KINDS rather than file types
+ * — a symlink's own name says nothing about what it points at, and the row
+ * already renders the link target beside it.
+ */
+function EntryIcon({ type, name }: { type: FsEntry["type"]; name: string }) {
+  if (type === "dir") return <FileTypeIcon name={name} kind="dir" />;
   if (type === "symlink")
     return <FileSymlink className="text-muted-foreground size-4 shrink-0" />;
-  return <FileIcon className="text-muted-foreground size-4 shrink-0" />;
+  if (type === "other")
+    return <FileIcon className="text-muted-foreground size-4 shrink-0" />;
+  return <FileTypeIcon name={name} kind="file" />;
 }
 
 // ---- Component ----
@@ -1002,7 +1010,7 @@ export function FileExplorerDialog({
                             onClick={() => selectEntry(entry)}
                             onDoubleClick={() => openEntry(entry)}
                           >
-                            <EntryIcon type={entry.type} />
+                            <EntryIcon type={entry.type} name={entry.name} />
                             <span className="text-foreground min-w-0 flex-1 truncate">
                               {entry.name}
                               {entry.type === "symlink" &&
@@ -1140,6 +1148,11 @@ export function FileExplorerDialog({
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="border-border flex items-center justify-between gap-2 border-b px-3 py-2">
                     <span className="text-foreground flex min-w-0 items-center gap-1.5 truncate text-xs font-medium">
+                      <FileTypeIcon
+                        name={basename(readQuery.data.path)}
+                        kind="file"
+                        className="size-3.5 shrink-0"
+                      />
                       <span className="truncate">
                         {basename(readQuery.data.path)}
                       </span>
