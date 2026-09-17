@@ -87,17 +87,54 @@ a known, accepted difference.
 
 ## Which entries get which icon
 
-| Entry type | Icon                                                   |
-| ---------- | ------------------------------------------------------ |
-| `dir`      | vscode-icons folder glyph, default folder when unknown |
-| `file`     | vscode-icons file glyph, default file when unknown     |
-| `symlink`  | lucide `FileSymlink` (unchanged)                       |
-| `other`    | lucide `File` (unchanged)                              |
+`EntryIcon` (`file-icons/entry-icon.tsx`) is the single decision point:
 
-`symlink` and `other` stay on lucide on purpose: those are entry **kinds**, not
-file types. A symlink's own name says nothing about its target (which may not
-even exist), and the row already renders `→ target` beside it; `other` covers
-sockets, FIFOs and devices, which have no file type at all.
+| Entry type | Colourful (default)       | Plain                     |
+| ---------- | ------------------------- | ------------------------- |
+| `dir`      | vscode-icons folder glyph | lucide `Folder` (chart-2) |
+| `file`     | vscode-icons file glyph   | lucide `File`             |
+| `symlink`  | lucide `FileSymlink`      | lucide `FileSymlink`      |
+| `other`    | lucide `File`             | lucide `File`             |
+
+`symlink` and `other` stay on lucide in **both** themes on purpose: those are
+entry **kinds**, not file types. A symlink's own name says nothing about its
+target (which may not even exist), and the row already renders `→ target`
+beside it; `other` covers sockets, FIFOs and devices, which have no file type
+at all.
+
+## The Plain escape hatch
+
+Settings → Appearance → **File icons** switches between `Colourful`
+(vscode-icons, the default) and `Plain`. Under Plain the explorer renders
+exactly what it did before this feature landed — same lucide glyphs, same
+`text-chart-2` folder tint — and the preview-pane header drops its glyph
+entirely rather than substituting one.
+
+The preference is `fileIconTheme` on the terminal store, persisted beside
+`terminalFontSize`. The explorer reads it **once** per render and threads it
+down to each row: a listing can hold thousands of entries, and a store
+subscription per row would be wasteful.
+
+## Where the icons deliberately do NOT appear
+
+An earlier draft of this document listed several other surfaces as "to do".
+Working through them, most turned out not to be worth building, and one does
+not exist:
+
+- **Sidebar session tree** — sessions, orgs and projects are not files. Every
+  row would draw the same default glyph, conveying nothing.
+- **PM and Kanban artifacts** — tasks and cards are not files either.
+- **Notes artifact** — every page is Markdown, so every page would carry an
+  identical glyph: noise with no information.
+- **File editor "tab strip"** — there isn't one. `FileEditor` is a bare
+  CodeMirror surface; the filename lives in the explorer's preview header,
+  which already has its icon.
+- **Explorer breadcrumb** — a path like
+  `/home/user/sparklab-terminal/apps/terminal/src` would carry six coloured
+  folder glyphs in one single-line strip. Clutter, not navigation.
+
+The rule that falls out: an icon earns its place where entries differ in type.
+Where they are uniform, or are not files at all, it is decoration.
 
 ## Regenerating
 
@@ -116,10 +153,29 @@ whose SVG is missing, so the two can never drift. A unit test
 (`__tests__/file-icons.test.ts`) asserts that invariant, which is why
 `FileTypeIcon` has no runtime 404 fallback.
 
+## Verification
+
+Beyond the unit tests, the feature was driven end to end in the real app — a
+real gateway over a real tmux session, logged in through the real auth gate,
+explorer opened on this repository's own root:
+
+- 22 icons rendered, 0 broken, 0 HTTP failures, and 1 legitimate fallback
+  (`deploy/`, which upstream has no folder icon for)
+- switching to Plain drops to 0 vscode-icons images, survives a reload, and
+  switching back restores all 22
+
+The contact sheet that caught the `.css` collision is worth rebuilding whenever
+the map is regenerated: render the map's resolution over a list of real
+filenames onto the `#2b2622` canvas and look at it. No unit test would have
+caught that bug, because the test would have asserted the same wrong answer.
+
 ## Not done
 
-- No icons in the sidebar session tree, the Notes/PM/Kanban artifacts, or the
-  file editor tab strip — the explorer is the only surface wired up.
-- No user setting to switch icon themes or turn the icons off.
+- **E2E gate.** The repo's Playwright suite needs a production build plus a
+  gateway on 3907, and the browser build shipped in this container (1194) does
+  not match what `@playwright/test@1.61.1` expects (1228), so `apps/e2e` could
+  not be run. The manual drive above covers the same ground.
 - The `_opened` folder variants are available upstream if the explorer ever
   grows a tree view with expand/collapse.
+- No second icon set (e.g. Material) behind the `fileIconTheme` setting — the
+  type is a union, so adding one is additive.
