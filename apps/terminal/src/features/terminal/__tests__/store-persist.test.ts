@@ -25,6 +25,7 @@ describe("useTerminalStore persistence", () => {
       layout,
       sidebarCollapsed: true,
       terminalFontSize: 16,
+      fileIconTheme: "plain",
       mobileSidebarOpen: true,
     });
     expect(persisted).toEqual({
@@ -33,6 +34,7 @@ describe("useTerminalStore persistence", () => {
       layout,
       sidebarCollapsed: true,
       terminalFontSize: 16,
+      fileIconTheme: "plain",
       collapsedGroups: {},
     });
     expect(persisted).not.toHaveProperty("mobileSidebarOpen");

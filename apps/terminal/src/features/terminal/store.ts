@@ -12,6 +12,12 @@ import {
  * (13/14 by breakpoint); a number overrides it with a fixed size. */
 export type TerminalFontSize = number | "auto";
 
+/** Which glyph set the File Explorer draws per directory entry.
+ *  "vscode-icons" = the vendored file-type icon set (default);
+ *  "plain" = the original single-colour lucide folder/file pair, for
+ *  anyone who finds the colour noisy. See docs/FILE-ICONS.md. */
+export type FileIconTheme = "vscode-icons" | "plain";
+
 /** The selectable sections of the settings dialog. Order = tab order. */
 export const SETTINGS_SECTIONS = [
   "appearance",
@@ -283,6 +289,10 @@ interface TerminalState {
   terminalFontSize: TerminalFontSize;
   setTerminalFontSize: (size: TerminalFontSize) => void;
 
+  /** File Explorer entry glyphs. Persisted like terminalFontSize. */
+  fileIconTheme: FileIconTheme;
+  setFileIconTheme: (theme: FileIconTheme) => void;
+
   /** Whether the mobile sidebar drawer is open. NOT persisted — a persisted
    * open drawer would flash on reload. */
   mobileSidebarOpen: boolean;
@@ -495,6 +505,9 @@ export const useTerminalStore = create<TerminalState>()(
       terminalFontSize: "auto",
       setTerminalFontSize: (size) => set({ terminalFontSize: size }),
 
+      fileIconTheme: "vscode-icons",
+      setFileIconTheme: (theme) => set({ fileIconTheme: theme }),
+
       mobileSidebarOpen: false,
       setMobileSidebarOpen: (open) => set({ mobileSidebarOpen: open }),
       toggleMobileSidebar: () =>
@@ -576,6 +589,7 @@ export const useTerminalStore = create<TerminalState>()(
         layout: state.layout,
         sidebarCollapsed: state.sidebarCollapsed,
         terminalFontSize: state.terminalFontSize,
+        fileIconTheme: state.fileIconTheme,
         collapsedGroups: state.collapsedGroups,
       }),
       // Normalize whatever came out of storage (possibly pre-multi-window,

@@ -72,6 +72,7 @@ import {
 } from "../server-grouping";
 import {
   useTerminalStore,
+  type FileIconTheme,
   type SettingsSection,
   type TerminalFontSize,
 } from "../store";
@@ -93,6 +94,11 @@ const FONT_SIZE_OPTIONS: { label: string; value: TerminalFontSize }[] = [
   { label: "14", value: 14 },
   { label: "16", value: 16 },
   { label: "18", value: 18 },
+];
+
+const FILE_ICON_OPTIONS: { label: string; value: FileIconTheme }[] = [
+  { label: "Colourful", value: "vscode-icons" },
+  { label: "Plain", value: "plain" },
 ];
 
 /** Tab definitions — order matches SETTINGS_SECTIONS (the URL/tab order). */
@@ -538,6 +544,8 @@ export function SettingsDialog({
 }) {
   const fontSize = useTerminalStore((s) => s.terminalFontSize);
   const setFontSize = useTerminalStore((s) => s.setTerminalFontSize);
+  const fileIconTheme = useTerminalStore((s) => s.fileIconTheme);
+  const setFileIconTheme = useTerminalStore((s) => s.setFileIconTheme);
   const section = useTerminalStore((s) => s.settingsSection);
   const setSection = useTerminalStore((s) => s.setSettingsSection);
 
@@ -616,7 +624,36 @@ export function SettingsDialog({
                   })}
                 </div>
               </div>
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <span className="text-foreground text-sm">File icons</span>
+                <div className="border-border flex overflow-hidden rounded-md border">
+                  {FILE_ICON_OPTIONS.map((opt) => {
+                    const active = opt.value === fileIconTheme;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setFileIconTheme(opt.value)}
+                        aria-pressed={active}
+                        className={cn(
+                          "border-border min-w-9 border-l px-2.5 py-1 text-xs transition-colors first:border-l-0",
+                          active
+                            ? "bg-accent text-foreground"
+                            : "text-muted-foreground hover:bg-accent/50",
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <p className="text-muted-foreground mt-2.5 text-xs">
+                File Explorer entries use the vscode-icons set. Switch to Plain
+                for single-colour folder and file glyphs.
+              </p>
+
+              <p className="text-muted-foreground mt-4 text-xs">
                 The terminal theme is dark by design (per DESIGN.md); there is
                 no theme toggle.
               </p>
