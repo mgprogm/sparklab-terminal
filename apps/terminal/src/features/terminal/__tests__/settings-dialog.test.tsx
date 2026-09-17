@@ -27,12 +27,14 @@ describe("SettingsDialog", () => {
   beforeEach(() => {
     useTerminalStore.setState({
       terminalFontSize: "auto",
+      fileIconTheme: "vscode-icons",
       settingsSection: "appearance",
     });
   });
   afterEach(() => {
     useTerminalStore.setState({
       terminalFontSize: "auto",
+      fileIconTheme: "vscode-icons",
       settingsSection: "appearance",
     });
   });
@@ -58,6 +60,28 @@ describe("SettingsDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Auto" }));
     expect(useTerminalStore.getState().terminalFontSize).toBe("auto");
+  });
+
+  it("switches the file icon theme from the Appearance tab", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    // Colourful (vscode-icons) is the default.
+    expect(useTerminalStore.getState().fileIconTheme).toBe("vscode-icons");
+    expect(screen.getByRole("button", { name: "Colourful" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Plain" }));
+    expect(useTerminalStore.getState().fileIconTheme).toBe("plain");
+    expect(screen.getByRole("button", { name: "Plain" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Colourful" }));
+    expect(useTerminalStore.getState().fileIconTheme).toBe("vscode-icons");
   });
 
   it("explains where agent model controls live on the Agent tab", async () => {

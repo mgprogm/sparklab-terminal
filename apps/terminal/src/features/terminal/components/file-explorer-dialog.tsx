@@ -52,9 +52,6 @@ import {
   Download,
   Eye,
   EyeOff,
-  File as FileIcon,
-  FileSymlink,
-  Folder,
   FolderPlus,
   HardDrive,
   Loader2,
@@ -73,6 +70,8 @@ import {
 
 import { FileConflictView } from "./file-conflict-view";
 import { FileEditor } from "./file-editor";
+import { EntryIcon } from "../file-icons/entry-icon";
+import { FileTypeIcon } from "../file-icons/file-type-icon";
 import {
   basename,
   dirname,
@@ -94,6 +93,7 @@ import {
   useFsWrite,
 } from "../hooks/use-file-explorer";
 import { useMediaQuery } from "../hooks/use-media-query";
+import { useTerminalStore } from "../store";
 
 import type { FsEntry } from "@sparklab/shared-types";
 
@@ -158,14 +158,6 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
   });
 }
 
-function EntryIcon({ type }: { type: FsEntry["type"] }) {
-  if (type === "dir")
-    return <Folder className="text-chart-2 size-4 shrink-0" />;
-  if (type === "symlink")
-    return <FileSymlink className="text-muted-foreground size-4 shrink-0" />;
-  return <FileIcon className="text-muted-foreground size-4 shrink-0" />;
-}
-
 // ---- Component ----
 
 export function FileExplorerDialog({
@@ -184,6 +176,9 @@ export function FileExplorerDialog({
   const isMobile = useMediaQuery("(max-width: 767px)");
   const sid = sessionId ?? "";
   const queryClient = useQueryClient();
+  // Read once and thread down: a listing can be thousands of rows, so a store
+  // subscription per EntryIcon would be wasteful.
+  const fileIconTheme = useTerminalStore((s) => s.fileIconTheme);
 
   // Current directory: seeded from the first list response (null => "resolve
   // the session cwd"). Reset whenever the dialog (re)opens or the session
@@ -1002,7 +997,11 @@ export function FileExplorerDialog({
                             onClick={() => selectEntry(entry)}
                             onDoubleClick={() => openEntry(entry)}
                           >
-                            <EntryIcon type={entry.type} />
+                            <EntryIcon
+                              type={entry.type}
+                              name={entry.name}
+                              theme={fileIconTheme}
+                            />
                             <span className="text-foreground min-w-0 flex-1 truncate">
                               {entry.name}
                               {entry.type === "symlink" &&
@@ -1140,6 +1139,13 @@ export function FileExplorerDialog({
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="border-border flex items-center justify-between gap-2 border-b px-3 py-2">
                     <span className="text-foreground flex min-w-0 items-center gap-1.5 truncate text-xs font-medium">
+                      {fileIconTheme === "vscode-icons" && (
+                        <FileTypeIcon
+                          name={basename(readQuery.data.path)}
+                          kind="file"
+                          className="size-3.5 shrink-0"
+                        />
+                      )}
                       <span className="truncate">
                         {basename(readQuery.data.path)}
                       </span>

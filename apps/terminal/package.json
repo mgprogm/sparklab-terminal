@@ -9,7 +9,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "icons:generate": "node scripts/generate-file-icons.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
