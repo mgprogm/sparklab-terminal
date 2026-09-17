@@ -190,6 +190,34 @@ describe("SessionSidebar", () => {
     });
   });
 
+  describe("dead session row click", () => {
+    const deadSession: SessionInfo = {
+      id: "web-alpha",
+      name: "alpha",
+      createdAt: 1720900000000,
+      tags: [],
+      currentCommand: "",
+      attached: false,
+      alive: false,
+      reachable: true,
+    };
+
+    it("reconnects instead of selecting (no tmux process to attach to)", async () => {
+      const user = userEvent.setup();
+      const onCreateSession = vi.fn().mockResolvedValue(undefined);
+      const { props } = renderSidebar({
+        sessions: [deadSession],
+        activeSessionId: null,
+        onCreateSession,
+      });
+
+      await user.click(screen.getByText("alpha"));
+
+      expect(onCreateSession).toHaveBeenCalledWith({ name: "alpha" });
+      expect(props.onSelectSession).not.toHaveBeenCalled();
+    });
+  });
+
   describe("per-session mute", () => {
     it("mutes an unmuted session via onUpdateSession({ muted: true })", async () => {
       const user = userEvent.setup();

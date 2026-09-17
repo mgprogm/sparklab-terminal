@@ -248,6 +248,15 @@ export function SessionList({
   const [moveProject, setMoveProject] = useState("");
   const [moveBusy, setMoveBusy] = useState(false);
 
+  // ---- Reconnect (dead-session replacement) state ----
+  // handleReconnect used to swallow create/delete failures entirely (a bare
+  // `.catch(() => {})`), so a failed Reconnect looked identical to success --
+  // nothing happened and the row just stayed "session ended". Surface it.
+  const [reconnectError, setReconnectError] = useState<{
+    id: string;
+    message: string;
+  } | null>(null);
+
   // Track previous running state for aria-live transition announcements.
   const prevRunningRef = useRef<Map<string, boolean>>(new Map());
   const [announcement, setAnnouncement] = useState("");
@@ -385,11 +394,17 @@ export function SessionList({
       if (s.project) params.project = s.project;
       if (multiServer && s.serverId) params.serverId = s.serverId;
 
+      setReconnectError(null);
       void Promise.resolve(onCreateSession(params))
         .then(() => {
           void Promise.resolve(onDeleteSession(s.id)).catch(() => {});
         })
-        .catch(() => {});
+        .catch((err: unknown) => {
+          setReconnectError({
+            id: s.id,
+            message: err instanceof Error ? err.message : "Reconnect failed",
+          });
+        });
     },
     [multiServer, onCreateSession, onDeleteSession],
   );
@@ -471,12 +486,22 @@ export function SessionList({
                 : "hover:bg-accent border-l-2 border-l-transparent",
             )}
           >
-            {/* Row select button */}
+            {/* Row select button. A dead session has no tmux process left to
+                attach to -- selecting it would just open a WS that the
+                gateway immediately rejects ("session does not exist"),
+                dumping an error into the pane. So a dead row's click
+                reconnects (same action as the "..." menu's Reconnect item)
+                instead of selecting. */}
             <button
               type="button"
               onClick={() => {
-                if (s.id !== activeSessionId) onSelectSession(s.id);
+                if (dead) {
+                  handleReconnect(s);
+                } else if (s.id !== activeSessionId) {
+                  onSelectSession(s.id);
+                }
               }}
+              title={dead ? "Reconnect" : undefined}
               className={cn(
                 "pointer-coarse:py-3 flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left",
                 collapsed ? "justify-center px-0" : "px-2.5",
@@ -525,10 +550,16 @@ export function SessionList({
                     )}
                   </div>
                   <span className="flex min-w-0 items-baseline gap-1.5 text-xs">
-                    {dead && (
-                      <span className="text-muted-foreground shrink-0 italic">
-                        session ended
+                    {dead && reconnectError?.id === s.id ? (
+                      <span className="text-destructive min-w-0 truncate">
+                        Reconnect failed: {reconnectError.message}
                       </span>
+                    ) : (
+                      dead && (
+                        <span className="text-muted-foreground shrink-0 italic">
+                          session ended
+                        </span>
+                      )
                     )}
                     {!dead && s.currentCommand && (
                       <span className="text-muted-foreground min-w-0 truncate font-mono">
@@ -678,6 +709,11 @@ export function SessionList({
                 This session&apos;s tmux process is no longer running (e.g. the
                 host rebooted). Delete to remove, or Reconnect to start a new
                 session with the same settings.
+                {reconnectError?.id === s.id && (
+                  <div className="text-destructive mt-1">
+                    Last attempt failed: {reconnectError.message}
+                  </div>
+                )}
               </div>
             ) : unreachable ? (
               <div className="max-w-56">
